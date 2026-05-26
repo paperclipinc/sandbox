@@ -21,7 +21,7 @@ spec:
       serviceAccountName: agent-run-controller
       containers:
         - name: controller
-          image: ghcr.io/agent-run/controller:latest
+          image: ghcr.io/paperclipinc/sandbox-controller:latest
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081

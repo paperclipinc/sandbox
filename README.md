@@ -1,8 +1,8 @@
-# agent-run
+# sandbox
 
 Sub-millisecond sandbox forking for AI agents on Kubernetes.
 
-agent-run gives your agents isolated, forkable compute environments with declarative volume management — backed by Firecracker microVMs and native k8s CRDs.
+`sandbox` gives your agents isolated, forkable compute environments with declarative volume management — backed by Firecracker microVMs and native k8s CRDs.
 
 ```bash
 # Create a pool of 10 pre-snapshotted Python sandboxes
@@ -37,7 +37,7 @@ Agent harnesses need fast, isolated environments where agents can read/write fil
 - **Agent Sandbox (k8s-sigs)** — k8s-native CRDs but no snapshot/fork story, 1-3s cold start
 - **Raw Firecracker/Kata** — powerful but you build everything yourself
 
-agent-run combines sub-millisecond Firecracker forking with k8s-native CRDs and per-volume fork policies. Self-hosted on any cluster with KVM support.
+`sandbox` combines sub-millisecond Firecracker forking with k8s-native CRDs and per-volume fork policies. Self-hosted on any cluster with KVM support.
 
 ## Features
 
@@ -122,8 +122,8 @@ agent-run combines sub-millisecond Firecracker forking with k8s-native CRDs and 
 ### Install
 
 ```bash
-helm repo add agent-run https://agent-run.dev/charts
-helm install agent-run agent-run/agent-run
+helm repo add paperclip https://paperclipinc.github.io/sandbox
+helm install sandbox paperclip/sandbox
 ```
 
 Or from source:
@@ -331,7 +331,7 @@ Each volume in a template has a `forkPolicy` that controls what happens when the
 
 ## Node setup
 
-agent-run requires nodes with KVM support (`/dev/kvm`).
+`sandbox` requires nodes with KVM support (`/dev/kvm`).
 
 ### AWS (EKS)
 
@@ -372,7 +372,7 @@ Prometheus metrics exposed by forkd at `/metrics`:
 
 ## Comparison
 
-| | agent-run | E2B | Zeroboot | Agent Sandbox | Daytona |
+| | sandbox | E2B | Zeroboot | Agent Sandbox | Daytona |
 |---|---|---|---|---|---|
 | Fork latency | ~0.8-2ms | ~150ms | ~0.8ms | ~1-3s | ~90ms |
 | Isolation | KVM microVM | Firecracker | KVM microVM | gVisor/Kata | Docker |

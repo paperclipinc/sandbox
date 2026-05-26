@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	v1alpha1 "github.com/agent-run/agent-run/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 )
 
 func TestHandlerForPolicy(t *testing.T) {

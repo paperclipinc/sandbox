@@ -1,4 +1,4 @@
-module github.com/agent-run/agent-run
+module github.com/paperclipinc/sandbox
 
 go 1.23
 

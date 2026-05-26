@@ -1,5 +1,5 @@
-IMG_CONTROLLER ?= ghcr.io/agent-run/controller:latest
-IMG_FORKD ?= ghcr.io/agent-run/forkd:latest
+IMG_CONTROLLER ?= ghcr.io/paperclipinc/sandbox-controller:latest
+IMG_FORKD ?= ghcr.io/paperclipinc/sandbox-forkd:latest
 
 .PHONY: all build test generate manifests docker-build docker-push install deploy
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	v1alpha1 "github.com/agent-run/agent-run/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 )
 
 // VolumeHandler applies fork policies to volumes during sandbox creation.

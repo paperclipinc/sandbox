@@ -4,8 +4,8 @@ import (
 	"flag"
 	"os"
 
-	v1alpha1 "github.com/agent-run/agent-run/api/v1alpha1"
-	"github.com/agent-run/agent-run/internal/controller"
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/controller"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/agent-run/agent-run/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"

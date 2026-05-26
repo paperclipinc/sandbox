@@ -35,7 +35,7 @@ spec:
 
       containers:
         - name: forkd
-          image: ghcr.io/agent-run/forkd:latest
+          image: ghcr.io/paperclipinc/sandbox-forkd:latest
           args:
             - --listen=:9090
             - --data-dir=/var/lib/agent-run

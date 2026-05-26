@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/agent-run/agent-run/internal/daemon"
-	"github.com/agent-run/agent-run/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/daemon"
+	"github.com/paperclipinc/sandbox/internal/fork"
 	"google.golang.org/grpc"
 )
 
