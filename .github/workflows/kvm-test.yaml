@@ -215,73 +215,8 @@ jobs:
           # Firecracker vsock UDS protocol: connect, send "CONNECT <port>\n", get "OK <port>\n"
           echo "Testing vsock connection to guest agent on port 52..."
 
-          # Use a Go test program to talk to the agent
-          cat > /tmp/test_agent.go << 'GOTEST'
-          package main
-
-          import (
-            "encoding/json"
-            "fmt"
-            "os"
-            "github.com/paperclipinc/sandbox/internal/vsock"
-          )
-
-          func main() {
-            udsPath := os.Args[1]
-
-            client, err := vsock.Connect(udsPath, vsock.AgentPort)
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "connect failed: %v\n", err)
-              os.Exit(1)
-            }
-            defer client.Close()
-
-            // Test ping
-            uptime, err := client.Ping()
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "ping failed: %v\n", err)
-              os.Exit(1)
-            }
-            fmt.Printf("PING OK: uptime=%.2fs\n", uptime)
-
-            // Test exec
-            result, err := client.Exec("echo hello from sandbox", "/workspace", nil, 10)
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "exec failed: %v\n", err)
-              os.Exit(1)
-            }
-            fmt.Printf("EXEC OK: exit_code=%d stdout=%q exec_time=%.2fms\n",
-              result.ExitCode, result.Stdout, result.ExecTimeMs)
-
-            // Test write + read file
-            err = client.WriteFile("/workspace/test.txt", []byte("hello sandbox"), 0644)
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "write failed: %v\n", err)
-              os.Exit(1)
-            }
-            content, err := client.ReadFile("/workspace/test.txt")
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "read failed: %v\n", err)
-              os.Exit(1)
-            }
-            fmt.Printf("FILE OK: wrote and read back %q\n", string(content))
-
-            // Test list dir
-            entries, err := client.ListDir("/workspace")
-            if err != nil {
-              fmt.Fprintf(os.Stderr, "listdir failed: %v\n", err)
-              os.Exit(1)
-            }
-            data, _ := json.Marshal(entries)
-            fmt.Printf("LIST OK: %s\n", string(data))
-
-            fmt.Println("")
-            fmt.Println("================================")
-            fmt.Println("  All guest agent tests passed!")
-            fmt.Println("================================")
-          }
-          GOTEST
-
-          go run /tmp/test_agent.go "$VSOCK_UDS"
+          # Build and run the test-agent binary
+          go build -o /tmp/test-agent ./cmd/test-agent/
+          /tmp/test-agent "$VSOCK_UDS"
 
           kill $FC_PID 2>/dev/null || true
