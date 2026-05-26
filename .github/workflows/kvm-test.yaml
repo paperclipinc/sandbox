@@ -196,6 +196,9 @@ jobs:
           echo "Rootfs built with agent + busybox"
           ls -lh $WORKDIR/rootfs.ext4
 
+          # Ensure KVM permissions after sudo operations
+          sudo chmod 666 /dev/kvm
+
           # Start Firecracker with vsock, capture serial output
           SOCK=$WORKDIR/firecracker.sock
           VSOCK_UDS=$WORKDIR/vsock.sock
