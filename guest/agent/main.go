@@ -279,11 +279,37 @@ func writeResponse(conn net.Conn, resp vsock.Response) {
 	conn.Write(append(data, '\n'))
 }
 
-// listenVsock creates a vsock listener.
-// On Linux with AF_VSOCK support, this uses the vsock address family.
-// Falls back to a Unix socket for testing.
+// vsockListener implements net.Listener using raw AF_VSOCK syscalls.
+// Go's net package doesn't understand AF_VSOCK, so we handle accept at
+// the syscall level and wrap each connection as a net.Conn via os.File.
+type vsockListener struct {
+	fd int
+}
+
+func (l *vsockListener) Accept() (net.Conn, error) {
+	nfd, _, err := unix.Accept(l.fd)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(nfd), "vsock-conn")
+	conn, err := net.FileConn(file)
+	file.Close() // FileConn dups the fd
+	if err != nil {
+		unix.Close(nfd)
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (l *vsockListener) Close() error {
+	return unix.Close(l.fd)
+}
+
+func (l *vsockListener) Addr() net.Addr {
+	return nil
+}
+
 func listenVsock(port int) (net.Listener, error) {
-	// Try AF_VSOCK first (inside Firecracker VM)
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err == nil {
 		addr := &unix.SockaddrVM{
@@ -298,14 +324,14 @@ func listenVsock(port int) (net.Listener, error) {
 			unix.Close(fd)
 			return nil, fmt.Errorf("vsock listen: %w", err)
 		}
-		file := os.NewFile(uintptr(fd), "vsock")
-		return net.FileListener(file)
+		fmt.Printf("sandbox-agent: listening on vsock CID=any port=%d\n", port)
+		return &vsockListener{fd: fd}, nil
 	}
 
 	// Fallback: Unix socket (for local testing outside a VM)
 	sockPath := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", port)
 	os.Remove(sockPath)
-	fmt.Printf("sandbox-agent: vsock not available, falling back to unix socket %s\n", sockPath)
+	fmt.Printf("sandbox-agent: vsock not available (%v), falling back to unix socket %s\n", err, sockPath)
 	return net.Listen("unix", sockPath)
 }
 
