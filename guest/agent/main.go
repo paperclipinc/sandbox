@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -291,15 +292,37 @@ func (l *vsockListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(nfd), "vsock-conn")
-	conn, err := net.FileConn(file)
-	file.Close() // FileConn dups the fd
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
-	}
-	return conn, nil
+	return &vsockConn{fd: nfd}, nil
 }
+
+// vsockConn wraps a raw vsock fd as net.Conn.
+// Go's net.FileConn doesn't understand AF_VSOCK, so we implement
+// Read/Write/Close directly on the fd.
+type vsockConn struct {
+	fd int
+}
+
+func (c *vsockConn) Read(b []byte) (int, error) {
+	n, err := unix.Read(c.fd, b)
+	if n == 0 && err == nil {
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+func (c *vsockConn) Write(b []byte) (int, error) {
+	return unix.Write(c.fd, b)
+}
+
+func (c *vsockConn) Close() error {
+	return unix.Close(c.fd)
+}
+
+func (c *vsockConn) LocalAddr() net.Addr                { return nil }
+func (c *vsockConn) RemoteAddr() net.Addr               { return nil }
+func (c *vsockConn) SetDeadline(t time.Time) error      { return nil }
+func (c *vsockConn) SetReadDeadline(t time.Time) error   { return nil }
+func (c *vsockConn) SetWriteDeadline(t time.Time) error  { return nil }
 
 func (l *vsockListener) Close() error {
 	return unix.Close(l.fd)
