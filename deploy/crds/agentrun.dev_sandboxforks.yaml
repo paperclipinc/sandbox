@@ -4,27 +4,30 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: sandboxpools.
+  name: sandboxforks.agentrun.dev
 spec:
-  group: ""
+  group: agentrun.dev
   names:
-    kind: SandboxPool
-    listKind: SandboxPoolList
-    plural: sandboxpools
-    singular: sandboxpool
+    kind: SandboxFork
+    listKind: SandboxForkList
+    plural: sandboxforks
+    singular: sandboxfork
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.readySnapshots
-      name: Ready
-      type: integer
+    - jsonPath: .spec.sourceRef.name
+      name: Source
+      type: string
     - jsonPath: .spec.replicas
-      name: Desired
+      name: Forks
+      type: integer
+    - jsonPath: .status.readyForks
+      name: Ready
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: ""
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
@@ -47,35 +50,43 @@ spec:
             type: object
           spec:
             properties:
+              pauseSource:
+                description: |-
+                  Whether to pause the source sandbox during checkpoint.
+                  Reduces checkpoint time but causes a brief interruption.
+                type: boolean
               replicas:
                 format: int32
                 type: integer
-              scaleDownAfterSnapshot:
-                description: Whether to scale down the source sandbox after snapshot.
-                type: boolean
-              snapshotAfter:
-                type: string
-              snapshotDelay:
-                description: |-
-                  Delay after the trigger condition before taking the snapshot.
-                  Allows init scripts to finish.
-                type: string
-              snapshotStorage:
-                description: Where to store snapshot artifacts on the node.
-                type: string
-              templateRef:
+              sourceRef:
                 properties:
                   name:
                     type: string
                 required:
                 - name
                 type: object
+              volumeOverrides:
+                description: Override fork policies for specific volumes.
+                items:
+                  properties:
+                    forkPolicy:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - forkPolicy
+                  - name
+                  type: object
+                type: array
             required:
             - replicas
-            - templateRef
+            - sourceRef
             type: object
           status:
             properties:
+              checkpointTime:
+                format: date-time
+                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -132,27 +143,39 @@ spec:
                   - type
                   type: object
                 type: array
-              lastSnapshotTime:
-                format: date-time
-                type: string
-              nodeDistribution:
-                additionalProperties:
-                  format: int32
-                  type: integer
-                type: object
-              readySnapshots:
+              forks:
+                items:
+                  properties:
+                    endpoint:
+                      type: string
+                    forkTimeMicros:
+                      format: int64
+                      type: integer
+                    name:
+                      type: string
+                    node:
+                      type: string
+                    phase:
+                      type: string
+                    sandboxID:
+                      type: string
+                  required:
+                  - endpoint
+                  - name
+                  - node
+                  - phase
+                  - sandboxID
+                  type: object
+                type: array
+              readyForks:
                 format: int32
                 type: integer
-              restoringCount:
-                format: int32
-                type: integer
-              totalSnapshots:
+              totalForks:
                 format: int32
                 type: integer
             required:
-            - readySnapshots
-            - restoringCount
-            - totalSnapshots
+            - readyForks
+            - totalForks
             type: object
         required:
         - spec
@@ -160,7 +183,4 @@ spec:
     served: true
     storage: true
     subresources:
-      scale:
-        specReplicasPath: .spec.replicas
-        statusReplicasPath: .status.readySnapshots
       status: {}

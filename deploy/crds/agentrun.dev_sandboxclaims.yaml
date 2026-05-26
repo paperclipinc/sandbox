@@ -4,24 +4,30 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: sandboxtemplates.
+  name: sandboxclaims.agentrun.dev
 spec:
-  group: ""
+  group: agentrun.dev
   names:
-    kind: SandboxTemplate
-    listKind: SandboxTemplateList
-    plural: sandboxtemplates
-    singular: sandboxtemplate
+    kind: SandboxClaim
+    listKind: SandboxClaimList
+    plural: sandboxclaims
+    singular: sandboxclaim
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.image
-      name: Image
+    - jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .status.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .status.node
+      name: Node
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    name: ""
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
@@ -44,10 +50,6 @@ spec:
             type: object
           spec:
             properties:
-              command:
-                items:
-                  type: string
-                type: array
               env:
                 items:
                   description: EnvVar represents an environment variable present in
@@ -165,103 +167,146 @@ spec:
                   - name
                   type: object
                 type: array
-              image:
+              nodeName:
+                description: Node preference. Empty means any node with capacity.
                 type: string
-              init:
-                items:
-                  type: string
-                type: array
-              networkPolicy:
+              poolRef:
                 properties:
-                  allow:
-                    items:
-                      type: string
-                    type: array
-                  egress:
+                  name:
                     type: string
+                required:
+                - name
                 type: object
-              resources:
-                properties:
-                  cpu:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  memory:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                type: object
-              volumes:
+              secrets:
                 items:
                   properties:
-                    forkPolicy:
+                    envVar:
                       type: string
                     mountPath:
                       type: string
                     name:
                       type: string
-                    readOnly:
-                      type: boolean
-                    size:
-                      type: string
-                    snapshotClass:
-                      description: 'For Snapshot fork policy: the CSI snapshot class
-                        to use'
-                      type: string
-                    source:
+                    secretRef:
+                      description: SecretKeySelector selects a key of a Secret.
                       properties:
-                        gcs:
-                          properties:
-                            bucket:
-                              type: string
-                            prefix:
-                              type: string
-                          required:
-                          - bucket
-                          type: object
-                        git:
-                          properties:
-                            branch:
-                              type: string
-                            ref:
-                              type: string
-                            repo:
-                              type: string
-                          required:
-                          - repo
-                          type: object
-                        pvc:
-                          properties:
-                            claimName:
-                              type: string
-                          required:
-                          - claimName
-                          type: object
-                        s3:
-                          properties:
-                            bucket:
-                              type: string
-                            prefix:
-                              type: string
-                            region:
-                              type: string
-                          required:
-                          - bucket
-                          type: object
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or its key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
                       type: object
-                    storageClass:
-                      description: 'For persistent volumes: the storage class'
+                      x-kubernetes-map-type: atomic
+                  required:
+                  - name
+                  - secretRef
+                  type: object
+                type: array
+              timeout:
+                description: Maximum wall-clock time for this sandbox. Zero means
+                  no limit.
+                type: string
+              volumeOverrides:
+                description: Override fork policies for specific volumes on this claim.
+                items:
+                  properties:
+                    forkPolicy:
+                      type: string
+                    name:
                       type: string
                   required:
+                  - forkPolicy
                   - name
                   type: object
                 type: array
             required:
-            - image
+            - poolRef
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              endpoint:
+                type: string
+              forkTimeMicros:
+                format: int64
+                type: integer
+              node:
+                type: string
+              phase:
+                type: string
+              sandboxID:
+                type: string
+              startedAt:
+                format: date-time
+                type: string
             type: object
         required:
         - spec
