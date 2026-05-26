@@ -34,12 +34,43 @@ jobs:
       - name: Download kernel and rootfs
         run: |
           mkdir -p /tmp/agent-run-test
-          # Download a minimal kernel for Firecracker
+          ARCH=$(uname -m)
+
+          # Determine CI version from latest Firecracker release
+          FC_VERSION=v1.15.0
+          CI_VERSION=$(echo $FC_VERSION | sed 's/v//' | cut -d. -f1-2)
+
+          # Find latest kernel in S3
+          KERNEL_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-" \
+            | grep -oE "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9.]+" \
+            | sort -V | tail -1)
+          echo "Downloading kernel: $KERNEL_KEY"
           curl -fsSL -o /tmp/agent-run-test/vmlinux \
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.102"
-          # Download minimal rootfs
-          curl -fsSL -o /tmp/agent-run-test/rootfs.ext4 \
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/ubuntu-24.04.ext4"
+            "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
+
+          # Find latest rootfs in S3
+          ROOTFS_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/ubuntu-" \
+            | grep -oE "firecracker-ci/v${CI_VERSION}/${ARCH}/ubuntu-[0-9.]+\.(ext4|squashfs)" \
+            | sort -V | tail -1)
+          echo "Downloading rootfs: $ROOTFS_KEY"
+
+          # If squashfs, convert to ext4; if ext4, use directly
+          if echo "$ROOTFS_KEY" | grep -q squashfs; then
+            curl -fsSL -o /tmp/agent-run-test/rootfs.squashfs \
+              "https://s3.amazonaws.com/spec.ccfc.min/${ROOTFS_KEY}"
+            sudo apt-get install -y squashfs-tools
+            sudo unsquashfs -d /tmp/rootfs-mount /tmp/agent-run-test/rootfs.squashfs
+            dd if=/dev/zero of=/tmp/agent-run-test/rootfs.ext4 bs=1M count=512
+            mkfs.ext4 /tmp/agent-run-test/rootfs.ext4
+            mkdir -p /tmp/rootfs-ext4
+            sudo mount /tmp/agent-run-test/rootfs.ext4 /tmp/rootfs-ext4
+            sudo cp -a /tmp/rootfs-mount/* /tmp/rootfs-ext4/
+            sudo umount /tmp/rootfs-ext4
+          else
+            curl -fsSL -o /tmp/agent-run-test/rootfs.ext4 \
+              "https://s3.amazonaws.com/spec.ccfc.min/${ROOTFS_KEY}"
+          fi
+
           ls -lh /tmp/agent-run-test/
 
       - uses: actions/setup-go@v5
