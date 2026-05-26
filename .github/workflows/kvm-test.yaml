@@ -165,24 +165,41 @@ jobs:
           ls -lh /tmp/agent-run-test/agent
 
       - name: Inject agent into rootfs and test exec via vsock
+        timeout-minutes: 5
         run: |
           set -e
           WORKDIR=/tmp/agent-run-test/agent-test
           mkdir -p $WORKDIR
 
-          # Mount the rootfs and inject the agent as /init
-          cp /tmp/agent-run-test/rootfs.ext4 $WORKDIR/rootfs.ext4
+          # Build a fresh ext4 rootfs with the agent as /init
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+
+          # Minimal filesystem
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc}
           sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
-          sudo mkdir -p $WORKDIR/mnt/workspace
+
+          # Need /bin/sh for exec — get busybox
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh echo cat ls mkdir rm cp; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
           sudo umount $WORKDIR/mnt
 
-          # Start Firecracker with vsock
+          echo "Rootfs built with agent + busybox"
+          ls -lh $WORKDIR/rootfs.ext4
+
+          # Start Firecracker with vsock, capture serial output
           SOCK=$WORKDIR/firecracker.sock
           VSOCK_UDS=$WORKDIR/vsock.sock
-          /usr/local/bin/firecracker --api-sock $SOCK &
+          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/serial.log 2>&1 &
           FC_PID=$!
           sleep 1
 
@@ -209,14 +226,21 @@ jobs:
             -d '{"action_type": "InstanceStart"}'
 
           echo "VM booted with guest agent, waiting for agent to start..."
-          sleep 5
+          sleep 8
 
-          # Test: connect to agent via vsock and send a ping
-          # Firecracker vsock UDS protocol: connect, send "CONNECT <port>\n", get "OK <port>\n"
+          echo "=== Serial console output ==="
+          cat $WORKDIR/serial.log || true
+          echo "=== End serial output ==="
+
+          echo "Checking vsock UDS exists..."
+          ls -la $VSOCK_UDS || echo "WARNING: vsock UDS not found"
+
           echo "Testing vsock connection to guest agent on port 52..."
-
-          # Build and run the test-agent binary
           go build -o /tmp/test-agent ./cmd/test-agent/
-          /tmp/test-agent "$VSOCK_UDS"
+          timeout 30 /tmp/test-agent "$VSOCK_UDS" || {
+            echo "=== FAILURE: serial log ==="
+            cat $WORKDIR/serial.log || true
+            exit 1
+          }
 
           kill $FC_PID 2>/dev/null || true

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -21,9 +22,19 @@ func main() {
 	}
 	udsPath := os.Args[1]
 
-	client, err := vsock.Connect(udsPath, vsock.AgentPort)
+	// Retry connection with timeout — guest agent may take a few seconds to start
+	var client *vsock.Client
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		client, err = vsock.Connect(udsPath, vsock.AgentPort)
+		if err == nil {
+			break
+		}
+		fmt.Printf("connect attempt %d failed: %v (retrying in 2s)\n", attempt+1, err)
+		time.Sleep(2 * time.Second)
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "connect failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "connect failed after 10 attempts: %v\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
