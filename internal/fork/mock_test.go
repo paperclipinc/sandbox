@@ -10,7 +10,7 @@ import (
 func TestMockEngine_CreateTemplate(t *testing.T) {
 	engine := NewMockEngine()
 
-	if err := engine.CreateTemplate("python", "python:3.12-slim"); err != nil {
+	if err := engine.CreateTemplate("python", "python:3.12-slim", 0); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
@@ -22,7 +22,7 @@ func TestMockEngine_CreateTemplate(t *testing.T) {
 
 func TestMockEngine_Fork(t *testing.T) {
 	engine := NewMockEngine()
-	engine.CreateTemplate("python", "python:3.12-slim")
+	engine.CreateTemplate("python", "python:3.12-slim", 0)
 
 	result, err := engine.Fork("python", "sandbox-1", ForkOpts{})
 	if err != nil {
@@ -59,7 +59,7 @@ func TestMockEngine_ForkUnknownSnapshot(t *testing.T) {
 
 func TestMockEngine_Terminate(t *testing.T) {
 	engine := NewMockEngine()
-	engine.CreateTemplate("python", "python:3.12-slim")
+	engine.CreateTemplate("python", "python:3.12-slim", 0)
 	engine.Fork("python", "sandbox-1", ForkOpts{})
 
 	if err := engine.Terminate("sandbox-1"); err != nil {
@@ -83,7 +83,7 @@ func TestMockEngine_TerminateUnknown(t *testing.T) {
 func TestMockEngine_ConcurrentForks(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 0
-	engine.CreateTemplate("python", "python:3.12-slim")
+	engine.CreateTemplate("python", "python:3.12-slim", 0)
 
 	const n = 100
 	var wg sync.WaitGroup
@@ -117,7 +117,7 @@ func TestMockEngine_ConcurrentForks(t *testing.T) {
 func TestMockEngine_ForkLatency(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 500 * time.Microsecond
-	engine.CreateTemplate("python", "python:3.12-slim")
+	engine.CreateTemplate("python", "python:3.12-slim", 0)
 
 	result, err := engine.Fork("python", "sandbox-1", ForkOpts{})
 	if err != nil {
@@ -132,7 +132,7 @@ func TestMockEngine_ForkLatency(t *testing.T) {
 func TestMockEngine_MemoryAccounting(t *testing.T) {
 	engine := NewMockEngine()
 	engine.ForkDelay = 0
-	engine.CreateTemplate("python", "python:3.12-slim")
+	engine.CreateTemplate("python", "python:3.12-slim", 0)
 
 	for i := 0; i < 10; i++ {
 		engine.Fork("python", "sandbox-"+string(rune('0'+i)), ForkOpts{})

@@ -63,16 +63,17 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 		ForkTimeMs:   float64(elapsed.Microseconds()) / 1000.0,
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
+		VsockPath:    fmt.Sprintf("/tmp/agent-run-mock/sandboxes/%s/vsock.sock", sandboxID),
 	}, nil
 }
 
-func (e *MockEngine) CreateTemplate(id, image string) error {
+func (e *MockEngine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.templates[id] = &Template{
 		ID:          id,
-		Image:       image,
+		Image:       rootfsPath,
 		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", id),
 		CreatedAt:   time.Now(),
 		Ready:       true,

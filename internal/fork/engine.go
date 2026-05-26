@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"golang.org/x/sys/unix"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
 type Engine struct {
@@ -34,17 +34,17 @@ type Template struct {
 }
 
 type Sandbox struct {
-	ID            string
-	TemplateID    string
-	SnapshotID    string
-	KVMFD         int
-	Endpoint      string
-	Pid           int
-	MemoryMap     []byte
-	CreatedAt     time.Time
-	MemoryUnique  int64
-	MemoryShared  int64
-	fcClient      *firecracker.Client
+	ID           string
+	TemplateID   string
+	SnapshotID   string
+	Endpoint     string
+	Pid          int
+	CreatedAt    time.Time
+	MemoryUnique int64
+	MemoryShared int64
+	fcClient     *firecracker.Client
+	agentClient  *vsock.Client
+	VsockPath    string
 }
 
 type ForkResult struct {
@@ -53,6 +53,7 @@ type ForkResult struct {
 	ForkTimeMs   float64
 	MemoryUnique int64
 	MemoryShared int64
+	VsockPath    string
 }
 
 func NewEngine(dataDir, firecrackerBin, kernelPath string) (*Engine, error) {
@@ -80,8 +81,11 @@ func validateKVM() error {
 	return nil
 }
 
-// Fork creates a new sandbox from a snapshot using CoW memory mapping.
-// This is the hot path — target is <2ms.
+// Fork creates a new sandbox from a snapshot.
+//
+// Firecracker loads the snapshot memory lazily via mmap — pages are faulted in
+// on demand and shared (CoW) across all VMs restored from the same snapshot.
+// This is the hot path — target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
 	start := time.Now()
 
@@ -93,71 +97,37 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 		return nil, fmt.Errorf("snapshot %s not found: %w", snapshotID, err)
 	}
 
-	// 1. Memory-map the snapshot file with MAP_PRIVATE (CoW).
-	// All forks share the same physical pages until they diverge.
-	fd, err := unix.Open(memFile, unix.O_RDONLY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open snapshot memory: %w", err)
-	}
-
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("stat snapshot memory: %w", err)
-	}
-
-	memMap, err := unix.Mmap(fd, 0, int(stat.Size),
-		unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_PRIVATE)
-	if err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("mmap snapshot: %w", err)
-	}
-	unix.Close(fd)
-
-	// 2. Start a new Firecracker process and load the snapshot.
+	// Create sandbox working directory
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
-		unix.Munmap(memMap)
 		return nil, fmt.Errorf("create sandbox dir: %w", err)
 	}
 
-	// Write the CoW memory to a temporary file for Firecracker to load
-	cowMemFile := filepath.Join(sandboxDir, "mem")
-	if err := os.WriteFile(cowMemFile, memMap, 0600); err != nil {
-		unix.Munmap(memMap)
-		return nil, fmt.Errorf("write cow mem: %w", err)
-	}
+	// Firecracker loads the snapshot mem file via mmap(MAP_PRIVATE) internally.
+	// We don't need to mmap it ourselves — just point Firecracker at the
+	// original snapshot file. Each FC process gets its own CoW mapping.
 
-	// Copy vmstate
-	vmStateData, err := os.ReadFile(vmStateFile)
-	if err != nil {
-		unix.Munmap(memMap)
-		return nil, fmt.Errorf("read vmstate: %w", err)
-	}
-	cowVMState := filepath.Join(sandboxDir, "vmstate")
-	if err := os.WriteFile(cowVMState, vmStateData, 0600); err != nil {
-		unix.Munmap(memMap)
-		return nil, fmt.Errorf("write cow vmstate: %w", err)
-	}
-
+	// Start a new Firecracker process
+	vsockPath := filepath.Join(sandboxDir, "vsock.sock")
 	fcClient, err := firecracker.StartVM(firecracker.VMConfig{
 		ID:             sandboxID,
 		FirecrackerBin: e.firecrackerBin,
 		WorkDir:        sandboxDir,
+		SocketPath:     filepath.Join(sandboxDir, "firecracker.sock"),
 	})
 	if err != nil {
-		unix.Munmap(memMap)
 		return nil, fmt.Errorf("start firecracker: %w", err)
 	}
 
-	if err := fcClient.LoadSnapshot(cowMemFile, cowVMState, true); err != nil {
+	// Load snapshot — Firecracker mmaps the mem file with MAP_PRIVATE
+	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {
 		fcClient.Kill()
-		unix.Munmap(memMap)
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
 
-	// 3. Determine endpoint
+	elapsed := time.Since(start)
+
+	// Determine endpoint
 	e.mu.Lock()
 	port := e.nextPort
 	e.nextPort++
@@ -169,19 +139,16 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 		SnapshotID: snapshotID,
 		Endpoint:   endpoint,
 		Pid:        fcClient.PID(),
-		MemoryMap:  memMap,
 		CreatedAt:  time.Now(),
 		fcClient:   fcClient,
+		VsockPath:  vsockPath,
 	}
 
-	// 4. Read memory stats
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
 
 	e.mu.Lock()
 	e.sandboxes[sandboxID] = sandbox
 	e.mu.Unlock()
-
-	elapsed := time.Since(start)
 
 	return &ForkResult{
 		SandboxID:    sandboxID,
@@ -189,6 +156,7 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 		ForkTimeMs:   float64(elapsed.Microseconds()) / 1000.0,
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
+		VsockPath:    vsockPath,
 	}, nil
 }
 
@@ -214,17 +182,30 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		return nil, fmt.Errorf("create checkpoint dir: %w", err)
 	}
 
-	memFile := filepath.Join(checkpointDir, "mem")
-	vmStateFile := filepath.Join(checkpointDir, "vmstate")
-
 	if source.fcClient != nil {
+		memFile := filepath.Join(checkpointDir, "mem")
+		vmStateFile := filepath.Join(checkpointDir, "vmstate")
 		if err := source.fcClient.CreateSnapshot(memFile, vmStateFile); err != nil {
 			return nil, fmt.Errorf("checkpoint: %w", err)
 		}
 	}
 
-	// Fork from the checkpoint using the standard fork path
-	return e.Fork(sourceSandboxID, newSandboxID, ForkOpts{})
+	// Create a temporary "template" from the checkpoint so Fork can find it
+	tmpTemplateDir := filepath.Join(e.dataDir, "templates", sourceSandboxID+"-live")
+	os.MkdirAll(filepath.Join(tmpTemplateDir, "snapshot"), 0755)
+
+	// Symlink the checkpoint files as a snapshot
+	os.Symlink(
+		filepath.Join(checkpointDir, "mem"),
+		filepath.Join(tmpTemplateDir, "snapshot", "mem"),
+	)
+	os.Symlink(
+		filepath.Join(checkpointDir, "vmstate"),
+		filepath.Join(tmpTemplateDir, "snapshot", "vmstate"),
+	)
+	defer os.RemoveAll(tmpTemplateDir)
+
+	return e.Fork(sourceSandboxID+"-live", newSandboxID, ForkOpts{})
 }
 
 // Terminate kills a sandbox and releases its resources.
@@ -238,14 +219,13 @@ func (e *Engine) Terminate(sandboxID string) error {
 	delete(e.sandboxes, sandboxID)
 	e.mu.Unlock()
 
+	if sandbox.agentClient != nil {
+		sandbox.agentClient.Close()
+	}
 	if sandbox.fcClient != nil {
 		sandbox.fcClient.Kill()
 	}
-	if sandbox.MemoryMap != nil {
-		unix.Munmap(sandbox.MemoryMap)
-	}
 
-	// Clean up sandbox directory
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
 	os.RemoveAll(sandboxDir)
 
@@ -274,6 +254,14 @@ func (e *Engine) GetCapacity() Capacity {
 	}
 }
 
+// CreateTemplate boots a VM, runs init, snapshots it.
+func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
+	cfg := firecracker.DefaultVMConfig()
+	cfg.RootfsPath = rootfsPath
+	_, err := e.templateMgr.CreateTemplate(id, cfg, initWaitSecs)
+	return err
+}
+
 type Capacity struct {
 	ActiveSandboxes int32
 	MaxSandboxes    int32
@@ -296,7 +284,6 @@ type NetworkOpts struct {
 	AllowList    []string
 }
 
-// readMemoryStats reads /proc/<pid>/smaps_rollup to determine unique vs shared pages.
 func readMemoryStats(pid int) (unique, shared int64) {
 	if pid <= 0 {
 		return 0, 0
