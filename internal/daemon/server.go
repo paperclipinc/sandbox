@@ -36,34 +36,29 @@ func init() {
 }
 
 type Server struct {
-	engine ForkEngine
+	engine     ForkEngine
+	sandboxAPI *SandboxAPI
 }
 
-func NewServer(engine ForkEngine) *Server {
-	return &Server{engine: engine}
+func NewServer(engine ForkEngine, sandboxAPI *SandboxAPI) *Server {
+	return &Server{engine: engine, sandboxAPI: sandboxAPI}
 }
 
 // RegisterForkDaemonServer registers the gRPC service.
-// In production this would be generated from proto/forkd.proto.
 func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
 	// TODO: register generated protobuf service
 	_ = s
 	_ = srv
 }
 
-// ServeMetrics starts the Prometheus metrics HTTP server.
-func ServeMetrics(addr string, engine ForkEngine) {
-	go func() {
-		for {
-			cap := engine.GetCapacity()
-			activeSandboxes.Set(float64(cap.ActiveSandboxes))
-			memoryShared.Set(float64(cap.MemoryShared))
-			memoryUnique.Set(float64(cap.MemoryUsed - cap.MemoryShared))
-		}
-	}()
-
+// ServeHTTP starts the HTTP server for metrics, health, and sandbox API.
+func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	mux := http.NewServeMux()
+
+	// Metrics
 	mux.Handle("/metrics", promhttp.Handler())
+
+	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		cap := engine.GetCapacity()
@@ -73,6 +68,10 @@ func ServeMetrics(addr string, engine ForkEngine) {
 			fmt.Fprint(w, "ok (mock)")
 		}
 	})
+
+	// Sandbox exec/files API — this is what the SDK talks to
+	apiHandler := sandboxAPI.Handler()
+	mux.Handle("/v1/", apiHandler)
 
 	http.ListenAndServe(addr, mux)
 }
@@ -90,14 +89,28 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
+	// Connect to the guest agent so exec/files work
+	vsockPath := fmt.Sprintf("/var/lib/agent-run/sandboxes/%s/vsock.sock", sandboxID)
+	s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath)
+
 	return result, nil
 }
 
 // Terminate handles a sandbox termination request.
 func (s *Server) Terminate(ctx context.Context, sandboxID string) error {
+	s.sandboxAPI.UnregisterSandbox(sandboxID)
+
 	if err := s.engine.Terminate(sandboxID); err != nil {
 		return err
 	}
 	activeSandboxes.Dec()
 	return nil
+}
+
+// UpdateMetrics refreshes capacity metrics.
+func (s *Server) UpdateMetrics() {
+	cap := s.engine.GetCapacity()
+	activeSandboxes.Set(float64(cap.ActiveSandboxes))
+	memoryShared.Set(float64(cap.MemoryShared))
+	memoryUnique.Set(float64(cap.MemoryUsed - cap.MemoryShared))
 }

@@ -73,6 +73,11 @@ class SandboxServer:
         resp.raise_for_status()
         return resp.json()
 
+    def list_templates(self) -> list[dict]:
+        resp = self._http.get(f"{self.url}/v1/templates")
+        resp.raise_for_status()
+        return resp.json()
+
     def create_template(self, id: str, init_wait_seconds: int = 5) -> dict:
         resp = self._http.post(
             f"{self.url}/v1/templates",
