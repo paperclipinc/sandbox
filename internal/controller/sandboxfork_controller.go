@@ -93,7 +93,7 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Endpoint:   result.Endpoint,
 			Node:       node.Name,
 			Phase:      v1alpha1.SandboxReady,
-			ForkTimeMs: result.ForkTimeMs,
+			ForkTimeMicros: int64(result.ForkTimeMs * 1000),
 		})
 		fork.Status.ReadyForks++
 		fork.Status.TotalForks++

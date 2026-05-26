@@ -211,13 +211,13 @@ const (
 )
 
 type SandboxClaimStatus struct {
-	Phase      SandboxPhase       `json:"phase,omitempty"`
-	Endpoint   string             `json:"endpoint,omitempty"`
-	Node       string             `json:"node,omitempty"`
-	SandboxID  string             `json:"sandboxID,omitempty"`
-	ForkTimeMs float64            `json:"forkTimeMs,omitempty"`
-	StartedAt  *metav1.Time       `json:"startedAt,omitempty"`
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Phase          SandboxPhase       `json:"phase,omitempty"`
+	Endpoint       string             `json:"endpoint,omitempty"`
+	Node           string             `json:"node,omitempty"`
+	SandboxID      string             `json:"sandboxID,omitempty"`
+	ForkTimeMicros int64              `json:"forkTimeMicros,omitempty"`
+	StartedAt      *metav1.Time       `json:"startedAt,omitempty"`
+	Conditions     []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -256,12 +256,12 @@ type SandboxForkSpec struct {
 }
 
 type ForkInfo struct {
-	Name       string       `json:"name"`
-	SandboxID  string       `json:"sandboxID"`
-	Endpoint   string       `json:"endpoint"`
-	Node       string       `json:"node"`
-	Phase      SandboxPhase `json:"phase"`
-	ForkTimeMs float64      `json:"forkTimeMs,omitempty"`
+	Name           string       `json:"name"`
+	SandboxID      string       `json:"sandboxID"`
+	Endpoint       string       `json:"endpoint"`
+	Node           string       `json:"node"`
+	Phase          SandboxPhase `json:"phase"`
+	ForkTimeMicros int64        `json:"forkTimeMicros,omitempty"`
 }
 
 type SandboxForkStatus struct {

@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/workspace"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -104,7 +105,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim.Status.Endpoint = result.Endpoint
 	claim.Status.Node = node.Name
 	claim.Status.SandboxID = result.SandboxID
-	claim.Status.ForkTimeMs = result.ForkTimeMs
+	claim.Status.ForkTimeMicros = int64(result.ForkTimeMs * 1000)
 	claim.Status.StartedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -179,7 +180,7 @@ func (r *SandboxClaimReconciler) prepareVolumes(ctx context.Context, templateVol
 	return prepared, nil
 }
 
-func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []v1alpha1.EnvVar, secrets []v1alpha1.SecretMount) (map[string]string, error) {
+func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (map[string]string, error) {
 	result := make(map[string]string)
 	// TODO: resolve k8s secrets and merge with env vars
 	return result, nil
