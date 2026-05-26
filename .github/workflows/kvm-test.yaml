@@ -1,0 +1,129 @@
+name: KVM Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/firecracker/**'
+      - 'internal/fork/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  firecracker-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check KVM availability
+        run: |
+          ls -la /dev/kvm
+          grep -cE '(vmx|svm)' /proc/cpuinfo
+
+      - name: Install Firecracker
+        run: |
+          FC_VERSION=v1.15.0
+          curl -fsSL -o /tmp/fc.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf /tmp/fc.tgz -C /tmp
+          sudo mv "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker
+          sudo chmod +x /usr/local/bin/firecracker
+          firecracker --version
+
+      - name: Download kernel and rootfs
+        run: |
+          mkdir -p /tmp/agent-run-test
+          # Download a minimal kernel for Firecracker
+          curl -fsSL -o /tmp/agent-run-test/vmlinux \
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.102"
+          # Download minimal rootfs
+          curl -fsSL -o /tmp/agent-run-test/rootfs.ext4 \
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/ubuntu-24.04.ext4"
+          ls -lh /tmp/agent-run-test/
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run unit tests
+        run: go test ./internal/fork/... ./internal/workspace/... -v
+
+      - name: Test Firecracker snapshot create/restore
+        run: |
+          set -e
+
+          WORKDIR=/tmp/agent-run-test/fc-test
+          mkdir -p $WORKDIR
+
+          # Copy rootfs (Firecracker needs a writable copy)
+          cp /tmp/agent-run-test/rootfs.ext4 $WORKDIR/rootfs.ext4
+
+          # Start Firecracker
+          SOCK=$WORKDIR/firecracker.sock
+          /usr/local/bin/firecracker --api-sock $SOCK &
+          FC_PID=$!
+          sleep 1
+
+          # Configure VM
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off\"}"
+
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+
+          # Boot
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "VM booted, waiting for init..."
+          sleep 5
+
+          # Pause
+          curl --unix-socket $SOCK -X PATCH 'http://localhost/vm' \
+            -H 'Content-Type: application/json' \
+            -d '{"state": "Paused"}'
+
+          # Snapshot
+          mkdir -p $WORKDIR/snapshot
+          curl --unix-socket $SOCK -X PUT 'http://localhost/snapshot/create' \
+            -H 'Content-Type: application/json' \
+            -d "{\"snapshot_type\": \"Full\", \"snapshot_path\": \"$WORKDIR/snapshot/vmstate\", \"mem_file_path\": \"$WORKDIR/snapshot/mem\"}"
+
+          echo "Snapshot created:"
+          ls -lh $WORKDIR/snapshot/
+
+          # Kill source VM
+          kill $FC_PID 2>/dev/null || true
+          sleep 1
+
+          # Restore from snapshot in a new Firecracker process
+          SOCK2=$WORKDIR/firecracker2.sock
+          /usr/local/bin/firecracker --api-sock $SOCK2 &
+          FC_PID2=$!
+          sleep 1
+
+          START_TIME=$(date +%s%N)
+
+          curl --unix-socket $SOCK2 -X PUT 'http://localhost/snapshot/load' \
+            -H 'Content-Type: application/json' \
+            -d "{\"snapshot_path\": \"$WORKDIR/snapshot/vmstate\", \"mem_file_path\": \"$WORKDIR/snapshot/mem\", \"enable_diff_snapshots\": false, \"resume_vm\": true}"
+
+          END_TIME=$(date +%s%N)
+          ELAPSED_MS=$(( (END_TIME - START_TIME) / 1000000 ))
+
+          echo ""
+          echo "================================"
+          echo "  Snapshot restore: ${ELAPSED_MS}ms"
+          echo "================================"
+
+          # Clean up
+          kill $FC_PID2 2>/dev/null || true
+          echo "Firecracker snapshot create/restore test passed"
