@@ -40,9 +40,9 @@ jobs:
           FC_VERSION=v1.15.0
           CI_VERSION=$(echo $FC_VERSION | sed 's/v//' | cut -d. -f1-2)
 
-          # Find latest kernel in S3
+          # Find latest kernel in S3 (strip trailing dots from XML parsing)
           KERNEL_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-" \
-            | grep -oE "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9.]+" \
+            | grep -oP "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]+" \
             | sort -V | tail -1)
           echo "Downloading kernel: $KERNEL_KEY"
           curl -fsSL -o /tmp/agent-run-test/vmlinux \
@@ -50,7 +50,7 @@ jobs:
 
           # Find latest rootfs in S3
           ROOTFS_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/ubuntu-" \
-            | grep -oE "firecracker-ci/v${CI_VERSION}/${ARCH}/ubuntu-[0-9.]+\.(ext4|squashfs)" \
+            | grep -oP "firecracker-ci/v${CI_VERSION}/${ARCH}/ubuntu-[0-9.]+\.(ext4|squashfs)(?=<)" \
             | sort -V | tail -1)
           echo "Downloading rootfs: $ROOTFS_KEY"
 
