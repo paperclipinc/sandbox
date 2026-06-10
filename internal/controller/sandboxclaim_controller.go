@@ -212,11 +212,6 @@ func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace s
 	return result, nil
 }
 
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env map[string]string) (*forkResult, error) {
-	// Call forkd.Fork() via gRPC on the target node
-	return nil, fmt.Errorf("not implemented")
-}
-
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.SandboxClaim{}).

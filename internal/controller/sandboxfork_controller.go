@@ -152,11 +152,6 @@ type forkRunningResult struct {
 	CheckpointMs   float64
 }
 
-func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool) (*forkRunningResult, error) {
-	// Call forkd.ForkRunning() via gRPC on the target node
-	return nil, fmt.Errorf("not implemented")
-}
-
 func (r *SandboxForkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.SandboxFork{}).
