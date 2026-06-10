@@ -137,5 +137,6 @@ func grpcServerOptions(certPath, keyPath, caPath string) ([]grpc.ServerOption, e
 	return []grpc.ServerOption{
 		grpc.Creds(credentials.NewTLS(cfg)),
 		grpc.UnaryInterceptor(daemon.RequireControllerIdentity),
+		grpc.StreamInterceptor(daemon.RequireControllerIdentityStream),
 	}, nil
 }

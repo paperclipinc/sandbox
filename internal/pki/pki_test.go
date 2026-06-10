@@ -1,9 +1,16 @@
 package pki
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"testing"
+
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
 
 func TestIssueAndVerifyRoundTrip(t *testing.T) {
@@ -94,5 +101,104 @@ func TestIssueRejectsUnknownName(t *testing.T) {
 	ca, _ := NewCA("agent-run")
 	if _, err := ca.Issue("imposter.agent-run"); err == nil {
 		t.Fatal("expected issuance restricted to known identities")
+	}
+}
+
+func parseLeafCert(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no PEM block in leaf cert")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func TestIssueSplitsExtKeyUsagePerIdentity(t *testing.T) {
+	ca, err := NewCA("agent-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := ca.Issue(ServerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := ca.Issue(ControllerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverCert := parseLeafCert(t, server.CertPEM)
+	if len(serverCert.ExtKeyUsage) != 1 || serverCert.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Fatalf("server leaf ExtKeyUsage = %v, want exactly [ServerAuth]", serverCert.ExtKeyUsage)
+	}
+
+	controllerCert := parseLeafCert(t, controller.CertPEM)
+	if len(controllerCert.ExtKeyUsage) != 1 || controllerCert.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+		t.Fatalf("controller leaf ExtKeyUsage = %v, want exactly [ClientAuth]", controllerCert.ExtKeyUsage)
+	}
+}
+
+func TestPeerDNSNameIgnoresUnverifiedPeerCertificates(t *testing.T) {
+	ca, err := NewCA("agent-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := ca.Issue(ControllerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := parseLeafCert(t, controller.CertPEM)
+
+	// A peer that presented a certificate which was never verified
+	// against the CA must not be granted an identity.
+	ctx := peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{leaf},
+			},
+		},
+	})
+	if name, ok := PeerDNSName(ctx); ok {
+		t.Fatalf("PeerDNSName = %q from an unverified certificate, want no identity", name)
+	}
+
+	// The same certificate in VerifiedChains is an identity.
+	ctx = peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{leaf},
+				VerifiedChains:   [][]*x509.Certificate{{leaf}},
+			},
+		},
+	})
+	name, ok := PeerDNSName(ctx)
+	if !ok || name != ControllerName {
+		t.Fatalf("PeerDNSName = (%q, %v), want (%q, true)", name, ok, ControllerName)
+	}
+}
+
+func TestKeyPEMSurvivesLoadCARoundTrip(t *testing.T) {
+	ca, err := NewCA("agent-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := ca.KeyPEM()
+	if len(keyPEM) == 0 {
+		t.Fatal("NewCA returned a CA with empty KeyPEM")
+	}
+
+	loaded, err := LoadCA(ca.CertPEM(), keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.KeyPEM()) == 0 {
+		t.Fatal("LoadCA returned a CA with empty KeyPEM")
+	}
+	if !bytes.Equal(loaded.KeyPEM(), keyPEM) {
+		t.Fatal("KeyPEM changed across a LoadCA round trip")
 	}
 }

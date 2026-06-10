@@ -35,6 +35,7 @@ type CA struct {
 	cert    *x509.Certificate
 	key     crypto.Signer
 	certPEM []byte
+	keyPEM  []byte
 }
 
 // Leaf is an issued end-entity certificate with its private key,
@@ -79,11 +80,16 @@ func NewCA(org string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse CA certificate: %w", err)
 	}
+	keyPEM, err := encodeECKeyPEM(key)
+	if err != nil {
+		return nil, fmt.Errorf("encode CA key: %w", err)
+	}
 
 	return &CA{
 		cert:    cert,
 		key:     key,
 		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		keyPEM:  keyPEM,
 	}, nil
 }
 
@@ -109,11 +115,16 @@ func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load CA: parse key: %w", err)
 	}
+	canonicalKeyPEM, err := encodeECKeyPEM(key)
+	if err != nil {
+		return nil, fmt.Errorf("load CA: encode key: %w", err)
+	}
 
 	return &CA{
 		cert:    cert,
 		key:     key,
 		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}),
+		keyPEM:  canonicalKeyPEM,
 	}, nil
 }
 
@@ -122,23 +133,35 @@ func (ca *CA) CertPEM() []byte {
 	return ca.certPEM
 }
 
-// KeyPEM returns the PEM-encoded CA private key for persistence.
+// KeyPEM returns the PEM-encoded CA private key for persistence. The
+// encoding happens eagerly in NewCA/LoadCA so a marshal failure
+// surfaces there as an error instead of a silent nil here.
 func (ca *CA) KeyPEM() []byte {
-	ecKey, ok := ca.key.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil
-	}
-	der, err := x509.MarshalECPrivateKey(ecKey)
+	return ca.keyPEM
+}
+
+func encodeECKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
+	der, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("marshal EC key: %w", err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), nil
 }
 
 // Issue creates a 2-year ECDSA leaf certificate with the given DNS SAN.
-// Only the two known control plane identities are accepted.
+// Only the two known control plane identities are accepted, and each
+// gets exactly the extended key usage its role needs: the forkd server
+// leaf is ServerAuth only, the controller leaf is ClientAuth only. A
+// stolen server certificate therefore cannot even complete a client
+// handshake; the interceptor's SAN check stays as the second layer.
 func (ca *CA) Issue(dnsName string) (*Leaf, error) {
-	if dnsName != ServerName && dnsName != ControllerName {
+	var eku x509.ExtKeyUsage
+	switch dnsName {
+	case ServerName:
+		eku = x509.ExtKeyUsageServerAuth
+	case ControllerName:
+		eku = x509.ExtKeyUsageClientAuth
+	default:
 		return nil, fmt.Errorf("issue %q: only %q and %q may be issued", dnsName, ServerName, ControllerName)
 	}
 
@@ -155,13 +178,10 @@ func (ca *CA) Issue(dnsName string) (*Leaf, error) {
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: dnsName},
 		DNSNames:     []string{dnsName},
-		NotBefore:    now.Add(-5 * time.Minute),
-		NotAfter:     now.AddDate(2, 0, 0),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-			x509.ExtKeyUsageClientAuth,
-		},
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.AddDate(2, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{eku},
 		BasicConstraintsValid: true,
 	}
 
@@ -218,9 +238,11 @@ func ClientTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
 	}, nil
 }
 
-// PeerDNSName extracts the verified TLS peer's first DNS SAN from gRPC
-// peer info. It returns false when there is no TLS peer or no usable
-// certificate.
+// PeerDNSName extracts the TLS peer's first DNS SAN from gRPC peer
+// info. It only ever reports VERIFIED identities: the SAN comes from
+// VerifiedChains, never from the raw PeerCertificates the peer merely
+// presented. No verified chain means no identity, even if the peer
+// sent a certificate.
 func PeerDNSName(ctx context.Context) (string, bool) {
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.AuthInfo == nil {
@@ -231,13 +253,11 @@ func PeerDNSName(ctx context.Context) (string, bool) {
 		return "", false
 	}
 
-	var leaf *x509.Certificate
-	if len(tlsInfo.State.VerifiedChains) > 0 && len(tlsInfo.State.VerifiedChains[0]) > 0 {
-		leaf = tlsInfo.State.VerifiedChains[0][0]
-	} else if len(tlsInfo.State.PeerCertificates) > 0 {
-		leaf = tlsInfo.State.PeerCertificates[0]
+	if len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.VerifiedChains[0]) == 0 {
+		return "", false
 	}
-	if leaf == nil || len(leaf.DNSNames) == 0 {
+	leaf := tlsInfo.State.VerifiedChains[0][0]
+	if len(leaf.DNSNames) == 0 {
 		return "", false
 	}
 	return leaf.DNSNames[0], true

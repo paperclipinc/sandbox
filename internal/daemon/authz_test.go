@@ -2,7 +2,14 @@ package daemon
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -49,6 +56,7 @@ func startTLSServer(t *testing.T, serverCfg *tls.Config) string {
 	gs := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(serverCfg)),
 		grpc.UnaryInterceptor(RequireControllerIdentity),
+		grpc.StreamInterceptor(RequireControllerIdentityStream),
 	)
 	RegisterForkDaemonServer(gs, srv)
 	go gs.Serve(lis) //nolint:errcheck
@@ -97,11 +105,11 @@ func TestAuthzPlainClientRejected(t *testing.T) {
 	}
 }
 
-func TestAuthzServerIdentityAsClientDenied(t *testing.T) {
+func TestServerLeafCannotActAsClient(t *testing.T) {
 	ca, addr := newAuthzPKI(t)
-	// pki.Issue only issues the two known names; the server name leaf
-	// stands in for any valid-but-wrong identity presented as a client
-	// certificate.
+	// The forkd server leaf carries only the ServerAuth EKU; presented
+	// as a client certificate it must fail the TLS handshake itself,
+	// before any interceptor runs.
 	serverLeaf, err := ca.Issue(pki.ServerName)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +123,90 @@ func TestAuthzServerIdentityAsClientDenied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err = client.GetCapacity(ctx, &forkdpb.GetCapacityRequest{})
+	if err == nil {
+		t.Fatal("server leaf was accepted as a client certificate")
+	}
+	if status.Code(err) == codes.PermissionDenied {
+		t.Fatalf("err = %v; want a transport-level handshake failure, not PermissionDenied from the interceptor", err)
+	}
+}
+
+// issueImposterLeaf signs a leaf with ClientAuth EKU and a DNS SAN
+// outside the two control plane identities, directly against the CA
+// key. This deliberately bypasses Issue()'s name restriction to
+// simulate a mis-issued or stolen-CA-signed certificate.
+func issueImposterLeaf(t *testing.T, ca *pki.CA) (certPEM, keyPEM []byte) {
+	t.Helper()
+	caCertBlock, _ := pem.Decode(ca.CertPEM())
+	if caCertBlock == nil {
+		t.Fatal("no PEM block in CA cert")
+	}
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caKeyBlock, _ := pem.Decode(ca.KeyPEM())
+	if caKeyBlock == nil {
+		t.Fatal("no PEM block in CA key")
+	}
+	caKey, err := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(42),
+		Subject:               pkix.Name{CommonName: "imposter.agent-run"},
+		DNSNames:              []string{"imposter.agent-run"},
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+func TestWrongIdentityClientCertIsDenied(t *testing.T) {
+	ca, addr := newAuthzPKI(t)
+	certPEM, keyPEM := issueImposterLeaf(t, ca)
+	clientCfg, err := pki.ClientTLSConfig(certPEM, keyPEM, ca.CertPEM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := dialForkd(t, addr, credentials.NewTLS(clientCfg))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Unary path: RequireControllerIdentity.
+	_, err = client.GetCapacity(ctx, &forkdpb.GetCapacityRequest{})
 	if status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("code = %v (err = %v), want PermissionDenied", status.Code(err), err)
+		t.Fatalf("unary code = %v (err = %v), want PermissionDenied", status.Code(err), err)
+	}
+
+	// Streaming path: RequireControllerIdentityStream. The denial must
+	// come from the interceptor, before the handler can answer.
+	stream, err := client.ExecStream(ctx, &forkdpb.ExecStreamRequest{})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("stream code = %v (err = %v), want PermissionDenied", status.Code(err), err)
 	}
 }
