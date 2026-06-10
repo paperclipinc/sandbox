@@ -17,7 +17,7 @@ has happened.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd treats its output as data only |
-| forkd (`cmd/forkd`) | privileged DaemonSet pod with `/dev/kvm` | controller | controller, nodes |
+| forkd (`cmd/forkd`) | root DaemonSet pod with `/dev/kvm` and an explicit capability list (not `privileged`) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd |
 | Snapshot artifacts | files under `/var/lib/agent-run` on each node | - | forkd executes them as memory images |
 
@@ -28,8 +28,8 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Firecracker microVM (minimal device model) | **mitigated** | Each sandbox is a separate Firecracker process with its own KVM VM (`internal/fork/engine.go`). |
-| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **open; priority zero** | forkd execs the `firecracker` binary directly (`internal/firecracker/client.go:StartVM`). No jailer, no per-VM UID, no chroot. A VMM-process compromise lands as forkd's user inside a privileged pod. This must be fixed before any claim of production isolation. |
-| Seccomp on the VMM process | **open** | Firecracker ships default seccomp; we do not configure or verify the level, and without the jailer the surrounding process has no confinement. |
+| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **mitigated when deployed as shipped** | forkd launches every Firecracker process through the jailer (`internal/firecracker/jailer.go`, `client.go:startJailedVM`): a dedicated uid/gid per VM from `--uid-range` (default 64000-64999; uid 0 refused), a per-VM chroot under `--chroot-base` containing only the explicitly hard-linked kernel, rootfs, and snapshot files (a traversal guard refuses anything outside the data dir and the VM workspace), and cgroup v2 attachment. The shipped DaemonSet sets the jailer flags; forkd fails closed on misconfiguration (nonroot, chroot base on a different filesystem from the data dir, malformed uid range). Residuals, explicitly: the direct-exec dev path remains when `--jailer` is omitted (forkd logs a loud warning; standalone sandbox-server always runs unjailed); a VMM compromise now lands as a throwaway uid in an empty chroot instead of forkd's root, but hard-linked snapshot files inside the chroot remain readable to it. |
+| Seccomp on the VMM process | **partial** | The jailer-launched VMM runs Firecracker's default production seccomp filters; Firecracker installs them on all VMM threads unless explicitly disabled, and we never pass `--no-seccomp` or a custom filter. We do not verify or customize the filter level; that stays out of scope until the jailer path is proven in KVM CI. |
 | CVE posture / version pinning | **partial** | CI pins Firecracker v1.15.0; there is no documented update policy or advisory tracking. |
 | Guest agent as attack surface | **partial** | Agent speaks a small JSON protocol over vsock only (`guest/agent/main.go`); host side treats responses as data. A 10MB line-buffer cap exists. No fuzzing of the protocol yet. |
 
@@ -44,15 +44,15 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 
 ## 3. Sandbox / forkd → cluster
 
-forkd is the highest-value target: privileged, `/dev/kvm`, hostPath
-`/var/lib/agent-run`, on every KVM node.
+forkd is the highest-value target: root with capabilities, `/dev/kvm`,
+hostPath `/var/lib/agent-run`, on every KVM node.
 
 | Control | Status | Detail |
 |---|---|---|
 | controller ↔ forkd authn/authz (mTLS) | **mitigated when deployed as shipped** | The controller bootstraps an internal CA and per-identity leaf certificates as Secrets (`internal/pki`); forkd requires TLS 1.3 client certificates signed by that CA and authorizes only the `controller.agent-run` SAN via unary AND stream interceptors; per-identity EKUs prevent the forkd server cert acting as a client. Residuals, explicitly: programmatic insecure construction remains for tests and for deployments that omit the TLS flags (forkd logs a loud warning); no certificate rotation yet; the CA private key lives in a namespace Secret readable by namespace secret-readers. |
 | Sandbox HTTP API (exec/files, :9091) | **mitigated** | Per-sandbox bearer tokens are minted at claim time (32-byte crypto/rand), compared in constant time, and fail closed: a sandbox with no registered token rejects everything. Tokens are delivered to clients via claim-owned Secrets, never logged and never in status. Residuals: tokens are static per sandbox (no rotation or expiry); anyone with namespace-wide Secret read can take them; standalone sandbox-server runs tokenless by explicit AllowTokenless design. |
-| forkd capability minimization | **open** | DaemonSet runs `privileged: true` (`deploy/daemon/daemonset.yaml`). Required instead: only `/dev/kvm` device access, `CAP_NET_ADMIN` for tap devices when networking lands, no kubelet credentials, no service account token unless needed. |
-| Blast radius documentation | **partial** | This document. A forkd compromise today = root-equivalent on the node (privileged container) plus ability to read every snapshot and secret passed to it. |
+| forkd capability minimization | **partial** | DaemonSet drops `privileged: true` for an explicit list (`deploy/daemon/daemonset.yaml`): root with ALL dropped plus `SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` (each one a documented jailer requirement) and `NET_ADMIN` (reserved for tap devices, section 4). Residuals: `CAP_SYS_ADMIN` as root remains a wide grant; `/dev/kvm` still arrives via hostPath rather than a device plugin (W1); no kubelet credentials and no extra service account permissions, unchanged. |
+| Blast radius documentation | **partial** | This document. A forkd compromise today = root in a capability-trimmed container with `CAP_SYS_ADMIN` (materially root-equivalent on the node until the W1 device-plugin work lands) plus ability to read every snapshot and secret passed to it. |
 
 ## 4. Sandbox → network
 

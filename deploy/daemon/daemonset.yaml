@@ -45,13 +45,49 @@ spec:
             - --tls-cert=/etc/forkd/tls/tls.crt
             - --tls-key=/etc/forkd/tls/tls.key
             - --tls-ca=/etc/forkd/ca/ca.crt
+            # Every VM runs through the jailer: per-VM uid/gid, chroot,
+            # cgroup. The chroot base lives inside the data volume so
+            # snapshot and rootfs files hard-link into each chroot
+            # (forkd refuses to start if they are on different
+            # filesystems).
+            - --jailer=/usr/local/bin/jailer
+            - --chroot-base=/var/lib/agent-run/jailer
+            - --uid-range=64000-64999
           ports:
             - name: grpc
               containerPort: 9090
             - name: metrics
               containerPort: 9091
+          # forkd runs as root with an explicit capability list instead
+          # of privileged: true. Each retained capability is what the
+          # jailer (or forkd itself) demonstrably needs; everything else
+          # is dropped.
           securityContext:
-            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                # Jailer: cgroup attachment and namespace setup for each
+                # VM's jail.
+                - SYS_ADMIN
+                # Jailer: hands the per-VM chroot and API socket to the
+                # dedicated uid.
+                - CHOWN
+                # Jailer: drops the Firecracker process to the per-VM
+                # uid (--uid-range).
+                - SETUID
+                # Jailer: drops the Firecracker process to the per-VM
+                # gid.
+                - SETGID
+                # Jailer: creates /dev/kvm and /dev/net/tun device nodes
+                # inside each chroot.
+                - MKNOD
+                # forkd: tap device creation when guest networking lands
+                # (threat model section 4); listed now so the manifest
+                # does not silently re-broaden later.
+                - NET_ADMIN
           resources:
             requests:
               memory: "1Gi"
