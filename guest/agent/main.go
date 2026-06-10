@@ -371,8 +371,8 @@ func (c *vsockConn) Close() error {
 func (c *vsockConn) LocalAddr() net.Addr                { return nil }
 func (c *vsockConn) RemoteAddr() net.Addr               { return nil }
 func (c *vsockConn) SetDeadline(t time.Time) error      { return nil }
-func (c *vsockConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *vsockConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (c *vsockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *vsockConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func (l *vsockListener) Close() error {
 	return unix.Close(l.fd)
