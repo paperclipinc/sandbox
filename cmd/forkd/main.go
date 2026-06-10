@@ -10,7 +10,9 @@ import (
 
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/pki"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
@@ -21,6 +23,9 @@ func main() {
 		firecrackerBin string
 		kernelPath     string
 		mockMode       bool
+		tlsCert        string
+		tlsKey         string
+		tlsCA          string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -29,7 +34,16 @@ func main() {
 	flag.StringVar(&firecrackerBin, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
 	flag.StringVar(&kernelPath, "kernel", "/var/lib/agent-run/vmlinux", "Guest kernel path")
 	flag.BoolVar(&mockMode, "mock", false, "Use mock fork engine (no KVM required)")
+	flag.StringVar(&tlsCert, "tls-cert", "", "Path to the forkd server certificate PEM (mTLS)")
+	flag.StringVar(&tlsKey, "tls-key", "", "Path to the forkd server key PEM (mTLS)")
+	flag.StringVar(&tlsCA, "tls-ca", "", "Path to the control plane CA certificate PEM (mTLS)")
 	flag.Parse()
+
+	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
+		os.Exit(1)
+	}
 
 	var engine daemon.ForkEngine
 
@@ -61,7 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpcOpts...)
 	daemon.RegisterForkDaemonServer(grpcServer, server)
 
 	// Start HTTP server (metrics + sandbox exec/files API)
@@ -81,4 +95,47 @@ func main() {
 	<-stop
 	fmt.Println("forkd: shutting down")
 	grpcServer.GracefulStop()
+}
+
+// grpcServerOptions builds transport security for the controller-facing
+// gRPC listener. All three TLS flags set means mTLS with controller
+// identity enforcement; none set means insecure with a loud warning;
+// a partial set is a configuration error.
+func grpcServerOptions(certPath, keyPath, caPath string) ([]grpc.ServerOption, error) {
+	set := 0
+	for _, p := range []string{certPath, keyPath, caPath} {
+		if p != "" {
+			set++
+		}
+	}
+	switch set {
+	case 0:
+		fmt.Fprintln(os.Stderr, "forkd: gRPC is UNAUTHENTICATED; supply --tls-cert/--tls-key/--tls-ca (threat model section 3)")
+		return nil, nil
+	case 3:
+		// fall through to TLS setup below
+	default:
+		return nil, fmt.Errorf("--tls-cert, --tls-key, and --tls-ca must be set together")
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-ca: %w", err)
+	}
+	cfg, err := pki.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return nil, fmt.Errorf("build server TLS config: %w", err)
+	}
+	return []grpc.ServerOption{
+		grpc.Creds(credentials.NewTLS(cfg)),
+		grpc.UnaryInterceptor(daemon.RequireControllerIdentity),
+	}, nil
 }
