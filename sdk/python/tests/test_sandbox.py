@@ -105,6 +105,8 @@ def test_sandbox_fork_creates_cr(ready_sandbox, mock_api):
     assert len(forks) == 2
     assert forks[0].phase == SandboxPhase.READY
     assert forks[1].phase == SandboxPhase.READY
+    assert forks[0]._sandbox_id == "f1"
+    assert forks[1]._sandbox_id == "f2"
 
 
 def test_sandbox_wait_ready_polls(pending_sandbox, mock_api):
@@ -163,11 +165,14 @@ def test_exec_targets_v1_and_sends_sandbox_id():
 
 
 def test_files_read_targets_v1_and_sends_sandbox_id():
+    seen = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        assert body["sandbox"] == "sb-claim-1"
-        assert str(request.url).endswith("/v1/files/read")
+        seen["url"] = str(request.url)
+        seen["json"] = json.loads(request.content)
         return httpx.Response(200, json={"content": "data", "size": 4})
 
     content = _ready_http_sandbox(httpx.MockTransport(handler)).files.read("/workspace/x")
     assert content == "data"
+    assert seen["url"].endswith("/v1/files/read")
+    assert seen["json"]["sandbox"] == "sb-claim-1"

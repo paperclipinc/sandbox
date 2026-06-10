@@ -122,6 +122,9 @@ class Sandbox:
     def _sandbox_ref(self) -> str:
         if self._sandbox_id is None:
             self._wait_ready()
+        # Fall back to the claim name when the cluster never reported a
+        # sandboxID — forkd registers sandboxes under the claim name in
+        # that case.
         return self._sandbox_id or self.name
 
     @property

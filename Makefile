@@ -1,7 +1,7 @@
 IMG_CONTROLLER ?= ghcr.io/paperclipinc/sandbox-controller:latest
 IMG_FORKD ?= ghcr.io/paperclipinc/sandbox-forkd:latest
 
-.PHONY: all build test generate manifests docker-build docker-push install deploy
+.PHONY: all build test generate manifests proto docker-build docker-push install deploy
 
 all: build
 
@@ -32,9 +32,9 @@ manifests:
 
 proto:
 	protoc \
-	  --go_out=. --go_opt=module=github.com/paperclipinc/sandbox \
-	  --go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/sandbox \
-	  proto/forkd.proto
+		--go_out=. --go_opt=module=github.com/paperclipinc/sandbox \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/sandbox \
+		proto/forkd.proto
 
 docker-build:
 	docker build -f Dockerfile.controller -t $(IMG_CONTROLLER) .
