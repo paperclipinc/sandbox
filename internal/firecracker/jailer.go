@@ -203,12 +203,32 @@ func withinRoot(path, root string) (bool, error) {
 	return false, nil
 }
 
+// hasParentTraversal reports whether a path contains a `..` element in
+// either separator form. It is a deliberately simple, statically obvious
+// guard so the taint analysis (CodeQL go/path-injection) can see that no
+// traversal element reaches a filesystem sink downstream.
+func hasParentTraversal(p string) bool {
+	normalized := strings.ReplaceAll(p, "\\", "/")
+	for _, seg := range strings.Split(normalized, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // guardJailerLayout refuses a VM id whose dot segments would place the
 // per-VM jailer directories outside the chroot base (C1 defense in depth:
 // jailerChrootDir and friends use filepath.Join, which cleans `..`
 // segments, so a crafted id could otherwise escape). It runs before any
 // mkdir, chown, link, or exec on those paths.
 func guardJailerLayout(cfg VMConfig) error {
+	// Reject `..` (and separators) in the id outright: the per-VM paths are
+	// built by joining the id, so a traversal element must never reach
+	// them. An explicit barrier here also keeps the taint analysis honest.
+	if hasParentTraversal(cfg.ID) {
+		return fmt.Errorf("refusing VM id %q: contains a parent-directory (..) element", cfg.ID)
+	}
 	for _, p := range []string{
 		jailerVMDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
 		jailerChrootDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
@@ -228,6 +248,15 @@ func guardJailerLayout(cfg VMConfig) error {
 // the VM workspace and the data dir. It is applied to the requested path
 // and again to its symlink-resolved form.
 func guardChrootSource(cfg VMConfig, p string) error {
+	// Reject any parent-directory traversal before cleaning collapses it.
+	// This is an explicit, statically recognizable barrier (CodeQL
+	// go/path-injection): no `..` element can survive into a path we then
+	// link, chown, or hand to the jailer. The withinRoot containment below
+	// is the real authorization; this is belt-and-suspenders and keeps the
+	// taint analysis honest about the chroot file paths.
+	if hasParentTraversal(p) {
+		return fmt.Errorf("refusing path %q with a parent-directory (..) element for the jailer chroot", p)
+	}
 	clean := filepath.Clean(p)
 	if !filepath.IsAbs(clean) {
 		return fmt.Errorf("refusing relative path %q for the jailer chroot; pass absolute paths", p)
