@@ -1,125 +1,123 @@
 # sandbox
 
-Snapshot-fork sandboxes for AI agents on Kubernetes — Firecracker microVMs,
-CoW memory forking, declarative CRDs. Self-hosted on any cluster with KVM.
+Millisecond sandbox forking for AI agents on Kubernetes.
 
-**Project status: early development, pre-alpha.** This README distinguishes,
-for every feature, between what is implemented and tested today and what is
-design. Nothing here is production-ready, no performance claim is made that
-is not backed by a measurement you can reproduce, and **no external security
-review has happened** — do not run untrusted code with this in production yet.
-See [ROADMAP.md](ROADMAP.md) and [docs/threat-model.md](docs/threat-model.md).
+`sandbox` gives your agents isolated, forkable computers: Firecracker microVMs that restore from memory snapshots in milliseconds, fork into parallel attempts, and persist durable workspaces. Declarative CRDs on your cluster, or fully hosted by us.
 
-## What works today (tested in CI)
+```bash
+# Create a pool of pre-snapshotted Python sandboxes
+kubectl apply -f examples/python-pool.yaml
 
-| Capability | Where | Verified by |
-|---|---|---|
-| Firecracker VM boot → pause → snapshot → restore in a fresh VMM process (CoW via `mmap(MAP_PRIVATE)`) | `internal/firecracker`, `internal/fork` | `kvm-test` workflow on KVM runners |
-| Guest agent as PID 1: exec + file ops over vsock | `guest/agent`, `internal/vsock` | end-to-end CI test (boot real VM, exec via vsock) |
-| CRDs (`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`) and controllers | `api/v1alpha1`, `internal/controller` | envtest suite |
-| Standalone REST server (no k8s) with mock or KVM engine | `cmd/sandbox-server` | Python SDK direct-mode tests |
-| Python SDK | `sdk/python` | unit tests |
-| Mock fork engine for development without KVM (kind, macOS) | `internal/fork/mock.go` | unit + kind e2e |
+# Claim one (forks from a warm snapshot)
+kubectl apply -f examples/claim.yaml
 
-## What is design, not yet implementation
+# Fork it 3 times to try parallel approaches
+kubectl apply -f examples/fork.yaml
+```
 
-Honest gaps as of this commit — tracked in [ROADMAP.md](ROADMAP.md):
+```python
+from agent_run import Sandbox
 
-- **controller ↔ forkd wiring** — being implemented now
-  (`docs/superpowers/plans/2026-06-10-control-plane-wiring.md`). Until it
-  lands, applying a `SandboxClaim` does not produce a VM.
-- **Volume fork policies** (`Fresh`/`Share`/`Clone`/`Snapshot`) — the API
-  and handlers exist, but they do not yet provision or attach anything to VMs.
-- **Secret injection into the guest** — claim-time resolution exists;
-  delivery into the VM does not yet.
-- **Guest networking and egress allowlists** — restored VMs currently have
-  no network device. Exec and file I/O run over vsock. Egress policy
-  enforcement (host-side nftables/eBPF, controlled DNS) is designed but not
-  built.
-- **Fork correctness after restore** — RNG reseeding, clock resync, network
-  identity, and live-fork secret hygiene are specified with tests in
-  [docs/fork-correctness.md](docs/fork-correctness.md), none implemented yet.
-- **TypeScript SDK, Helm chart, benchmark suite** — do not exist yet.
+sandbox = Sandbox.create("python-agent-pool")
+result = sandbox.exec("import numpy as np; print(np.mean([1,2,3,4,5]))")
+print(result.stdout)  # 3.0
 
-## Performance
+# Fork the sandbox to try two approaches in parallel
+fork_a, fork_b = sandbox.fork(2)
+fork_a.exec("open('plan_a.txt', 'w').write('conservative approach')")
+fork_b.exec("open('plan_b.txt', 'w').write('aggressive approach')")
+```
 
-We make no latency claim that is not reproducible from this repository.
+## Why
 
-- The mechanism is the right one for sub-10ms forks: Firecracker snapshot
-  restore with lazily-faulted, CoW-shared snapshot memory. The CI workflow
-  measures the restore API call on shared GitHub runners (typically tens of
-  ms there, including process start).
-- **Targets, not yet measured:** claim→first-successful-exec P50 < 50ms on
-  bare metal; fork→first-exec P50 < 10ms. The number that matters is
-  end-to-end time to a responsive guest — not the KVM restore syscall — and
-  that is what `bench/` will measure when it lands (roadmap §4), published
-  with hardware and methodology in `BENCHMARKS.md`.
-- Per-fork memory: CoW makes the T=0 dirty-page footprint small, but T=0 is
-  not a density-planning number. We will publish unique-memory-over-lifetime
-  under realistic workloads alongside it.
+Agent harnesses need fast, isolated environments where agents can read and write files, install packages, and run untrusted code. Every existing option forces a trade you should not have to make: speed without ownership, isolation without forking, Kubernetes-nativeness without warm starts, durability as someone else's proprietary cloud.
+
+Our goal is the pareto frontier of agent runtimes: for the axes that matter (cold-start latency, fork semantics, hardware isolation, durable state, Kubernetes integration, data ownership, open source, cost at rest), no alternative should beat `sandbox` on one axis without losing on another that you also care about. Where we are not there yet, the [roadmap](ROADMAP.md) says so explicitly.
+
+Two ways to run it:
+
+- **Self-hosted**: any Kubernetes cluster with KVM nodes. Your data never leaves your infrastructure. Bare metal (Hetzner + Talos is the reference platform) is a first-class target.
+- **Hosted**: a managed service operated by us, same engine and same API, for teams that want milliseconds without managing nodes.
+
+## Features
+
+**Fast**
+- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; the mechanism targets sub-10ms forks, and the reproducible benchmark program that backs every public number is in progress ([#15](https://github.com/paperclipinc/sandbox/issues/15))
+- Pre-snapshotted pools: no cold start on claim
+- CoW memory sharing across forks: you pay for unique pages, not for copies
+
+**Forkable**
+- Fork any running sandbox into N independent copies (`SandboxFork`)
+- Per-volume fork policies: `Fresh`, `Share`, `Clone`, `Snapshot` (API defined; backends in progress, [#11](https://github.com/paperclipinc/sandbox/issues/11))
+- Each fork gets its own KVM-isolated microVM
+- Live forks of secret-holding sandboxes are rejected unless explicitly opted in; forks never silently inherit credentials
+
+**Kubernetes-native**
+- Declarative CRDs: `SandboxPool`, `SandboxClaim`, `SandboxFork`
+- Templates with volume topology and fork behavior
+- RBAC and namespace scoping today; pod-native execution (quotas, NetworkPolicy, scheduler truth) is the husk-pod workstream ([#18](https://github.com/paperclipinc/sandbox/issues/18))
+- Works with Prometheus and standard k8s tooling
+
+**Secure**
+- Hardware isolation: a dedicated kernel per sandbox (KVM/Firecracker)
+- Credentials injected at claim time over vsock, never baked into snapshots; undeliverable secrets fail the claim instead of lying about readiness
+- Honest threat model with per-boundary status: [docs/threat-model.md](docs/threat-model.md). No external security review has happened yet, and the document says exactly what is open (jailer, mTLS, API auth)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  k8s Control Plane                                          │
-│                                                             │
-│  SandboxTemplate ──► SandboxPool ──► SandboxClaim           │
-│        │                  │               │                 │
-│        │            (manages snapshot     (fork from        │
-│        │             lifecycle)            snapshot)        │
-│        ▼                  │               │                 │
-│  SandboxFork              │               │                 │
-│  (fork running sandbox)   │               │                 │
-│                           ▼               ▼                 │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │  controller (Deployment)                              │ │
-│  │  reconciles CRDs, picks nodes, calls forkd over gRPC  │ │
-│  └───────────────────────────────────────────────────────┘ │
-└──────────────┬──────────────────────────────────────────────┘
-               │ gRPC
-┌──────────────▼──────────────────────────────────────────────┐
-│  KVM-capable nodes                                          │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  forkd (DaemonSet)                                    │  │
-│  │  - builds template snapshots (boot → init → snapshot) │  │
-│  │  - forks: new Firecracker process restores the        │  │
-│  │    snapshot; memory is CoW-shared across forks        │  │
-│  │  - serves exec/files over HTTP, bridged to the guest  │  │
-│  │    agent via vsock                                    │  │
-│  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                      │  │
-│  │  │ VM  │ │ VM  │ │ VM  │ │ VM  │  ← one KVM microVM   │  │
-│  │  └─────┘ └─────┘ └─────┘ └─────┘    per sandbox       │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|  k8s Control Plane                                          |
+|                                                             |
+|  SandboxTemplate --> SandboxPool --> SandboxClaim           |
+|        |                  |               |                 |
+|        |            (manages snapshot     (fork from        |
+|        |             lifecycle)            snapshot)        |
+|        v                  |               |                 |
+|  SandboxFork              |               |                 |
+|  (fork running sandbox)   v               v                 |
+|  +-------------------------------------------------------+ |
+|  |  controller (Deployment)                              | |
+|  |  reconciles CRDs, picks nodes, calls forkd over gRPC  | |
+|  +-------------------------------------------------------+ |
++--------------+----------------------------------------------+
+               | gRPC
++--------------v----------------------------------------------+
+|  KVM-capable nodes                                          |
+|  +-------------------------------------------------------+  |
+|  |  forkd (DaemonSet, one per node)                      |  |
+|  |  - builds template snapshots (boot, init, snapshot)   |  |
+|  |  - forks: a fresh Firecracker process restores the    |  |
+|  |    snapshot; memory is CoW-shared across forks        |  |
+|  |  - serves exec/files over HTTP, bridged to the guest  |  |
+|  |    agent via vsock                                    |  |
+|  |  +-----+ +-----+ +-----+ +-----+                      |  |
+|  |  | VM  | | VM  | | VM  | | VM  |  <- one KVM microVM  |  |
+|  |  +-----+ +-----+ +-----+ +-----+     per sandbox      |  |
+|  +-------------------------------------------------------+  |
++-------------------------------------------------------------+
 ```
 
-Sandboxes are **not pods**. Pod-scoped Kubernetes mechanisms — NetworkPolicy,
-pod resource quotas, pod security admission — do not apply to sandbox VMs.
-Where we provide an equivalent (our own egress enforcement, our own capacity
-accounting), it is documented as ours. See the
-[threat model](docs/threat-model.md) for exactly what isolation you get.
+Sandboxes are not pods. Pod-scoped Kubernetes mechanisms do not govern sandbox VMs today; where we provide an equivalent, it is documented as ours, and the husk-pod workstream closes the gap properly.
 
 ## Quick start
 
 ### Local development (no KVM required)
 
 ```bash
-# Standalone server with the mock engine
 go run ./cmd/sandbox-server --mock --addr :8080
 
-# Python SDK against it
 cd sdk/python && pip install -e .
 python -c "
 from agent_run.direct import SandboxServer
 s = SandboxServer('http://localhost:8080')
 s.create_template('python')
 sb = s.fork('python')
-print(sb.fork_time_ms, 'ms (mock)')
+print(sb.exec('echo hello').stdout)
 "
 ```
 
-### On a cluster (current state)
+### On a cluster
 
 ```bash
 kubectl apply -f deploy/crds/
@@ -127,20 +125,9 @@ kubectl apply -f deploy/controller/
 kubectl apply -f deploy/daemon/
 ```
 
-This installs CRDs, controller, and forkd. Until roadmap §0 lands, claims do
-not yet produce VMs end-to-end — track progress in [ROADMAP.md](ROADMAP.md).
-There is no Helm chart yet.
+A Helm chart is planned ([#37](https://github.com/paperclipinc/sandbox/issues/37) tracks release machinery). Nodes need `/dev/kvm` and the label `agentrun.dev/kvm=true`; the controller discovers forkd pods automatically.
 
-### Real VMs on a KVM host
-
-The `kvm-test` CI workflow (`.github/workflows/kvm-test.yaml`) is a complete,
-runnable recipe: install Firecracker v1.15.0, fetch a kernel/rootfs, build the
-guest agent into a rootfs as `/init`, boot, snapshot, restore, and exec
-through vsock.
-
-## API
-
-The CRD surface (`agentrun.dev/v1alpha1`, may break between releases):
+### Create a pool, claim, fork
 
 ```yaml
 apiVersion: agentrun.dev/v1alpha1
@@ -149,21 +136,23 @@ metadata:
   name: python-agent
 spec:
   image: python:3.12-slim
-  init: ["pip install numpy pandas requests"]
-  resources: { cpu: "1", memory: "512Mi" }
+  init:
+    - "pip install numpy pandas requests"
+  resources:
+    cpu: "1"
+    memory: "512Mi"
   volumes:
     - name: workspace
       size: 5Gi
-      forkPolicy: Snapshot     # design — not yet enforced
-  networkPolicy:               # design — not yet enforced
-    egress: deny
+      forkPolicy: Snapshot
 ---
 apiVersion: agentrun.dev/v1alpha1
 kind: SandboxPool
 metadata:
   name: python-agent-pool
 spec:
-  templateRef: { name: python-agent }
+  templateRef:
+    name: python-agent
   replicas: 10
 ---
 apiVersion: agentrun.dev/v1alpha1
@@ -171,87 +160,67 @@ kind: SandboxClaim
 metadata:
   name: agent-session-1
 spec:
-  poolRef: { name: python-agent-pool }
+  poolRef:
+    name: python-agent-pool
   secrets:
-    - name: openai-key        # resolved at claim time; in-guest delivery
-      secretRef:              # is roadmap §0 — see threat model §6
+    - name: anthropic-key
+      secretRef:
         name: agent-secrets
-        key: OPENAI_API_KEY
+        key: ANTHROPIC_API_KEY
 ---
 apiVersion: agentrun.dev/v1alpha1
 kind: SandboxFork
 metadata:
   name: parallel-attempt
 spec:
-  sourceRef: { name: agent-session-1 }
+  sourceRef:
+    name: agent-session-1
   replicas: 3
+  allowSecretInheritance: true   # forks duplicate memory; opt in knowingly
 ```
 
-### Fork policies (design)
+## SDKs
 
-| Policy | Intended behavior | Status |
-|--------|-------------------|--------|
-| `Fresh` | New empty volume | API only |
-| `Share` | Re-mount same backing store read-only | API only |
-| `Snapshot` | CoW snapshot (btrfs/reflink) | API only |
-| `Clone` | Full copy via CSI VolumeSnapshot | API only |
+Python today (`sdk/python`, pre-PyPI: `pip install -e .`), TypeScript planned, MCP server planned so any MCP-speaking agent can use sandboxes with zero SDK integration ([#27](https://github.com/paperclipinc/sandbox/issues/27)). The target developer surface (three-line common path, git-shaped workspace verbs, capability-budgeted self-service for agents) is specified in [docs/api/v2-spec.md](docs/api/v2-spec.md).
 
-### Python SDK
+## Comparison
 
-```bash
-cd sdk/python && pip install -e .   # not yet published to PyPI
-```
+The honest version: a numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/paperclipinc/sandbox/issues/15). Until then, the qualitative pareto map across every alternative we know of:
 
-Two modes: `agent_run.direct.SandboxServer` (standalone server, works today)
-and `agent_run.Sandbox`/`AgentRun` (Kubernetes CRDs; functional once roadmap
-§0 lands). A TypeScript SDK is planned but does not exist.
+| | sandbox | E2B | Modal | Daytona | Morph | Cloudflare | Agent Sandbox (k8s-sigs) | Kata/KubeVirt | raw Firecracker |
+|---|---|---|---|---|---|---|---|---|---|
+| Hardware isolation per session | KVM microVM | microVM | gVisor | container/VM | microVM | V8 isolate | Kata option | KVM | KVM |
+| Snapshot fork of running state | yes, core primitive | snapshot/resume | memory snapshots | no | yes (Infinibranch) | no | no | no | build it yourself |
+| Warm-pool millisecond claims | yes (design center) | warm pools | warm pools | workspaces | yes | instant isolates | 1-3s cold | seconds | build it yourself |
+| Durable forkable workspaces | Workspace CRD (in design, [#21](https://github.com/paperclipinc/sandbox/issues/21)) | no | volumes | workspaces | yes, proprietary | no | PVCs | PVCs | no |
+| Kubernetes-native API | CRDs | SaaS API | SaaS API | SaaS/OSS | SaaS API | SaaS API | CRDs | CRDs | no |
+| Self-hostable | yes, any KVM cluster | partial OSS | no | OSS core | no | no | yes | yes | yes |
+| Hosted option | planned (same engine) | yes | yes | yes | yes | yes | no | no | no |
+| Your data stays on your infra | yes (self-hosted) | no | no | partial | no | no | yes | yes | yes |
+| Open source | Apache 2.0 | partial | no | partial | no | no | Apache 2.0 | Apache 2.0 | Apache 2.0 |
+
+Positioning, in one sentence per rival class: SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability; Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds; Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we are building a conformance facade to be its fastest backend ([#19](https://github.com/paperclipinc/sandbox/issues/19)) rather than fighting it; Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
+
+If an alternative beats us on an axis you care about and we have no roadmap line that closes it, that is a bug in our strategy: open an issue.
 
 ## Monitoring
 
-forkd exports Prometheus metrics at `/metrics` (HTTP port, default `:9091`):
+Prometheus metrics exposed by forkd at `/metrics`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `agentrun_fork_duration_seconds` | histogram | Fork latency as measured by forkd |
-| `agentrun_active_sandboxes` | gauge | Running sandboxes on this node |
-| `agentrun_memory_shared_bytes` | gauge | CoW-shared memory across forks |
-| `agentrun_memory_unique_bytes` | gauge | Per-fork unique memory at fork time (T=0 only — lifetime tracking is roadmap §1) |
+| `agentrun_active_sandboxes` | gauge | Currently running sandboxes per node |
+| `agentrun_memory_shared_bytes` | gauge | CoW shared memory across forks |
+| `agentrun_memory_unique_bytes` | gauge | Per-fork unique memory at fork time |
 
-## Node requirements
+End-to-end claim traces (controller decision to first exec) are on the observability roadmap ([#29](https://github.com/paperclipinc/sandbox/issues/29)).
 
-Nodes need `/dev/kvm` and the label `agentrun.dev/kvm=true`. Bare metal is a
-first-class target (Talos + Hetzner reference platform is roadmap §5). Nested
-virtualization on EKS/GKE/AKS works for development; we will publish the
-nested-virt performance penalty rather than pretend it doesn't exist.
+## Project status
 
-## Comparison
+Early development, pre-1.0. The control plane is real end-to-end (claim to running sandbox, proven in CI against mock engines and real Firecracker VMs); volume backends, guest networking with egress policy, pod-native execution, and the durable Workspace are in active development in roadmap order. [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated; the operating rule is that this repository never describes a system that does not exist.
 
-A numbers table belongs here only when `bench/` can regenerate it on the same
-hardware against the actual competitors (roadmap §4). Until then, the honest
-qualitative positioning:
-
-- **E2B / Modal / Daytona (SaaS):** mature, fast, great DX — but your agents'
-  code and data run on their infrastructure. We are self-hosted only.
-- **Agent Sandbox (k8s-sigs):** k8s-native CRDs with Kata/gVisor isolation;
-  no snapshot-fork primitive. We are building exactly that primitive, and an
-  adapter for their CRDs is under consideration (roadmap §7).
-- **Raw Firecracker:** the engine we build on; you'd be writing the pool,
-  fork, distribution, and k8s layers yourself.
-
-## Security
-
-Read [docs/threat-model.md](docs/threat-model.md) before trusting this with
-anything. Current honest summary: KVM/Firecracker isolation per sandbox is
-real; the jailer, mTLS between components, API authentication, snapshot
-integrity verification, and fork-correctness guarantees (RNG, clock, secrets)
-are **not implemented yet**. No external security review has been performed.
-
-## Contributing
-
-`make build test` runs everything that works without KVM. `make
-test-controller` runs the envtest suite. The KVM path runs in CI on every PR
-touching the engine. Every PR that moves the security surface must update the
-threat model in the same PR; every README claim must stay reproducible.
+Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md) for conventions, [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License
 
