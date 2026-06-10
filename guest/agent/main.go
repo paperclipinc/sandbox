@@ -172,6 +172,12 @@ func handleRequest(req *vsock.Request) vsock.Response {
 		}
 		return handleConfigure(req.Configure)
 
+	case vsock.TypeNotifyForked:
+		if req.NotifyForked == nil {
+			return vsock.Response{OK: false, Error: "notify_forked request is nil"}
+		}
+		return handleNotifyForked(req.NotifyForked)
+
 	default:
 		return vsock.Response{OK: false, Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}

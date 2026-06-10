@@ -2,6 +2,7 @@ package vsock
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -94,6 +95,52 @@ func mockAgentHandler() func(req *Request) Response {
 		default:
 			return Response{OK: false, Error: "unknown type"}
 		}
+	}
+}
+
+func TestNotifyForked(t *testing.T) {
+	var got *NotifyForkedRequest
+	before := time.Now().UnixNano()
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type == TypeNotifyForked {
+			got = req.NotifyForked
+			return Response{OK: true, NotifyForked: &NotifyForkedResponse{
+				AppliedClockStepNanos: 42,
+				ReseededRNG:           true,
+				SignaledProcesses:     3,
+			}}
+		}
+		return Response{OK: false, Error: "unexpected type"}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	entropy := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02}
+	resp, err := client.NotifyForked(7, entropy)
+	if err != nil {
+		t.Fatalf("NotifyForked: %v", err)
+	}
+	after := time.Now().UnixNano()
+
+	if got == nil {
+		t.Fatal("agent received no notify_forked request")
+	}
+	if got.Generation != 7 {
+		t.Errorf("generation = %d, want 7", got.Generation)
+	}
+	if !bytes.Equal(got.Entropy, entropy) {
+		t.Errorf("entropy = %v, want %v", got.Entropy, entropy)
+	}
+	if got.HostWallClockNanos < before || got.HostWallClockNanos > after {
+		t.Errorf("host wall clock %d not in plausible range [%d, %d]",
+			got.HostWallClockNanos, before, after)
+	}
+	if resp == nil || !resp.ReseededRNG || resp.AppliedClockStepNanos != 42 || resp.SignaledProcesses != 3 {
+		t.Errorf("response = %+v", resp)
 	}
 }
 
