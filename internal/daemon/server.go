@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -90,10 +91,18 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 // registers NOTHING, so HTTP calls to the sandbox fail closed with 401
 // (forkd never runs the API in tokenless mode). The token value is never
 // logged.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, apiToken string) (*fork.ForkResult, error) {
+//
+// netConf carries the template's NetworkPolicy (egress policy + allowlist).
+// It is parsed into fork.NetworkOpts and threaded into the engine, which uses
+// it to build the per-fork egress ruleset when networking is enabled. When
+// netConf is nil the fork gets no network identity (networking disabled or no
+// policy on the template). The egress policy and allowlist entries are safe to
+// log.
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, apiToken string) (*fork.ForkResult, error) {
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
+		Network: networkOpts(netConf),
 	})
 	if err != nil {
 		return nil, err
@@ -102,7 +111,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets); err != nil {
+	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork); err != nil {
 		// A sandbox that reports Ready without its secrets is a lie; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
 		activeSandboxes.Dec()
@@ -127,7 +136,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 // Config delivery keeps its prior policy: strict only when secrets are present
 // (a sandbox Ready without its secrets is a lie); env-only failures are
 // best-effort. Secret values and entropy are never logged.
-func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string) error {
+func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string, guestNet *vsock.NotifyForkedNetwork) error {
 	if !s.engine.GetCapacity().KVMAvailable {
 		return nil // mock engine: no guest to deliver to
 	}
@@ -136,7 +145,7 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
 
-	if err := s.notifyForked(sandboxID); err != nil {
+	if err := s.notifyForked(sandboxID, guestNet); err != nil {
 		return err
 	}
 
@@ -156,13 +165,13 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // crypto/rand entropy) to a connected guest. The agent must already be
 // registered. Entropy is never logged. Errors are returned so the caller can
 // reap the sandbox: a guest that did not reseed shares RNG state.
-func (s *Server) notifyForked(sandboxID string) error {
+func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
 		return fmt.Errorf("generate fork entropy: %w", err)
 	}
 	gen := s.forkGeneration.Add(1)
-	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy); err != nil {
+	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet); err != nil {
 		return fmt.Errorf("notify guest of fork: %w", err)
 	}
 	return nil
@@ -214,7 +223,10 @@ func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
 	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
-	return s.notifyForked(sandboxID)
+	// Live forks inherit the source VM's baked network identity in memory; the
+	// engine does not (yet) re-address them, so no per-fork network config is
+	// delivered here. Distinct-identity live forks are a follow-up (#18).
+	return s.notifyForked(sandboxID, nil)
 }
 
 // Terminate handles a sandbox termination request.
@@ -254,6 +266,25 @@ func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
 		})
 	}
 	return out
+}
+
+// networkOpts converts the proto NetworkConfig from a ForkRequest into the
+// engine's fork.NetworkOpts. It returns nil when the request carries no
+// network config (so the non-network fork path is untouched) and also when the
+// config is effectively empty (no egress policy and no allowlist), which the
+// engine treats the same as "no networking requested". The engine itself only
+// acts on a non-nil result when networking is enabled.
+func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
+	if c == nil {
+		return nil
+	}
+	if c.EgressPolicy == "" && len(c.AllowList) == 0 {
+		return nil
+	}
+	return &fork.NetworkOpts{
+		EgressPolicy: c.EgressPolicy,
+		AllowList:    c.AllowList,
+	}
 }
 
 // UpdateMetrics refreshes capacity metrics.

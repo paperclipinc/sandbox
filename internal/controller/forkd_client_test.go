@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"google.golang.org/grpc"
@@ -48,7 +49,7 @@ func TestForkOnNode(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, "tok-sb-1")
+	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, "tok-sb-1")
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -62,6 +63,68 @@ func TestForkOnNode(t *testing.T) {
 	}
 }
 
+// TestForkOnNodePlumbsNetworkPolicy asserts the template NetworkPolicy reaches
+// the engine through the Fork RPC: the egress policy and allowlist are recorded
+// by the MockEngine. A name-based allow entry is passed through unchanged (the
+// daemon splits it; forkd does not reject it here).
+func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
+	addr, engine := startFakeForkd(t, "py")
+
+	registry := NewNodeRegistry()
+	registry.Register(&NodeInfo{Name: "n1", Endpoint: addr, HTTPEndpoint: "10.0.0.1:9091", TemplateIDs: []string{"py"}})
+	node, err := registry.SelectNode("py", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy := &v1alpha1.NetworkPolicy{
+		Egress: v1alpha1.EgressDeny,
+		Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
+	}
+	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, "tok"); err != nil {
+		t.Fatalf("forkOnNode: %v", err)
+	}
+
+	got := engine.LastForkNetwork()
+	if got == nil {
+		t.Fatal("engine recorded no NetworkOpts; policy was not plumbed through")
+	}
+	if got.EgressPolicy != string(v1alpha1.EgressDeny) {
+		t.Fatalf("egress policy = %q, want deny", got.EgressPolicy)
+	}
+	want := []string{"10.0.0.5:443", "api.example.com:443"}
+	if len(got.AllowList) != len(want) {
+		t.Fatalf("allow list = %v, want %v", got.AllowList, want)
+	}
+	for i, e := range want {
+		if got.AllowList[i] != e {
+			t.Fatalf("allow[%d] = %q, want %q", i, got.AllowList[i], e)
+		}
+	}
+}
+
+// TestForkOnNodeNilNetworkPolicy confirms a template without a NetworkPolicy
+// sends no NetworkConfig and the engine records no NetworkOpts.
+func TestForkOnNodeNilNetworkPolicy(t *testing.T) {
+	addr, engine := startFakeForkd(t, "py")
+
+	registry := NewNodeRegistry()
+	registry.Register(&NodeInfo{Name: "n1", Endpoint: addr, HTTPEndpoint: "10.0.0.1:9091", TemplateIDs: []string{"py"}})
+	node, err := registry.SelectNode("py", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := &SandboxClaimReconciler{NodeRegistry: registry}
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, "tok"); err != nil {
+		t.Fatalf("forkOnNode: %v", err)
+	}
+	if got := engine.LastForkNetwork(); got != nil {
+		t.Fatalf("engine recorded NetworkOpts %+v for a template with no policy", got)
+	}
+}
+
 func TestForkRunningOnNode(t *testing.T) {
 	addr, _ := startFakeForkd(t, "py")
 	registry := NewNodeRegistry()
@@ -72,7 +135,7 @@ func TestForkRunningOnNode(t *testing.T) {
 	}
 
 	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, "tok-parent"); err != nil {
+	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, "tok-parent"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -96,7 +159,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, "tok-sb"); err == nil {
+	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, "tok-sb"); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
 		t.Fatalf("expected NotFound through the wrap, got: %v", err)

@@ -22,7 +22,7 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 	if err := validateIDs(req.SnapshotId, req.SandboxId); err != nil {
 		return nil, err
 	}
-	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.ApiToken)
+	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.ApiToken)
 	if err != nil {
 		return nil, grpcError(err)
 	}

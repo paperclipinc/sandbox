@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"unsafe"
 
@@ -33,6 +34,8 @@ func handleNotifyForked(req *vsock.NotifyForkedRequest) vsock.Response {
 	step := stepClock(req.HostWallClockNanos)
 
 	writeForkGeneration(req.Generation)
+
+	configureNetwork(req.Network)
 
 	signaled := signalUserspace()
 
@@ -142,6 +145,38 @@ func writeForkGeneration(generation uint64) {
 	if err := os.WriteFile("/run/sandbox/fork-generation", data, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox-agent: write fork-generation: %v\n", err)
 	}
+}
+
+// guestNetIface is the guest-side NIC name. The snapshot bakes one NIC
+// (firecracker.NetIfaceID = "eth0" on the host side); inside the guest the
+// kernel names the single virtio-net device eth0.
+const guestNetIface = "eth0"
+
+// configureNetwork applies the per-fork eth0 address and default route after a
+// restore. Every fork restores the same snapshot-baked guest IP, so without
+// re-addressing here all forks would share one guest IP and the host could not
+// route return traffic per fork. The address is flushed first so a re-fork or
+// re-delivery is idempotent. Best effort: each step logs (addresses only, no
+// secrets) and continues so a partial failure still brings the link up. No-op
+// when the host did not deliver a network config.
+func configureNetwork(cfg *vsock.NotifyForkedNetwork) {
+	if cfg == nil {
+		return
+	}
+	addr := fmt.Sprintf("%s/%d", cfg.GuestIP, cfg.PrefixLen)
+	steps := [][]string{
+		{"ip", "link", "set", guestNetIface, "up"},
+		{"ip", "addr", "flush", "dev", guestNetIface},
+		{"ip", "addr", "add", addr, "dev", guestNetIface},
+		{"ip", "route", "replace", "default", "via", cfg.GatewayIP, "dev", guestNetIface},
+	}
+	for _, argv := range steps {
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed ip(8) argv, no untrusted shell
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox-agent: net config %v failed: %v: %s\n", argv, err, out)
+		}
+	}
+	fmt.Printf("sandbox-agent: configured %s addr=%s gateway=%s\n", guestNetIface, addr, cfg.GatewayIP)
 }
 
 // signalUserspace sends SIGUSR2 to every userspace process except PID 1 (this

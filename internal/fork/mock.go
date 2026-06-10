@@ -25,6 +25,20 @@ type MockEngine struct {
 	// (defaults to /tmp/agent-run-mock). Tests point it at a temp dir so a
 	// fake agent can listen on the exact path the engine reports.
 	VsockDir string
+	// lastNetwork records the NetworkOpts of the most recent Fork call (nil if
+	// the fork carried none). Tests assert the template's NetworkPolicy was
+	// plumbed all the way through the Fork RPC to the engine.
+	lastNetwork *NetworkOpts
+}
+
+// LastForkNetwork returns the NetworkOpts passed to the most recent Fork call,
+// or nil if none has been recorded (or the last fork carried no network). It
+// lets controller envtests assert the egress policy and allowlist reached the
+// engine through the Fork RPC.
+func (e *MockEngine) LastForkNetwork() *NetworkOpts {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastNetwork
 }
 
 // vsockPath reports the vsock UDS path for a sandbox, rooted at VsockDir.
@@ -71,6 +85,7 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 
 	e.mu.Lock()
 	e.sandboxes[sandboxID] = sandbox
+	e.lastNetwork = opts.Network
 	e.mu.Unlock()
 
 	elapsed := time.Since(start)

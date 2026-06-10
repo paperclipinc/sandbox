@@ -14,6 +14,17 @@ import (
 // CreateTemplate comment for the per-cwd isolation invariant.
 const VsockRelPath = "vsock.sock"
 
+// NetIfaceID is the single guest NIC iface_id baked into every template
+// snapshot. Forks remap this exact id to their own tap via the snapshot/load
+// network_overrides (LoadSnapshotWithOverrides), so the value must be stable.
+const NetIfaceID = "eth0"
+
+// PlaceholderTapName is the host tap a template's placeholder NIC is bound to
+// at snapshot time. It never carries live traffic: the template VM is paused
+// and snapshotted, and every fork remaps NetIfaceID to its OWN tap at load.
+// The template build creates this tap (host-side) before booting.
+const PlaceholderTapName = "sbtap-template"
+
 // TemplateManager handles the lifecycle of snapshot templates.
 // A template is: boot a VM → run init commands → pause → snapshot → kill.
 // The snapshot is then used by the fork engine for CoW forking.
@@ -107,6 +118,19 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 	// per-VM WorkDir set as cmd.Dir in StartVM is what keeps forks apart.
 	if err := client.SetVsock(3, VsockRelPath); err != nil {
 		return nil, fmt.Errorf("set vsock: %w", err)
+	}
+
+	// Attach a placeholder NIC when networking is enabled so the snapshot
+	// bakes a net device. Firecracker does NOT support hot-plugging a NIC
+	// after boot or adding one on restore, so the device must exist at
+	// snapshot time; each fork then remaps this iface_id to its own tap via
+	// network_overrides on snapshot/load (LoadSnapshotWithOverrides). The
+	// placeholder tap is host-created by the template build and carries no
+	// live traffic (the VM is paused immediately and snapshotted).
+	if cfg.Network != nil {
+		if err := client.SetNetwork(cfg.Network.IfaceID, cfg.Network.GuestMAC, cfg.Network.HostDevName); err != nil {
+			return nil, fmt.Errorf("attach placeholder NIC: %w", err)
+		}
 	}
 
 	// Boot

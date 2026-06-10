@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -55,8 +56,11 @@ func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sand
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
 // The returned endpoint is the node's HTTP sandbox API: what clients (SDKs)
 // actually talk to. apiToken is the bearer token forkd registers for the
-// sandbox's HTTP API; it is never logged.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, apiToken string) (*forkResult, error) {
+// sandbox's HTTP API; it is never logged. network is the template's egress
+// policy (egress mode + allowlist); nil leaves the ForkRequest's NetworkConfig
+// unset and forkd applies no per-fork egress ruleset. The policy and allowlist
+// entries (IPs/ports/names) are safe to log.
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, apiToken string) (*forkResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -66,6 +70,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		SandboxId:  sandboxID,
 		Env:        toEnvVars(env),
 		Secrets:    toSecretVars(secrets),
+		Network:    toNetworkConfig(network),
 		ApiToken:   apiToken,
 	})
 	if err != nil {
@@ -118,6 +123,22 @@ func toEnvVars(m map[string]string) []*forkdpb.EnvVar {
 		vars = append(vars, &forkdpb.EnvVar{Key: k, Value: v})
 	}
 	return vars
+}
+
+// toNetworkConfig maps the template's NetworkPolicy onto the proto
+// NetworkConfig forkd consumes. A nil policy (template declares no network)
+// yields nil, leaving the fork un-networked. The allowlist is passed through
+// verbatim; forkd splits it into enforceable IP:port entries and name-based
+// entries (the latter logged as not-yet-enforced), so the controller does not
+// validate or filter it here.
+func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
+	if n == nil {
+		return nil
+	}
+	return &forkdpb.NetworkConfig{
+		EgressPolicy: string(n.Egress),
+		AllowList:    n.Allow,
+	}
 }
 
 func toSecretVars(m map[string]string) []*forkdpb.SecretVar {
