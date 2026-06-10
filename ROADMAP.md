@@ -138,15 +138,26 @@ out of capacity. Chaos suite in CI.
 
 - ⬜ forkd crash policy: running VMs reaped deterministically on restart
   (forkd is the VM supervisor; orphan FC processes are killed and claims
-  failed with a typed condition)
-- ⬜ Node loss → claims `NodeLost` within bounded time; pools rebuild
-  elsewhere
-- ⬜ Controller restart: reconcile CRD state against forkd-reported actual
-  VMs; zero orphans
-- ⬜ Orphan sweeps (VM without claim, volume without object)
-- ⬜ Claim TTLs: `maxLifetime`, `idleTimeout` with status conditions
-- ⬜ etcd hygiene: TTL finished objects, rate-limit status updates
-- ⬜ Saturation behavior: queue with deadline → typed fail-fast condition
+  failed with a typed condition). Open: needs forkd-local state so a
+  restarted forkd can recognize and reap its own pre-crash VMs; tracked in
+  epic #12.
+- 🔨 Node loss: claims reach `NodeLost` within the GC interval (done); pools
+  rebuild replicas elsewhere is still open (tracked in #12).
+- ✅ Controller restart: the GC pass rebuilds the desired set from CRD state
+  and sweeps any forkd VM not accounted for; zero orphans.
+- 🔨 Orphan sweeps: VM without a backing object is swept past OrphanGrace,
+  with a live-claim-by-name safety net (done). Volume without object is
+  still open.
+- ✅ Claim TTLs: `maxLifetime` and `idleTimeout` reap to a terminal
+  `Terminated` phase with status conditions; `idleTimeout` reads activity
+  via the forkd `ListSandboxes` primitive.
+- 🔨 etcd hygiene: TTL of finished objects, including early-failed claims,
+  is done. Rate-limiting and batching of status updates is still open.
+- ⬜ Saturation behavior: queue with deadline then a typed fail-fast
+  condition. Open (tracked in #12).
+
+See docs/failure-gc.md for each guarantee, its proving test, and bounded
+time, plus the explicit open items.
 
 ## 3. Snapshot distribution
 
