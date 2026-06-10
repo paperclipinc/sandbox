@@ -17,15 +17,15 @@ import (
 
 func main() {
 	var (
-		listenAddr     string
-		httpAddr       string
-		dataDir        string
-		firecrackerBin string
-		kernelPath     string
-		mockMode       bool
-		tlsCert        string
-		tlsKey         string
-		tlsCA          string
+		listenAddr      string
+		httpAddr        string
+		dataDir         string
+		firecrackerBin  string
+		kernelPath      string
+		mockMode        bool
+		tlsCert         string
+		tlsKey          string
+		tlsCA           string
 		jailerBin       string
 		chrootBase      string
 		uidRange        string

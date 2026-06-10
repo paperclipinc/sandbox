@@ -126,7 +126,11 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
   sandbox-server remain unjailed; tracked in threat model residuals)
 - ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
   (rotation and token expiry pending; tracked in threat model residuals)
-- ⬜ Snapshot content addressing (digest in CRD status, verify-on-load)
+- ✅ Snapshot content addressing (#9): manifest digest in pool status,
+  verify-on-load refuses a tampered snapshot (dev escape via
+  `--allow-unverified-snapshots`). Proven by unit tests and the KVM CI
+  tamper-detection phase on a real snapshot; residual (verify-once, not
+  per-fork) tracked in the threat model. See docs/snapshot-distribution.md.
 - ⬜ Lifetime memory accounting (`agentrun_memory_unique_bytes` over time,
   not just T=0)
 - ⬜ External security review scheduled before any 1.0 claim
@@ -165,13 +169,22 @@ forkd loading snapshots "from local storage" reinvents image pull with
 multi-GB artifacts. No competitor solves this well in open source; treat as
 a differentiator.
 
-- ⬜ Content-addressed snapshot store (OCI artifact), chunked incremental
-  transfer; pool rebuilds ship deltas
+- ✅ Content-addressed snapshot store: fixed-size sha256 chunks, deduplicated
+  across snapshots, manifest digest as the snapshot identity (VMMVersion in
+  the manifest aligns it with the version-compat contract #32). Unit tests
+  prove dedup and byte-identical reconstruction; the KVM CI integrity phase
+  proves byte-identical reconstruction and tamper detection on a real
+  multi-hundred-MB Firecracker snapshot. See docs/snapshot-distribution.md.
+- ✅ Chunked incremental transfer: Transport interface + HTTP transport pull
+  only the MissingChunks (each verified on arrival), so pool rebuilds ship
+  deltas, not whole images. Unit tests prove the incremental delta path.
+- ✅ Node cache eviction policy for bounded NVMe: mtime-LRU EvictToFit with
+  pinned manifests protected, crash-safe via on-disk access times.
 - ⬜ P2P distribution between nodes (Spegel-style); publish
-  pool-update→all-nodes-ready at 10/50/100 nodes
+  pool-update→all-nodes-ready at 10/50/100 nodes. OPEN and unmeasured: needs
+  a multi-node testbed; propagation-time numbers are not stated until then.
 - ⬜ `prefetch: full | lazy` pool setting (serve forks from partially
-  fetched snapshots)
-- ⬜ Node cache eviction policy for bounded NVMe
+  fetched snapshots). OPEN: lazy partial-fetch serving is not yet built.
 
 ## 4. Benchmark program + honest comparison
 
