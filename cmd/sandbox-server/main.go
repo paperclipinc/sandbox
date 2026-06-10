@@ -78,6 +78,10 @@ func main() {
 		mockMode:   mockMode,
 		sandboxAPI: daemon.NewSandboxAPI(dataDir),
 	}
+	// Standalone local-testing path: if the Firecracker vsock UDS does not
+	// exist, fall back to a guest agent running directly on the host
+	// (/tmp/sandbox-agent-52.sock). forkd does not opt in to this fallback.
+	s.sandboxAPI.EnableUnixFallback()
 
 	if !mockMode {
 		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir)

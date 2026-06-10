@@ -116,6 +116,15 @@ func (c *Client) Exec(command string, workingDir string, env map[string]string, 
 	return resp.Exec, nil
 }
 
+// Configure delivers claim-time env and secrets to the guest agent.
+func (c *Client) Configure(env, secrets map[string]string) error {
+	_, err := c.send(&Request{
+		Type:      TypeConfigure,
+		Configure: &ConfigureRequest{Env: env, Secrets: secrets},
+	})
+	return err
+}
+
 func (c *Client) ReadFile(path string) ([]byte, error) {
 	resp, err := c.send(&Request{
 		Type:     TypeReadFile,

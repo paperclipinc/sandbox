@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/workspace"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,6 +27,11 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// A rejected fork is terminal: never reconcile it again.
+	if meta.IsStatusConditionTrue(fork.Status.Conditions, "Rejected") {
+		return ctrl.Result{}, nil
+	}
+
 	if fork.Status.ReadyForks >= fork.Spec.Replicas {
 		return ctrl.Result{}, nil
 	}
@@ -38,6 +44,41 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}, &source); err != nil {
 		logger.Error(err, "source sandbox not found", "source", fork.Spec.SourceRef.Name)
 		return ctrl.Result{}, err
+	}
+
+	// Live-fork secret gate: duplicating guest memory duplicates any
+	// delivered secrets into every fork. Default-deny without explicit
+	// opt-in. Spec-level check — fires regardless of source readiness.
+	if len(source.Spec.Secrets) > 0 {
+		now := metav1.Now()
+		if !fork.Spec.AllowSecretInheritance {
+			setCondition(&fork.Status.Conditions, metav1.Condition{
+				Type:               "Rejected",
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: now,
+				Reason:             "SecretInheritanceDenied",
+				Message:            "source claim holds secrets; recreate the fork with spec.allowSecretInheritance=true to permit it (forks duplicate guest memory, including secret values)",
+			})
+			if err := r.Status().Update(ctx, &fork); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil // terminal: no requeue
+		}
+		// Audit trail for the explicit opt-in. Only write status when the
+		// condition is not already recorded, so the status-update-triggered
+		// re-reconcile does not loop on itself.
+		if c := meta.FindStatusCondition(fork.Status.Conditions, "SecretInheritance"); c == nil || c.Status != metav1.ConditionTrue || c.Reason != "ExplicitOptIn" {
+			setCondition(&fork.Status.Conditions, metav1.Condition{
+				Type:               "SecretInheritance",
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: now,
+				Reason:             "ExplicitOptIn",
+				Message:            "fork inherits the source's in-memory secrets by explicit opt-in",
+			})
+			if err := r.Status().Update(ctx, &fork); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	if source.Status.Phase != v1alpha1.SandboxReady {

@@ -13,6 +13,7 @@ const (
 	TypeMkdir     RequestType = "mkdir"
 	TypeRemove    RequestType = "remove"
 	TypePing      RequestType = "ping"
+	TypeConfigure RequestType = "configure"
 )
 
 type Request struct {
@@ -23,6 +24,15 @@ type Request struct {
 	ListDir   *ListDirRequest   `json:"list_dir,omitempty"`
 	Mkdir     *MkdirRequest     `json:"mkdir,omitempty"`
 	Remove    *RemoveRequest    `json:"remove,omitempty"`
+	Configure *ConfigureRequest `json:"configure,omitempty"`
+}
+
+// ConfigureRequest delivers claim-time environment and secrets to the guest
+// after restore. Values must never be logged or echoed by either side; they
+// exist only in the request payload and the guest process environment.
+type ConfigureRequest struct {
+	Env     map[string]string `json:"env,omitempty"`
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 type ExecRequest struct {

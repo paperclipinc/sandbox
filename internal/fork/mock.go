@@ -18,6 +18,19 @@ type MockEngine struct {
 	ForkDelay time.Duration
 	// PausedSources records source sandbox IDs that were "paused" during ForkRunning.
 	PausedSources []string
+	// VsockDir overrides the root directory reported in ForkResult.VsockPath
+	// (defaults to /tmp/agent-run-mock). Tests point it at a temp dir so a
+	// fake agent can listen on the exact path the engine reports.
+	VsockDir string
+}
+
+// vsockPath reports the vsock UDS path for a sandbox, rooted at VsockDir.
+func (e *MockEngine) vsockPath(sandboxID string) string {
+	vsockDir := e.VsockDir
+	if vsockDir == "" {
+		vsockDir = "/tmp/agent-run-mock"
+	}
+	return fmt.Sprintf("%s/sandboxes/%s/vsock.sock", vsockDir, sandboxID)
 }
 
 func NewMockEngine() *MockEngine {
@@ -65,7 +78,7 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 		ForkTimeMs:   float64(elapsed.Microseconds()) / 1000.0,
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
-		VsockPath:    fmt.Sprintf("/tmp/agent-run-mock/sandboxes/%s/vsock.sock", sandboxID),
+		VsockPath:    e.vsockPath(sandboxID),
 	}, nil
 }
 
@@ -163,6 +176,6 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 		ForkTimeMs:   float64(elapsed.Microseconds()) / 1000.0,
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
-		VsockPath:    fmt.Sprintf("/tmp/agent-run-mock/sandboxes/%s/vsock.sock", newSandboxID),
+		VsockPath:    e.vsockPath(newSandboxID),
 	}, nil
 }

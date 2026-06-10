@@ -1,5 +1,6 @@
 bin/
 /controller
+/agent
 *.exe
 *.test
 *.out

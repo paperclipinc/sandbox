@@ -18,13 +18,13 @@ type SandboxTemplate struct {
 }
 
 type SandboxTemplateSpec struct {
-	Image     string            `json:"image"`
-	Init      []string          `json:"init,omitempty"`
-	Command   []string          `json:"command,omitempty"`
-	Env       []corev1.EnvVar   `json:"env,omitempty"`
-	Resources SandboxResources  `json:"resources,omitempty"`
-	Volumes   []SandboxVolume   `json:"volumes,omitempty"`
-	Network   *NetworkPolicy    `json:"networkPolicy,omitempty"`
+	Image     string           `json:"image"`
+	Init      []string         `json:"init,omitempty"`
+	Command   []string         `json:"command,omitempty"`
+	Env       []corev1.EnvVar  `json:"env,omitempty"`
+	Resources SandboxResources `json:"resources,omitempty"`
+	Volumes   []SandboxVolume  `json:"volumes,omitempty"`
+	Network   *NetworkPolicy   `json:"networkPolicy,omitempty"`
 }
 
 type SandboxResources struct {
@@ -42,12 +42,12 @@ const (
 )
 
 type SandboxVolume struct {
-	Name       string         `json:"name"`
-	Size       string         `json:"size,omitempty"`
-	Source     *VolumeSource  `json:"source,omitempty"`
-	ReadOnly   bool           `json:"readOnly,omitempty"`
-	MountPath  string         `json:"mountPath,omitempty"`
-	ForkPolicy ForkPolicy     `json:"forkPolicy,omitempty"`
+	Name       string        `json:"name"`
+	Size       string        `json:"size,omitempty"`
+	Source     *VolumeSource `json:"source,omitempty"`
+	ReadOnly   bool          `json:"readOnly,omitempty"`
+	MountPath  string        `json:"mountPath,omitempty"`
+	ForkPolicy ForkPolicy    `json:"forkPolicy,omitempty"`
 
 	// For Snapshot fork policy: the CSI snapshot class to use
 	SnapshotClass string `json:"snapshotClass,omitempty"`
@@ -142,12 +142,12 @@ type SandboxPoolSpec struct {
 }
 
 type SandboxPoolStatus struct {
-	ReadySnapshots     int32              `json:"readySnapshots"`
-	TotalSnapshots     int32              `json:"totalSnapshots"`
-	RestoringCount     int32              `json:"restoringCount"`
-	LastSnapshotTime   *metav1.Time       `json:"lastSnapshotTime,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	NodeDistribution   map[string]int32   `json:"nodeDistribution,omitempty"`
+	ReadySnapshots   int32              `json:"readySnapshots"`
+	TotalSnapshots   int32              `json:"totalSnapshots"`
+	RestoringCount   int32              `json:"restoringCount"`
+	LastSnapshotTime *metav1.Time       `json:"lastSnapshotTime,omitempty"`
+	Conditions       []metav1.Condition `json:"conditions,omitempty"`
+	NodeDistribution map[string]int32   `json:"nodeDistribution,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -174,9 +174,9 @@ type SandboxClaim struct {
 }
 
 type SandboxClaimSpec struct {
-	PoolRef   LocalObjectReference `json:"poolRef"`
-	Env       []corev1.EnvVar      `json:"env,omitempty"`
-	Secrets   []SecretMount        `json:"secrets,omitempty"`
+	PoolRef LocalObjectReference `json:"poolRef"`
+	Env     []corev1.EnvVar      `json:"env,omitempty"`
+	Secrets []SecretMount        `json:"secrets,omitempty"`
 
 	// Override fork policies for specific volumes on this claim.
 	VolumeOverrides []VolumeOverride `json:"volumeOverrides,omitempty"`
@@ -189,10 +189,10 @@ type SandboxClaimSpec struct {
 }
 
 type SecretMount struct {
-	Name      string                `json:"name"`
+	Name      string                   `json:"name"`
 	SecretRef corev1.SecretKeySelector `json:"secretRef"`
-	EnvVar    string                `json:"envVar,omitempty"`
-	MountPath string                `json:"mountPath,omitempty"`
+	EnvVar    string                   `json:"envVar,omitempty"`
+	MountPath string                   `json:"mountPath,omitempty"`
 }
 
 type VolumeOverride struct {
@@ -253,6 +253,13 @@ type SandboxForkSpec struct {
 	// Whether to pause the source sandbox during checkpoint.
 	// Reduces checkpoint time but causes a brief interruption.
 	PauseSource bool `json:"pauseSource,omitempty"`
+
+	// AllowSecretInheritance permits forking a sandbox whose claim holds
+	// secrets. A live fork duplicates guest memory — including any delivered
+	// secret values — into every fork. Default is to reject such forks; see
+	// docs/fork-correctness.md §3. The long-term default is per-fork
+	// credential reissue.
+	AllowSecretInheritance bool `json:"allowSecretInheritance,omitempty"`
 }
 
 type ForkInfo struct {

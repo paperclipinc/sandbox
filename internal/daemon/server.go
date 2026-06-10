@@ -91,12 +91,54 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	s.registerAgent(result.SandboxID, result.VsockPath)
+	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets); err != nil {
+		// A sandbox that reports Ready without its secrets is a lie; reap it.
+		_ = s.engine.Terminate(result.SandboxID)
+		activeSandboxes.Dec()
+		s.sandboxAPI.UnregisterSandbox(result.SandboxID)
+		return nil, fmt.Errorf("sandbox %s: secret delivery failed: %w", result.SandboxID, err)
+	}
 
 	return result, nil
 }
 
+// deliverConfig connects the guest agent and delivers claim-time env+secrets.
+// Strict when the engine is real and secrets are present: failure is returned
+// so the caller can reap the sandbox. Env-only failures are logged
+// (best-effort), and the mock engine is skipped entirely — no guest exists.
+// Secret values are never logged.
+func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string) error {
+	if !s.engine.GetCapacity().KVMAvailable {
+		return nil // mock engine: no guest to deliver to
+	}
+
+	strict := len(secrets) > 0
+
+	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+		if strict {
+			return fmt.Errorf("guest agent not connected: %w", err)
+		}
+		log.Printf("forkd: sandbox %s: guest agent not connected: %v", sandboxID, err)
+		return nil
+	}
+
+	if len(env) == 0 && len(secrets) == 0 {
+		return nil
+	}
+	if err := s.sandboxAPI.Configure(sandboxID, env, secrets); err != nil {
+		if strict {
+			return fmt.Errorf("configure guest: %w", err)
+		}
+		log.Printf("forkd: sandbox %s: env delivery failed (best-effort): %v", sandboxID, err)
+	}
+	return nil
+}
+
 // ForkRunning checkpoints a running sandbox and forks it.
+//
+// ForkRunning deliberately does NOT deliver new config: forks inherit the
+// source VM's memory, including any previously delivered env+secrets.
+// Fresh-credential reissue for live forks is issue #7's end state.
 func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error) {
 	result, err := s.engine.ForkRunning(sourceSandboxID, newSandboxID, pauseSource)
 	if err != nil {

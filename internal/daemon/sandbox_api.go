@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"sync"
 
@@ -15,6 +17,9 @@ type SandboxAPI struct {
 	mu       sync.RWMutex
 	agents   map[string]*vsock.Client // sandbox ID → agent connection
 	vsockDir string                   // directory containing vsock UDS files
+	// unixFallback allows RegisterSandbox to fall back to the agent's fixed
+	// local unix socket. Opt-in: see EnableUnixFallback.
+	unixFallback bool
 }
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
@@ -24,11 +29,32 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	}
 }
 
+// EnableUnixFallback lets RegisterSandbox fall back to the guest agent's
+// fixed local unix socket (/tmp/sandbox-agent-<port>.sock) when the vsock
+// UDS path does not exist. This supports the standalone sandbox-server's
+// local-testing workflow (agent running on the host, no Firecracker).
+//
+// forkd deliberately does NOT enable this: its vsock paths come from the
+// fork engine, and a fallback to a global socket could deliver claim-time
+// secrets to an unrelated local process.
+//
+// Must be called before the API serves requests; the flag is not synchronized.
+func (api *SandboxAPI) EnableUnixFallback() {
+	api.unixFallback = true
+}
+
 // RegisterSandbox connects to a sandbox's guest agent.
 func (api *SandboxAPI) RegisterSandbox(sandboxID, vsockPath string) error {
 	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
 	if err != nil {
-		// Fallback: try Unix socket (for mock/local testing)
+		// Fallback to the agent's local unix socket only when explicitly
+		// enabled (standalone sandbox-server) AND the vsock UDS path does not
+		// exist (no Firecracker VM behind it). Never on other dial failures:
+		// a half-up VM must surface as an error, not silently connect to a
+		// stray local agent.
+		if !api.unixFallback || !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("connect to agent for sandbox %s: %w", sandboxID, err)
+		}
 		sockPath := fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort)
 		client, err = vsock.ConnectUnix(sockPath)
 		if err != nil {
@@ -50,6 +76,16 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 		delete(api.agents, sandboxID)
 	}
 	api.mu.Unlock()
+}
+
+// Configure delivers claim-time env and secrets to a sandbox's guest agent.
+// Values are never logged.
+func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]string) error {
+	agent, err := api.getAgent(sandboxID)
+	if err != nil {
+		return err
+	}
+	return agent.Configure(env, secrets)
 }
 
 func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {

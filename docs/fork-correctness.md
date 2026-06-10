@@ -13,7 +13,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 |---|--------|--------|------|--------|
 | 1 | Shared RNG state after restore | Reseed CRNG on every fork | `TestForkDistinctRandomness` | **open** |
 | 2 | Stale wall clock after restore | kvm-clock resync + agent clock step | `TestForkClockCorrectness` | **open** |
-| 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestForkSecretIsolation` | **open** |
+| 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all — see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
 
@@ -76,11 +76,16 @@ secrets are **rejected** unless one of:
   copies that leaked into fork memory are revoked upstream). This is the
   long-term default; rejection is the stopgap.
 
-Note: secret *delivery* itself is not implemented yet — the controller resolves
+The default-deny gate plus opt-in audit trail is implemented in the fork
+controller (`internal/controller/sandboxfork_controller.go`): forks of
+secret-holding sandboxes get a terminal typed `Rejected` condition without
+`spec.allowSecretInheritance: true`, and explicit opt-ins are recorded as an
+audit condition. Secret *delivery* is implemented too: the controller resolves
 Secret refs (`internal/controller/sandboxclaim_controller.go:resolveSecrets`)
-but `ForkOpts.Env/Secrets` are currently dropped by the engine. Delivery must
-go over vsock post-restore, never be baked into snapshots, and never appear in
-Firecracker boot args or the FC API socket request log.
+and forkd delivers them over vsock post-restore
+(`internal/daemon/server.go:deliverConfig`) — never baked into snapshots,
+never in Firecracker boot args or the FC API socket request log. Per-fork
+credential reissue remains open.
 
 Test: claim with a secret, exec to confirm the secret is visible in the parent,
 fork without opt-in → typed `Rejected` condition; fork with opt-in → secret

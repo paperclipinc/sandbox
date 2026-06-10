@@ -82,6 +82,31 @@ func main() {
 	data, _ := json.Marshal(entries)
 	fmt.Printf("PASS listdir: %s\n", string(data))
 
+	// Test configure: claim-time env+secrets must reach exec sessions.
+	if err := client.Configure(
+		map[string]string{"CFG_VAR": "cfg"},
+		map[string]string{"TEST_SECRET": "s3cr3t-canary"},
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL configure: %v\n", err)
+		os.Exit(1)
+	}
+	result, err = client.Exec(`echo -n "$CFG_VAR:$TEST_SECRET"`, "/workspace", nil, 10)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL exec after configure: %v\n", err)
+		os.Exit(1)
+	}
+	if result.Stdout != "cfg:s3cr3t-canary" {
+		fmt.Fprintf(os.Stderr, "FAIL configure: stdout=%q, want cfg:s3cr3t-canary\n", result.Stdout)
+		os.Exit(1)
+	}
+	// Per-request env must override configured values.
+	result, err = client.Exec(`echo -n "$CFG_VAR"`, "/workspace", map[string]string{"CFG_VAR": "override"}, 10)
+	if err != nil || result.Stdout != "override" {
+		fmt.Fprintf(os.Stderr, "FAIL configure precedence: err=%v stdout=%q\n", err, result.Stdout)
+		os.Exit(1)
+	}
+	fmt.Println("PASS configure: env+secrets visible to exec, request overrides configured")
+
 	fmt.Println("")
 	fmt.Println("================================")
 	fmt.Println("  All guest agent tests passed!")

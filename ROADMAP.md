@@ -101,8 +101,8 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
 - ✅ Python SDK k8s mode speaks the actual forkd API
 - ⬜ Volume fork policies actually attach volumes to VMs (handlers are
   currently no-ops; `Snapshot` needs a real btrfs/reflink backend)
-- ⬜ Secrets delivered into the guest over vsock (resolved by controller
-  today, then dropped)
+- ✅ Secrets delivered into the guest over vsock (strict on real engines;
+  wire encryption pending #4)
 
 ## 1. Fork-engine correctness + threat model
 

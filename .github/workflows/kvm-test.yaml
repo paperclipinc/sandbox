@@ -6,6 +6,9 @@ on:
     paths:
       - 'internal/firecracker/**'
       - 'internal/fork/**'
+      - 'guest/**'
+      - 'cmd/test-agent/**'
+      - 'internal/vsock/**'
   pull_request:
     branches: [main]
   workflow_dispatch:

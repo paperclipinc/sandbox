@@ -6,20 +6,29 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// mockAgent simulates the guest agent for testing on macOS.
-func mockAgent(t *testing.T, sockPath string) (net.Listener, func()) {
+var fakeAgentSeq atomic.Int64
+
+// startFakeAgent starts a fake guest agent on a unix socket and returns the
+// socket path. Every decoded Request is passed to handler; the returned
+// Response is written back. Cleanup is registered on t.
+func startFakeAgent(t *testing.T, handler func(req *Request) Response) string {
 	t.Helper()
+
+	sockPath := fmt.Sprintf("/tmp/test-agent-%d-%d.sock", os.Getpid(), fakeAgentSeq.Add(1))
 	os.Remove(sockPath)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	startTime := time.Now()
+	t.Cleanup(func() {
+		listener.Close()
+		os.Remove(sockPath)
+	})
 
 	go func() {
 		for {
@@ -33,45 +42,12 @@ func mockAgent(t *testing.T, sockPath string) (net.Listener, func()) {
 				scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 				for scanner.Scan() {
 					var req Request
-					if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-						resp, _ := json.Marshal(Response{OK: false, Error: err.Error()})
-						c.Write(append(resp, '\n'))
-						continue
-					}
-
 					var resp Response
-					switch req.Type {
-					case TypePing:
-						resp = Response{OK: true, Ping: &PingResponse{Uptime: time.Since(startTime).Seconds()}}
-					case TypeExec:
-						resp = Response{OK: true, Exec: &ExecResponse{
-							ExitCode:   0,
-							Stdout:     fmt.Sprintf("executed: %s\n", req.Exec.Command),
-							Stderr:     "",
-							ExecTimeMs: 1.0,
-						}}
-					case TypeReadFile:
-						resp = Response{OK: true, ReadFile: &ReadFileResponse{
-							Content: []byte("file content"),
-							Size:    12,
-						}}
-					case TypeWriteFile:
-						resp = Response{OK: true}
-					case TypeListDir:
-						resp = Response{OK: true, ListDir: &ListDirResponse{
-							Entries: []FileEntry{
-								{Name: "test.py", IsDir: false, Size: 100, Mode: 0644},
-								{Name: "src", IsDir: true, Size: 0, Mode: 0755},
-							},
-						}}
-					case TypeMkdir:
-						resp = Response{OK: true}
-					case TypeRemove:
-						resp = Response{OK: true}
-					default:
-						resp = Response{OK: false, Error: "unknown type"}
+					if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+						resp = Response{OK: false, Error: err.Error()}
+					} else {
+						resp = handler(&req)
 					}
-
 					data, _ := json.Marshal(resp)
 					c.Write(append(data, '\n'))
 				}
@@ -79,16 +55,50 @@ func mockAgent(t *testing.T, sockPath string) (net.Listener, func()) {
 		}
 	}()
 
-	return listener, func() {
-		listener.Close()
-		os.Remove(sockPath)
+	return sockPath
+}
+
+// mockAgentHandler simulates the guest agent's canned responses for testing
+// on macOS.
+func mockAgentHandler() func(req *Request) Response {
+	startTime := time.Now()
+	return func(req *Request) Response {
+		switch req.Type {
+		case TypePing:
+			return Response{OK: true, Ping: &PingResponse{Uptime: time.Since(startTime).Seconds()}}
+		case TypeExec:
+			return Response{OK: true, Exec: &ExecResponse{
+				ExitCode:   0,
+				Stdout:     fmt.Sprintf("executed: %s\n", req.Exec.Command),
+				Stderr:     "",
+				ExecTimeMs: 1.0,
+			}}
+		case TypeReadFile:
+			return Response{OK: true, ReadFile: &ReadFileResponse{
+				Content: []byte("file content"),
+				Size:    12,
+			}}
+		case TypeWriteFile:
+			return Response{OK: true}
+		case TypeListDir:
+			return Response{OK: true, ListDir: &ListDirResponse{
+				Entries: []FileEntry{
+					{Name: "test.py", IsDir: false, Size: 100, Mode: 0644},
+					{Name: "src", IsDir: true, Size: 0, Mode: 0755},
+				},
+			}}
+		case TypeMkdir:
+			return Response{OK: true}
+		case TypeRemove:
+			return Response{OK: true}
+		default:
+			return Response{OK: false, Error: "unknown type"}
+		}
 	}
 }
 
 func TestClient_Ping(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -106,9 +116,7 @@ func TestClient_Ping(t *testing.T) {
 }
 
 func TestClient_Exec(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -130,9 +138,7 @@ func TestClient_Exec(t *testing.T) {
 }
 
 func TestClient_ReadFile(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -150,9 +156,7 @@ func TestClient_ReadFile(t *testing.T) {
 }
 
 func TestClient_WriteFile(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -167,9 +171,7 @@ func TestClient_WriteFile(t *testing.T) {
 }
 
 func TestClient_ListDir(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -193,9 +195,7 @@ func TestClient_ListDir(t *testing.T) {
 }
 
 func TestClient_Mkdir(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -209,9 +209,7 @@ func TestClient_Mkdir(t *testing.T) {
 }
 
 func TestClient_Remove(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -225,9 +223,7 @@ func TestClient_Remove(t *testing.T) {
 }
 
 func TestClient_MultipleCommands(t *testing.T) {
-	sockPath := fmt.Sprintf("/tmp/test-agent-%d.sock", os.Getpid())
-	_, cleanup := mockAgent(t, sockPath)
-	defer cleanup()
+	sockPath := startFakeAgent(t, mockAgentHandler())
 
 	client, err := ConnectUnix(sockPath)
 	if err != nil {
@@ -241,5 +237,35 @@ func TestClient_MultipleCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("exec %d: %v", i, err)
 		}
+	}
+}
+
+func TestConfigure(t *testing.T) {
+	var got *ConfigureRequest
+	// fake agent server on a unix socket, same pattern as the other tests in
+	// this file: accept, scan lines, unmarshal Request, respond.
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type == TypeConfigure {
+			got = req.Configure
+			return Response{OK: true}
+		}
+		return Response{OK: false, Error: "unexpected type"}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	err = client.Configure(
+		map[string]string{"SESSION": "abc"},
+		map[string]string{"API_KEY": "v"},
+	)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if got == nil || got.Env["SESSION"] != "abc" || got.Secrets["API_KEY"] != "v" {
+		t.Fatalf("agent saw %+v", got)
 	}
 }

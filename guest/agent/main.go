@@ -15,9 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/paperclipinc/sandbox/internal/guestenv"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 	"golang.org/x/sys/unix"
 )
@@ -26,6 +28,13 @@ import (
 // Sets up the filesystem, then listens on vsock for commands.
 
 var startTime = time.Now()
+
+// configuredEnv holds claim-time env+secrets delivered via the configure
+// message. Values are never logged. Guarded by configuredMu.
+var (
+	configuredMu  sync.Mutex
+	configuredEnv = map[string]string{}
+)
 
 func main() {
 	if os.Getpid() == 1 {
@@ -157,9 +166,33 @@ func handleRequest(req *vsock.Request) vsock.Response {
 		}
 		return vsock.Response{OK: true}
 
+	case vsock.TypeConfigure:
+		if req.Configure == nil {
+			return vsock.Response{OK: false, Error: "configure request is nil"}
+		}
+		return handleConfigure(req.Configure)
+
 	default:
 		return vsock.Response{OK: false, Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}
+}
+
+func handleConfigure(req *vsock.ConfigureRequest) vsock.Response {
+	// The merge is additive: retrying configure with a different key set does
+	// not remove previously delivered keys. The forkd delivery path sends
+	// configure exactly once per fork, so this only matters for manual retries.
+	configuredMu.Lock()
+	for k, v := range req.Env {
+		configuredEnv[k] = v
+	}
+	for k, v := range req.Secrets {
+		configuredEnv[k] = v
+	}
+	n := len(configuredEnv)
+	configuredMu.Unlock()
+
+	fmt.Printf("sandbox-agent: configured %d environment variables\n", n)
+	return vsock.Response{OK: true}
 }
 
 func handleExec(req *vsock.ExecRequest) vsock.Response {
@@ -179,11 +212,13 @@ func handleExec(req *vsock.ExecRequest) vsock.Response {
 		cmd.Dir = "/workspace"
 	}
 
-	for k, v := range req.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	configuredMu.Lock()
+	configured := make(map[string]string, len(configuredEnv))
+	for k, v := range configuredEnv {
+		configured[k] = v
 	}
-	// Inherit base environment
-	cmd.Env = append(os.Environ(), cmd.Env...)
+	configuredMu.Unlock()
+	cmd.Env = guestenv.Merge(os.Environ(), configured, req.Env)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
