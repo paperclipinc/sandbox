@@ -71,10 +71,10 @@ func TestRenderSharedTableShape(t *testing.T) {
 		"add table inet " + SharedTableName(),
 		"add chain inet " + SharedTableName() + " " + BaseChainName(),
 		"type filter hook forward priority 0",
-		"policy accept",                                  // base chain never drops
+		"policy accept", // base chain never drops
 		"add map inet " + SharedTableName() + " " + DispatchMapName(),
-		"type ifname : verdict",                          // dispatch by interface
-		"iifname vmap @" + DispatchMapName(),             // base chain dispatches
+		"type ifname : verdict",              // dispatch by interface
+		"iifname vmap @" + DispatchMapName(), // base chain dispatches
 	}
 	for _, w := range wantContains {
 		if !strings.Contains(out, w) {

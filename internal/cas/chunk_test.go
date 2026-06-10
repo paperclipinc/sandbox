@@ -85,9 +85,9 @@ func TestDigestValidate(t *testing.T) {
 		"",
 		"..",
 		"../../etc/passwd",
-		Digest(strings.ToUpper(string(real))),                 // uppercase hex
-		Digest(string(real)[:63]),                             // 63 chars
-		Digest(string(real) + "0"),                            // 65 chars
+		Digest(strings.ToUpper(string(real))), // uppercase hex
+		Digest(string(real)[:63]),             // 63 chars
+		Digest(string(real) + "0"),            // 65 chars
 		"g000000000000000000000000000000000000000000000000000000000000000", // non-hex
 	}
 	for _, d := range bad {

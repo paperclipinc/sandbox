@@ -7,9 +7,12 @@ on:
       - 'internal/firecracker/**'
       - 'internal/fork/**'
       - 'internal/cas/**'
+      - 'internal/netconf/**'
+      - 'internal/network/**'
       - 'guest/**'
       - 'cmd/test-agent/**'
       - 'cmd/cas-verify/**'
+      - 'cmd/net-smoke/**'
       - 'internal/vsock/**'
   pull_request:
     branches: [main]
@@ -485,6 +488,190 @@ jobs:
 
           echo "================================"
           echo "  Fork-correctness checks passed"
+          echo "================================"
+
+      # Install the host networking tools the egress phases need. nftables and
+      # iproute2 are what the real internal/network Linux Manager shells out to
+      # (nft, ip); a stock ubuntu-latest runner has iproute2 but may lack nft.
+      - name: Install nftables and iproute2
+        run: |
+          set -e
+          if ! command -v nft >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y nftables
+          fi
+          sudo apt-get install -y iproute2 || true
+          nft --version
+          ip -V
+
+      # Host-side nftables proof against REAL nft, including TWO concurrent
+      # sandboxes (the darwin gap). cmd/net-smoke drives the real
+      # internal/network Linux Manager: it installs two sandbox identities (two
+      # taps, two /30s, two distinct allowlists) exactly as forkd does, then
+      # asserts with `nft list ruleset` that both per-sandbox chains exist and
+      # the dispatch verdict map keys BOTH taps to their OWN chains. This proves
+      # (1) real nft ACCEPTS the rendered ruleset (never exercised on darwin)
+      # and (2) the two-sandbox dispatch model installs cleanly without one
+      # sandbox's drop killing another's allowed traffic (the cross-tap
+      # isolation regression the dispatch redesign fixed). REQUIRED gate.
+      - name: Host nftables two-sandbox install validation against real nft
+        run: |
+          set -e
+          go build -o /tmp/net-smoke ./cmd/net-smoke/
+          sudo /tmp/net-smoke validate
+          echo "================================"
+          echo "  Real-nft two-sandbox install validated"
+          echo "================================"
+
+      # Guest egress enforcement proof: boot ONE Firecracker VM whose NIC is on
+      # a per-sandbox tap, apply the host-side nftables allowlist (via the same
+      # Manager.Setup forkd uses) permitting exactly one destination IP:port and
+      # denying the rest, then from INSIDE the guest assert: a connect to the
+      # ALLOWED destination succeeds and a connect to a DENIED destination is
+      # blocked (times out). The guest cannot influence the host ruleset, so this
+      # is a genuine end-to-end proof of host-side default-deny egress.
+      #
+      # The "allowed" and "denied" destinations live in a separate network
+      # namespace reached over a veth, so guest->destination traffic is genuinely
+      # FORWARDED through the host and traverses the nftables forward hook the
+      # allowlist filters (traffic to a host-local IP would hit INPUT, not
+      # FORWARD, and would not be a faithful test). REQUIRED gate.
+      - name: Guest egress enforcement, reach allowed and block denied
+        timeout-minutes: 8
+        run: |
+          set -e
+          WORKDIR=/tmp/agent-run-test/egress
+          mkdir -p $WORKDIR
+          sudo chmod 666 /dev/kvm
+
+          # Addressing.
+          TAP=tap_egress
+          HOST_IP=10.250.0.1
+          GUEST_IP=10.250.0.2
+          # Destination netns reachable over a veth; the guest is allowed to
+          # reach DST_IP:ALLOWED_PORT only.
+          DST_IP=198.51.100.2
+          HOST_VETH_IP=198.51.100.1
+          ALLOWED_PORT=8080
+          DENIED_PORT=9090
+
+          # --- destination network namespace with two listeners ---
+          # A veth pair bridges the host and the netns; the netns side holds
+          # DST_IP and runs a listener on BOTH ports. Only ALLOWED_PORT is
+          # permitted by the host allowlist, so reachability difference is due to
+          # nftables, not a missing listener.
+          sudo ip netns add egress-dst
+          sudo ip link add veth-host type veth peer name veth-ns
+          sudo ip link set veth-ns netns egress-dst
+          sudo ip addr add ${HOST_VETH_IP}/30 dev veth-host
+          sudo ip link set veth-host up
+          sudo ip netns exec egress-dst ip addr add ${DST_IP}/30 dev veth-ns
+          sudo ip netns exec egress-dst ip link set veth-ns up
+          sudo ip netns exec egress-dst ip link set lo up
+          sudo ip netns exec egress-dst ip route add default via ${HOST_VETH_IP}
+          # Listeners on both ports inside the netns. The script is written to a
+          # file first (printf, one bash line) so no multi-line python lands in
+          # this YAML block scalar. It binds both ports and accept-loops forever.
+          printf '%s\n' \
+            'import socket, os' \
+            'for p in (int(os.environ["AP"]), int(os.environ["DP"])):' \
+            '    s = socket.socket()' \
+            '    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+            '    s.bind((os.environ["DST"], p))' \
+            '    s.listen(16)' \
+            '    if os.fork() == 0:' \
+            '        while True:' \
+            '            c, _ = s.accept(); c.close()' \
+            > $WORKDIR/listener.py
+          sudo AP=$ALLOWED_PORT DP=$DENIED_PORT DST=$DST_IP \
+            ip netns exec egress-dst python3 $WORKDIR/listener.py &
+          LISTENER_PID=$!
+          sleep 1
+
+          # --- host tap + nftables allowlist via the REAL Manager ---
+          # net-smoke setup-one enables forwarding, creates the tap with HOST_IP,
+          # and installs the default-deny egress chain permitting only
+          # DST_IP:ALLOWED_PORT for GUEST_IP. Same Manager.Setup forkd runs.
+          go build -o /tmp/net-smoke ./cmd/net-smoke/
+          sudo /tmp/net-smoke setup-one \
+            --tap $TAP --host-ip $HOST_IP --guest-ip $GUEST_IP \
+            --guest-mac '02:00:00:00:ee:01' \
+            --allow ${DST_IP}:${ALLOWED_PORT}
+          echo "Live ruleset after setup-one:"
+          sudo nft list ruleset
+
+          # --- build the guest rootfs (agent as /init + busybox net tools) ---
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # Net tools (ip, nc, timeout) plus the basics the agent needs.
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr ip nc timeout sleep; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          # --- boot the VM with a NIC on the tap and a vsock for the agent ---
+          SOCK=$WORKDIR/firecracker.sock
+          VSOCK_UDS=$WORKDIR/vsock.sock
+          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/serial.log 2>&1 &
+          FC_PID=$!
+          sleep 1
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/network-interfaces/eth0' \
+            -H 'Content-Type: application/json' \
+            -d "{\"iface_id\": \"eth0\", \"guest_mac\": \"02:00:00:00:ee:01\", \"host_dev_name\": \"$TAP\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"$VSOCK_UDS\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "VM booted with NIC on $TAP, waiting for agent..."
+          sleep 8
+          echo "=== Serial console output ==="
+          cat $WORKDIR/serial.log || true
+          echo "=== End serial output ==="
+
+          # --- drive the guest: configure eth0, probe allowed + denied ---
+          go build -o /tmp/test-agent ./cmd/test-agent/
+          timeout 90 /tmp/test-agent --mode egress \
+            --guest-ip $GUEST_IP --prefix-len 30 --gateway $HOST_IP \
+            --allowed ${DST_IP}:${ALLOWED_PORT} \
+            --denied ${DST_IP}:${DENIED_PORT} \
+            "$VSOCK_UDS" || {
+              echo "=== FAILURE: serial log ==="
+              cat $WORKDIR/serial.log || true
+              sudo nft list ruleset || true
+              exit 1
+            }
+
+          # --- cleanup ---
+          kill $FC_PID 2>/dev/null || true
+          kill $LISTENER_PID 2>/dev/null || true
+          sudo /tmp/net-smoke teardown-one --tap $TAP --host-ip $HOST_IP || true
+          sudo ip netns del egress-dst 2>/dev/null || true
+          sudo ip link del veth-host 2>/dev/null || true
+
+          echo "================================"
+          echo "  Guest egress enforcement proven (reach allowed, block denied)"
           echo "================================"
 
       # Jailer-boot proof: launch Firecracker via the jailer (mirroring the

@@ -25,13 +25,18 @@ import (
 //	test-agent <vsock-uds-path>                              # default suite
 //	test-agent --mode notify --generation N <vsock-uds-path> # fork proof
 func main() {
-	mode := flag.String("mode", "default", "test mode: default | notify")
+	mode := flag.String("mode", "default", "test mode: default | notify | egress")
 	generation := flag.Uint64("generation", 1, "fork generation to send in notify mode")
+	guestIP := flag.String("guest-ip", "", "egress mode: guest eth0 IP to configure (e.g. 10.0.0.2)")
+	prefixLen := flag.Int("prefix-len", 30, "egress mode: guest eth0 prefix length")
+	gateway := flag.String("gateway", "", "egress mode: guest default gateway (the host tap IP)")
+	allowed := flag.String("allowed", "", "egress mode: ip:port the guest MUST be able to reach")
+	denied := flag.String("denied", "", "egress mode: ip:port the guest must be BLOCKED from reaching")
 	flag.Parse()
 
 	args := flag.Args()
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: test-agent [--mode default|notify] [--generation N] <vsock-uds-path>")
+		fmt.Fprintln(os.Stderr, "usage: test-agent [--mode default|notify|egress] [flags] <vsock-uds-path>")
 		os.Exit(1)
 	}
 	udsPath := args[0]
@@ -44,10 +49,88 @@ func main() {
 		runNotify(client, *generation)
 	case "default":
 		runDefault(client)
+	case "egress":
+		runEgress(client, egressOpts{
+			guestIP:   *guestIP,
+			prefixLen: *prefixLen,
+			gateway:   *gateway,
+			allowed:   *allowed,
+			denied:    *denied,
+		})
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify)\n", *mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify|egress)\n", *mode)
 		os.Exit(1)
 	}
+}
+
+type egressOpts struct {
+	guestIP   string
+	prefixLen int
+	gateway   string
+	allowed   string
+	denied    string
+}
+
+// runEgress proves host-side nftables egress enforcement from INSIDE the guest.
+// It configures eth0 statically (the workflow boots a fresh VM whose NIC is on
+// the per-sandbox tap, so the host-side allowlist is already in force), then
+// uses the guest agent's exec to probe two destinations:
+//
+//	allowed ip:port -> the TCP connect MUST succeed (a local listener answers)
+//	denied  ip:port -> the TCP connect MUST be blocked (nft drops the SYN, so
+//	                   the connect attempt times out)
+//
+// The guest cannot influence the host ruleset, so a success on allowed plus a
+// block on denied is a genuine end-to-end proof that the default-deny egress
+// allowlist is enforced host-side. All values here (IPs, ports) are safe to log.
+func runEgress(client *vsock.Client, o egressOpts) {
+	if o.guestIP == "" || o.gateway == "" || o.allowed == "" || o.denied == "" {
+		fmt.Fprintln(os.Stderr, "egress mode requires --guest-ip, --gateway, --allowed, --denied")
+		os.Exit(1)
+	}
+
+	// Bring eth0 up with the per-sandbox /30 address and a default route via the
+	// host tap. busybox ip is present in the CI rootfs.
+	execOrDie(client, fmt.Sprintf("ip addr add %s/%d dev eth0", o.guestIP, o.prefixLen))
+	execOrDie(client, "ip link set eth0 up")
+	execOrDie(client, fmt.Sprintf("ip route add default via %s", o.gateway))
+	fmt.Printf("PASS guest-net: eth0=%s/%d gw=%s\n", o.guestIP, o.prefixLen, o.gateway)
+
+	// probe returns the guest-side exit code of a bounded TCP connect attempt.
+	// busybox nc connects and immediately sees EOF (exit 0) when allowed; when
+	// the SYN is dropped it hangs until `timeout` kills it (exit 124).
+	probe := func(target string) int {
+		host, port := splitHostPort(target)
+		out := execOrDie(client, fmt.Sprintf("timeout 5 nc %s %s </dev/null >/dev/null 2>&1; echo $?", host, port))
+		code := strings.TrimSpace(out)
+		fmt.Printf("egress probe %s -> exit %s\n", target, code)
+		n := 0
+		_, _ = fmt.Sscanf(code, "%d", &n)
+		return n
+	}
+
+	if rc := probe(o.allowed); rc != 0 {
+		fmt.Fprintf(os.Stderr, "FAIL egress: allowed destination %s was NOT reachable (exit %d); host allowlist is over-blocking\n", o.allowed, rc)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS egress: allowed destination %s reachable\n", o.allowed)
+
+	if rc := probe(o.denied); rc == 0 {
+		fmt.Fprintf(os.Stderr, "FAIL egress: denied destination %s WAS reachable; host default-deny is not enforced\n", o.denied)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS egress: denied destination %s blocked\n", o.denied)
+	fmt.Println("PASS egress: host-side default-deny allowlist enforced end to end")
+}
+
+// splitHostPort splits an ip:port string into its host and port parts. It does
+// not validate; the workflow passes well-formed values.
+func splitHostPort(s string) (host, port string) {
+	i := strings.LastIndex(s, ":")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], s[i+1:]
 }
 
 // connect retries while the guest agent finishes starting.
