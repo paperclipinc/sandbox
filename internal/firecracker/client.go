@@ -295,6 +295,20 @@ func (c *Client) AddDrive(driveID string, path string, readOnly bool, rootDevice
 	})
 }
 
+// SetNetwork attaches a guest NIC bound to a host tap device via
+// PUT /network-interfaces/{ifaceID}. It must be called before InstanceStart
+// (Firecracker does not support hot-plugging a NIC after boot). For a
+// fresh-boot sandbox this gives the guest its egress device; for template
+// creation it bakes a placeholder NIC into the snapshot that forks later
+// remap with LoadSnapshotWithOverrides. The MAC and tap name are safe to log.
+func (c *Client) SetNetwork(ifaceID, guestMAC, hostDevName string) error {
+	return c.put("/network-interfaces/"+ifaceID, NetworkInterface{
+		IfaceID:     ifaceID,
+		GuestMAC:    guestMAC,
+		HostDevName: hostDevName,
+	})
+}
+
 func (c *Client) SetVsock(guestCID int, udsPath string) error {
 	// For a jailed VM Firecracker binds the UDS inside its chroot; the
 	// mirrored parent directory must exist and be writable by the jailed
@@ -401,11 +415,23 @@ func (c *Client) exportFromJail(hostPath string) error {
 }
 
 func (c *Client) LoadSnapshot(memPath, snapshotPath string, resumeVM bool) error {
+	return c.LoadSnapshotWithOverrides(memPath, snapshotPath, resumeVM, nil)
+}
+
+// LoadSnapshotWithOverrides loads a snapshot like LoadSnapshot but additionally
+// remaps the snapshot's network interfaces to fresh host taps via the
+// network_overrides field (Firecracker >= v1.12; pinned CI is v1.15). This is
+// how each fork of one shared snapshot binds its OWN tap: the snapshot bakes a
+// placeholder NIC by iface_id, and every fork passes an override mapping that
+// iface_id to the fork's freshly created tap. Passing nil overrides is
+// identical to LoadSnapshot (the field is omitted, preserving prior behavior).
+func (c *Client) LoadSnapshotWithOverrides(memPath, snapshotPath string, resumeVM bool, overrides []NetworkOverride) error {
 	return c.put("/snapshot/load", SnapshotLoad{
 		SnapshotPath:        snapshotPath,
 		MemFilePath:         memPath,
 		EnableDiffSnapshots: false,
 		ResumeVM:            resumeVM,
+		NetworkOverrides:    overrides,
 	})
 }
 

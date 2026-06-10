@@ -10,6 +10,8 @@ import (
 
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/sandbox/internal/network"
 	"github.com/paperclipinc/sandbox/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -31,6 +33,10 @@ func main() {
 		uidRange        string
 		casDir          string
 		allowUnverified bool
+		enableNet       bool
+		sandboxSubnet   string
+		uplink          string
+		dnsResolver     string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -47,6 +53,10 @@ func main() {
 	flag.StringVar(&uidRange, "uid-range", "64000-64999", "Inclusive uid/gid range for per-VM jailer users, formatted low-high")
 	flag.StringVar(&casDir, "cas-dir", "", "Content-addressed store directory for snapshot integrity and transfer. Empty means <data-dir>/cas")
 	flag.BoolVar(&allowUnverified, "allow-unverified-snapshots", false, "Allow forking snapshots that fail or skip integrity verification (development only; refused by default)")
+	flag.BoolVar(&enableNet, "enable-networking", false, "Enable per-sandbox guest networking (tap device, egress nftables, NIC attach). Default false until proven on KVM CI")
+	flag.StringVar(&sandboxSubnet, "sandbox-subnet", "10.200.0.0/16", "IPv4 subnet carved into per-sandbox /30 point-to-point links; requires --enable-networking")
+	flag.StringVar(&uplink, "uplink", "", "Host egress interface for the optional sandbox-subnet MASQUERADE rule. Empty relies on the node's existing NAT")
+	flag.StringVar(&dnsResolver, "dns-resolver", "", "DNS resolver IP guests may reach; adds a DNS allow rule to each fork's egress ruleset. Empty omits the rule")
 	flag.Parse()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
@@ -74,10 +84,35 @@ func main() {
 		if !jailerCfg.Enabled() {
 			fmt.Fprintln(os.Stderr, "forkd: jailer DISABLED; Firecracker runs unjailed as forkd's user (threat model section 1); supply --jailer for any non-development deployment")
 		}
-		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg, fork.EngineOpts{
+		engineOpts := fork.EngineOpts{
 			CASDir:          casDir,
 			AllowUnverified: allowUnverified,
-		})
+		}
+		if enableNet {
+			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: invalid --sandbox-subnet: %v\n", err)
+				os.Exit(1)
+			}
+			engineOpts.NetManager = network.NewManager(network.Options{
+				SubnetCIDR: sandboxSubnet,
+				Uplink:     uplink,
+				// The node is assumed to forward already; the optional uplink
+				// MASQUERADE covers SNAT when set. Forwarding is not toggled
+				// here to avoid surprising the host's sysctl state.
+			})
+			engineOpts.NetAllocator = alloc
+			if dnsResolver != "" {
+				ip := net.ParseIP(dnsResolver)
+				if ip == nil {
+					fmt.Fprintf(os.Stderr, "forkd: invalid --dns-resolver %q\n", dnsResolver)
+					os.Exit(1)
+				}
+				engineOpts.ResolverIP = ip
+			}
+			fmt.Printf("forkd: per-sandbox networking ENABLED (subnet %s, uplink %q)\n", sandboxSubnet, uplink)
+		}
+		real, err := fork.NewEngine(dataDir, firecrackerBin, kernelPath, jailerCfg, engineOpts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: failed to initialize: %v\n", err)
 			fmt.Fprintf(os.Stderr, "forkd: use --mock for local development without KVM\n")

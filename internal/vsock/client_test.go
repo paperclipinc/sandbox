@@ -144,6 +144,34 @@ func TestNotifyForked(t *testing.T) {
 	}
 }
 
+func TestNotifyForkedWithNetwork(t *testing.T) {
+	var got *NotifyForkedRequest
+	sockPath := startFakeAgent(t, func(req *Request) Response {
+		if req.Type == TypeNotifyForked {
+			got = req.NotifyForked
+			return Response{OK: true, NotifyForked: &NotifyForkedResponse{}}
+		}
+		return Response{OK: false, Error: "unexpected type"}
+	})
+
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	net := &NotifyForkedNetwork{GuestIP: "10.200.0.6", GatewayIP: "10.200.0.5", PrefixLen: 30}
+	if _, err := client.NotifyForkedWithNetwork(3, []byte{0x01}, net); err != nil {
+		t.Fatalf("NotifyForkedWithNetwork: %v", err)
+	}
+	if got == nil || got.Network == nil {
+		t.Fatal("agent received no network config")
+	}
+	if *got.Network != *net {
+		t.Errorf("network = %+v, want %+v", got.Network, net)
+	}
+}
+
 func TestClient_Ping(t *testing.T) {
 	sockPath := startFakeAgent(t, mockAgentHandler())
 

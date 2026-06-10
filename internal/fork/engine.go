@@ -1,7 +1,9 @@
 package fork
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,8 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/sandbox/internal/network"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
@@ -40,6 +45,98 @@ type Engine struct {
 	// templateDigests caches the recorded manifest digest per template id so
 	// GetCapacity can report it to the controller without re-reading disk.
 	templateDigests map[string]cas.Digest
+
+	// Networking is opt-in. When both netMgr and netAlloc are set, a fork
+	// that carries NetworkOpts gets a distinct per-fork network identity:
+	// the allocator hands out a unique tap/MAC/IP, the manager creates the
+	// host tap and egress ruleset, the snapshot's baked NIC is remapped to
+	// the new tap via network_overrides, and the guest is re-addressed via
+	// NotifyForked. Both nil (the default) means networking is DISABLED and
+	// the engine behaves exactly as before. resolverIP is the optional DNS
+	// resolver guests may reach (nil omits the DNS allow rule).
+	netMgr     network.Manager
+	netAlloc   *netconf.Allocator
+	resolverIP net.IP
+}
+
+// Placeholder network identity used only while building a template snapshot.
+// The template VM is paused and snapshotted immediately, so the placeholder
+// tap never carries live traffic; every fork remaps NetIfaceID to its OWN tap
+// at load. The IPs are link-local-style addresses inside the default sandbox
+// subnet and the MAC is locally administered unicast.
+var (
+	placeholderMAC     = "02:00:00:00:00:01"
+	placeholderHostIP  = net.IPv4(10, 200, 255, 253).To4()
+	placeholderGuestIP = net.IPv4(10, 200, 255, 254).To4()
+)
+
+// networkEnabled reports whether per-fork networking is wired. Both the
+// manager and allocator must be present.
+func (e *Engine) networkEnabled() bool {
+	return e.netMgr != nil && e.netAlloc != nil
+}
+
+// forkNetwork is the result of preparing one fork's networking: the acquired
+// identity, the snapshot/load NIC overrides that remap the baked placeholder
+// NIC to this fork's tap, and the per-fork guest config delivered over vsock.
+type forkNetwork struct {
+	identity  netconf.Identity
+	overrides []firecracker.NetworkOverride
+	guestNet  *vsock.NotifyForkedNetwork
+}
+
+// prepareForkNetwork acquires a distinct network identity for the sandbox,
+// applies the host-side network (tap + egress ruleset) via the manager, and
+// returns the NIC overrides and guest config the fork needs. It returns
+// (nil, nil) when networking is disabled or the request carries no NetworkOpts,
+// so the non-network path is untouched. On any failure it releases the
+// just-acquired identity so a partial setup does not leak the allocation.
+func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwork, error) {
+	if !e.networkEnabled() || opts.Network == nil {
+		return nil, nil
+	}
+
+	allow, _, err := netconf.SplitAllowList(opts.Network.AllowList)
+	if err != nil {
+		return nil, fmt.Errorf("parse egress allowlist for %s: %w", sandboxID, err)
+	}
+	policy := v1alpha1.EgressPolicy(opts.Network.EgressPolicy)
+
+	id, err := e.netAlloc.Acquire(sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("acquire network identity for %s: %w", sandboxID, err)
+	}
+
+	if err := e.netMgr.Setup(context.Background(), id, policy, allow, e.resolverIP); err != nil {
+		e.netAlloc.Release(sandboxID)
+		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
+	}
+
+	return &forkNetwork{
+		identity: id,
+		overrides: []firecracker.NetworkOverride{{
+			IfaceID:     firecracker.NetIfaceID,
+			HostDevName: id.TapName,
+		}},
+		guestNet: &vsock.NotifyForkedNetwork{
+			GuestIP:   id.GuestIP.String(),
+			GatewayIP: id.HostIP.String(),
+			PrefixLen: 30,
+		},
+	}, nil
+}
+
+// teardownForkNetwork removes the host network for a sandbox and releases its
+// identity. Best effort: a teardown error is logged (tap name only, no
+// secrets) but the identity is always released so the slot is reusable.
+func (e *Engine) teardownForkNetwork(sandboxID string, id netconf.Identity) {
+	if !e.networkEnabled() {
+		return
+	}
+	if err := e.netMgr.Teardown(context.Background(), id); err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: teardown network for %s (tap %s): %v\n", sandboxID, id.TapName, err)
+	}
+	e.netAlloc.Release(sandboxID)
 }
 
 // EngineOpts carries the optional, security-relevant engine configuration so
@@ -52,6 +149,13 @@ type EngineOpts struct {
 	AllowUnverified bool
 	// VMMVersion is recorded in every snapshot manifest. May be empty.
 	VMMVersion string
+	// NetManager and NetAllocator enable per-fork networking. Both must be
+	// non-nil to enable it; either nil leaves networking DISABLED (default).
+	NetManager   network.Manager
+	NetAllocator *netconf.Allocator
+	// ResolverIP is the optional DNS resolver guests may reach. Nil omits the
+	// DNS allow rule from each fork's egress ruleset.
+	ResolverIP net.IP
 }
 
 type Template struct {
@@ -81,6 +185,10 @@ type Sandbox struct {
 	// the snapshot this sandbox was restored from; live-forks inherit it
 	// so the jailer chroot of every descendant can link it in.
 	rootfsPath string
+	// netID is this sandbox's per-fork network identity when networking is
+	// enabled and the fork requested it; the zero value (empty TapName) means
+	// no host network was set up and Terminate skips teardown.
+	netID netconf.Identity
 }
 
 type ForkResult struct {
@@ -90,6 +198,11 @@ type ForkResult struct {
 	MemoryUnique int64
 	MemoryShared int64
 	VsockPath    string
+	// GuestNetwork, when set, is the per-fork eth0 config the daemon delivers
+	// to the guest in the NotifyForked message so the fork is re-addressed to
+	// its distinct guest IP + gateway. Nil when networking is disabled or the
+	// fork carried no NetworkOpts. Addresses are safe to log.
+	GuestNetwork *vsock.NotifyForkedNetwork
 }
 
 // SandboxRecord is the minimal view of a live sandbox an engine reports
@@ -140,6 +253,9 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		vmmVersion:       opts.VMMVersion,
 		unverifiedWarned: make(map[string]struct{}),
 		templateDigests:  make(map[string]cas.Digest),
+		netMgr:           opts.NetManager,
+		netAlloc:         opts.NetAllocator,
+		resolverIP:       opts.ResolverIP,
 	}, nil
 }
 
@@ -229,9 +345,29 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 	// to the absolute host location for whichever mode is active.
 	vsockPath := fcClient.VsockHostPath(firecracker.VsockRelPath)
 
-	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE
-	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {
+	// Per-fork networking (opt-in). Acquire a distinct identity, create the
+	// host tap + egress ruleset, and build the snapshot/load overrides that
+	// remap the snapshot's baked placeholder NIC to THIS fork's tap. Returns
+	// nil when networking is disabled or the fork carries no NetworkOpts.
+	fnet, err := e.prepareForkNetwork(sandboxID, opts)
+	if err != nil {
 		_ = fcClient.Kill()
+		return nil, err
+	}
+	var overrides []firecracker.NetworkOverride
+	if fnet != nil {
+		overrides = fnet.overrides
+	}
+
+	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE. When
+	// networking is on, network_overrides rebinds the baked NIC to the fork's
+	// own tap (v1.15 supports this; it is the network analog of the relative
+	// vsock uds_path). nil overrides restores exactly as before.
+	if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, true, overrides); err != nil {
+		_ = fcClient.Kill()
+		if fnet != nil {
+			e.teardownForkNetwork(sandboxID, fnet.identity)
+		}
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
 
@@ -254,6 +390,11 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		VsockPath:  vsockPath,
 		rootfsPath: rootfsPath,
 	}
+	var guestNet *vsock.NotifyForkedNetwork
+	if fnet != nil {
+		sandbox.netID = fnet.identity
+		guestNet = fnet.guestNet
+	}
 
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
 
@@ -268,6 +409,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    vsockPath,
+		GuestNetwork: guestNet,
 	}, nil
 }
 
@@ -350,6 +492,13 @@ func (e *Engine) Terminate(sandboxID string) error {
 		_ = sandbox.fcClient.Kill()
 	}
 
+	// Release the per-fork host network (tap + egress ruleset) and the
+	// identity allocation. Skipped when this sandbox had no network set up
+	// (empty TapName) or networking is disabled.
+	if sandbox.netID.TapName != "" {
+		e.teardownForkNetwork(sandboxID, sandbox.netID)
+	}
+
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
 	os.RemoveAll(sandboxDir)
 
@@ -414,6 +563,36 @@ func (e *Engine) GetCapacity() Capacity {
 func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) error {
 	cfg := firecracker.DefaultVMConfig()
 	cfg.RootfsPath = rootfsPath
+
+	// When networking is enabled, bake a placeholder NIC into the snapshot so
+	// every fork has a net device to remap to its own tap via
+	// network_overrides (Firecracker cannot add a NIC on restore). The
+	// placeholder tap is created host-side just for the build and removed
+	// after; it never carries live traffic. The placeholder MAC is also baked
+	// in but is irrelevant: forks restore the same MAC, and each fork sits on
+	// its own /30 tap, so the MAC need not be unique on the host bridge.
+	if e.networkEnabled() {
+		placeholderID := netconf.Identity{
+			TapName:  firecracker.PlaceholderTapName,
+			GuestMAC: placeholderMAC,
+			HostIP:   placeholderHostIP,
+			GuestIP:  placeholderGuestIP,
+		}
+		if err := e.netMgr.Setup(context.Background(), placeholderID, v1alpha1.EgressDeny, nil, nil); err != nil {
+			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
+		}
+		defer func() {
+			if err := e.netMgr.Teardown(context.Background(), placeholderID); err != nil {
+				fmt.Fprintf(os.Stderr, "forkd: remove placeholder tap for template %s: %v\n", id, err)
+			}
+		}()
+		cfg.Network = &firecracker.NetworkIdentity{
+			IfaceID:     firecracker.NetIfaceID,
+			GuestMAC:    placeholderMAC,
+			HostDevName: firecracker.PlaceholderTapName,
+		}
+	}
+
 	if _, err := e.templateMgr.CreateTemplate(id, cfg, initWaitSecs); err != nil {
 		return err
 	}

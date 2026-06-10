@@ -163,14 +163,17 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 }
 
 // NotifyForked tells a sandbox's guest agent a restore just happened so it can
-// reseed the kernel CRNG, step the wall clock, and signal userspace. Entropy
-// is sensitive seed material and is never logged.
-func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte) error {
+// reseed the kernel CRNG, step the wall clock, and signal userspace. When
+// guestNet is non-nil it also carries this fork's distinct eth0 address +
+// gateway so the guest re-addresses its NIC (every fork restores the same
+// snapshot-baked guest IP). Entropy is sensitive seed material and is never
+// logged; the network addresses are safe to log.
+func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork) error {
 	agent, err := api.getAgent(sandboxID)
 	if err != nil {
 		return err
 	}
-	_, err = agent.NotifyForked(generation, entropy)
+	_, err = agent.NotifyForkedWithNetwork(generation, entropy, guestNet)
 	return err
 }
 

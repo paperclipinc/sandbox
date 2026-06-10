@@ -131,12 +131,22 @@ func (c *Client) Configure(env, secrets map[string]string) error {
 // against the moment of delivery. Entropy is sensitive seed material and is
 // never logged.
 func (c *Client) NotifyForked(generation uint64, entropy []byte) (*NotifyForkedResponse, error) {
+	return c.NotifyForkedWithNetwork(generation, entropy, nil)
+}
+
+// NotifyForkedWithNetwork is NotifyForked plus an optional per-fork network
+// config the guest applies to eth0 (distinct guest IP + gateway). It is used
+// when host-side networking is enabled so each fork, which restores the same
+// snapshot-baked guest IP, is re-addressed to its allocator-assigned /30.
+// Passing nil network is identical to NotifyForked. The IPs are safe to log.
+func (c *Client) NotifyForkedWithNetwork(generation uint64, entropy []byte, network *NotifyForkedNetwork) (*NotifyForkedResponse, error) {
 	resp, err := c.send(&Request{
 		Type: TypeNotifyForked,
 		NotifyForked: &NotifyForkedRequest{
 			Generation:         generation,
 			HostWallClockNanos: time.Now().UnixNano(),
 			Entropy:            entropy,
+			Network:            network,
 		},
 	})
 	if err != nil {

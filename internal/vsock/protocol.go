@@ -41,6 +41,25 @@ type NotifyForkedRequest struct {
 	Generation         uint64 `json:"generation"`
 	HostWallClockNanos int64  `json:"host_wall_clock_nanos"`
 	Entropy            []byte `json:"entropy"`
+	// Network, when set, carries this fork's per-fork network identity. Every
+	// fork restores the SAME snapshot (and thus the same baked guest IP), so
+	// the host remaps the NIC to a distinct tap via snapshot/load
+	// network_overrides and delivers the fork's distinct guest IP + gateway
+	// here; the guest agent reconfigures eth0 (ip addr add, default route) on
+	// receipt. Without this step every fork would share one guest IP and the
+	// host could not route return traffic per fork. IPs and prefix length are
+	// safe to log.
+	Network *NotifyForkedNetwork `json:"network,omitempty"`
+}
+
+// NotifyForkedNetwork is the per-fork eth0 configuration the guest agent
+// applies after a restore: assign GuestIP/PrefixLen to eth0 and install a
+// default route via GatewayIP (the host side of the per-sandbox /30). All
+// fields are plain addresses and safe to log.
+type NotifyForkedNetwork struct {
+	GuestIP   string `json:"guest_ip"`
+	GatewayIP string `json:"gateway_ip"`
+	PrefixLen int    `json:"prefix_len"`
 }
 
 // ConfigureRequest delivers claim-time environment and secrets to the guest
