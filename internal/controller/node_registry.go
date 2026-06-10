@@ -19,8 +19,11 @@ type NodeRegistry struct {
 }
 
 type NodeInfo struct {
-	Name            string
-	Endpoint        string
+	Name     string
+	Endpoint string
+	// HTTPEndpoint is the forkd HTTP sandbox API (exec/files), e.g. "10.0.3.7:9091".
+	// This is what claim status endpoints point at.
+	HTTPEndpoint    string
 	ActiveSandboxes int32
 	MaxSandboxes    int32
 	MemoryTotal     int64
@@ -112,6 +115,19 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 	}
 
 	return best, nil
+}
+
+// NodesWithTemplate returns healthy nodes that hold the given template snapshot.
+func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*NodeInfo
+	for _, n := range r.nodes {
+		if n.isHealthy() && n.hasSnapshot(templateID) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // GetConnection returns a gRPC connection to a node's forkd.

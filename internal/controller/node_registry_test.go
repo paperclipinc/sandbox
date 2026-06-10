@@ -31,3 +31,15 @@ func TestSelectNodePrefersSnapshotHolder(t *testing.T) {
 		t.Fatalf("got %q, want holder", node.Name)
 	}
 }
+
+func TestNodesWithTemplate(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(&NodeInfo{Name: "a", TemplateIDs: []string{"py"}})
+	r.Register(&NodeInfo{Name: "b"})
+	r.Register(&NodeInfo{Name: "c", TemplateIDs: []string{"py", "node"}})
+
+	got := r.NodesWithTemplate("py")
+	if len(got) != 2 {
+		t.Fatalf("got %d nodes, want 2", len(got))
+	}
+}
