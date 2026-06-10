@@ -490,6 +490,151 @@ jobs:
           echo "  Fork-correctness checks passed"
           echo "================================"
 
+      # Benchmark phase: run the reproducible cmd/bench harness against the real
+      # KVM-backed engine and publish the latency distributions to the run page.
+      #
+      # IMPORTANT: these are SHARED-CI-CLASS numbers. ubuntu-latest is a noisy,
+      # oversubscribed, shared runner (often itself nested-virt), so the absolute
+      # values are NOT representative of bare metal. They exist to prove the
+      # harness runs end to end and to give a reproducible, regenerated-every-run
+      # distribution, not to be quoted as the product's latency. Bare-metal
+      # reference numbers are tracked in BENCHMARKS.md / issue #15.
+      #
+      # This phase GATES on the bench running successfully (a crash or zero
+      # samples fails the job, because cmd/bench exits non-zero on any fork/exec
+      # error and Summarize over zero samples cannot happen without an error
+      # first). It does NOT gate on any latency threshold.
+      - name: Bench harness, fork-exec and exec round-trip on the KVM runner
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          TPL_DIR=$BENCH_DATA/templates/$TPL
+          WORKDIR=/tmp/agent-run-test/bench-build
+          mkdir -p $WORKDIR $TPL_DIR/snapshot
+
+          sudo chmod 666 /dev/kvm
+
+          # Build a rootfs with the guest agent as /init plus the busybox tools
+          # the agent's exec path needs. The bench execs "/bin/true" through the
+          # agent's "/bin/sh -c" wrapper, so sh and true must resolve.
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh true echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+
+          # The engine's Fork loads the snapshot from a RELATIVE vsock uds_path
+          # baked at snapshot time (firecracker.VsockRelPath = "vsock.sock"),
+          # resolved against each fork's per-sandbox working directory. The
+          # source VM is therefore booted in its own cwd with uds_path
+          # "vsock.sock" so the snapshot bakes the relative path the engine
+          # expects.
+          mkdir -p $WORKDIR/src
+          SOCK=$WORKDIR/source.sock
+          ( cd $WORKDIR/src && exec /usr/local/bin/firecracker --api-sock $SOCK ) > $WORKDIR/source-serial.log 2>&1 &
+          SRC_PID=$!
+          sleep 1
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"vsock.sock\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "Bench source VM booted, waiting for agent..."
+          sleep 8
+
+          # Pause and snapshot directly into the template layout the engine
+          # loads from: <dataDir>/templates/<id>/snapshot/{mem,vmstate} plus the
+          # template rootfs at <dataDir>/templates/<id>/rootfs.ext4.
+          curl --unix-socket $SOCK -X PATCH 'http://localhost/vm' \
+            -H 'Content-Type: application/json' \
+            -d '{"state": "Paused"}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/snapshot/create' \
+            -H 'Content-Type: application/json' \
+            -d "{\"snapshot_type\": \"Full\", \"snapshot_path\": \"$TPL_DIR/snapshot/vmstate\", \"mem_file_path\": \"$TPL_DIR/snapshot/mem\"}"
+          kill $SRC_PID 2>/dev/null || true
+          sleep 1
+          cp $WORKDIR/rootfs.ext4 $TPL_DIR/rootfs.ext4
+
+          # The engine refuses to fork an unverified snapshot unless the cheap
+          # "verified" marker is present (internal/fork/verify.go isVerified is a
+          # single stat). This snapshot was built by the workflow directly (not
+          # via CreateTemplate, so no CAS digest is recorded); writing the marker
+          # is the supported way to tell the engine the template is trusted for
+          # this in-CI bench run. The engine's Fork-time gate then short-circuits
+          # on the marker without re-hashing.
+          touch $TPL_DIR/verified
+          echo "Bench template laid out:"
+          ls -lhR $TPL_DIR
+
+          go build -o /tmp/bench ./cmd/bench/
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## KVM bench harness (shared-CI-class, NOT bare metal)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Runner: \`ubuntu-latest\` (noisy shared GitHub runner). Firecracker v1.15.0. CI kernel + busybox/agent rootfs. These numbers are reproducible per run but are NOT representative of bare metal; see BENCHMARKS.md and issue #15." >> $GITHUB_STEP_SUMMARY
+
+          run_mode() {
+            local mode=$1 json=$2
+            echo "================================"
+            echo "  bench --mode $mode"
+            echo "================================"
+            /tmp/bench \
+              --mode $mode \
+              --template $TPL \
+              --data-dir $BENCH_DATA \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/agent-run-test/vmlinux \
+              --iterations 30 --warmup 5 \
+              --summary --json $json | tee /tmp/bench-$mode.out
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### \`$mode\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/bench-$mode.out >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          }
+
+          run_mode fork-exec /tmp/bench-fork.json
+          run_mode exec-rt /tmp/bench-execrt.json
+
+          echo "================================"
+          echo "  Bench harness ran (shared-CI-class numbers above)"
+          echo "================================"
+
+      # Publish the raw bench JSON so BENCHMARKS.md can point at a concrete
+      # artifact for the regenerated-every-run distributions.
+      - name: Upload bench JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            /tmp/bench-fork.json
+            /tmp/bench-execrt.json
+          if-no-files-found: warn
+
       # Install the host networking tools the egress phases need. nftables and
       # iproute2 are what the real internal/network Linux Manager shells out to
       # (nft, ip); a stock ubuntu-latest runner has iproute2 but may lack nft.
