@@ -191,6 +191,12 @@ type SandboxClaimSpec struct {
 
 	// Node preference. Empty means any node with capacity.
 	NodeName string `json:"nodeName,omitempty"`
+
+	// TTLSecondsAfterFinished bounds how long a finished claim (terminal
+	// Terminated or Failed phase) lingers in the API after FinishedAt before the
+	// garbage collector deletes it, freeing etcd. Unset uses the controller's
+	// default. Job-like semantics.
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 type SecretMount struct {

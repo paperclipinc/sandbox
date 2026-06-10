@@ -28,6 +28,9 @@ type GarbageCollector struct {
 	// orphan sweep will terminate it. This protects a freshly-forked VM whose
 	// claim status has not been written yet. Default 60s.
 	OrphanGrace time.Duration
+	// DefaultTTLSeconds is the TTL applied to a finished claim that does not set
+	// spec.ttlSecondsAfterFinished. Default 600s.
+	DefaultTTLSeconds int32
 }
 
 func (g *GarbageCollector) Start(ctx context.Context) error {
@@ -60,6 +63,9 @@ func (g *GarbageCollector) applyDefaults() {
 	if g.OrphanGrace == 0 {
 		g.OrphanGrace = 60 * time.Second
 	}
+	if g.DefaultTTLSeconds == 0 {
+		g.DefaultTTLSeconds = 600
+	}
 }
 
 func (g *GarbageCollector) runOnce(ctx context.Context) {
@@ -84,6 +90,7 @@ func (g *GarbageCollector) runOnce(ctx context.Context) {
 	// FinishedAt=now, so it is too fresh for any later TTL pass to delete.
 	g.markNodeLost(ctx, logger, claims.Items)
 	g.sweepOrphans(ctx, logger, desired)
+	g.ttlFinished(ctx, logger, claims.Items)
 }
 
 // desiredAlive builds the set of VMs the control plane expects alive, keyed by
@@ -176,6 +183,42 @@ func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger,
 			continue
 		}
 		logger.Info("claim transitioned to NodeLost", "claim", c.Name, "node", c.Status.Node)
+	}
+}
+
+// ttlFinished deletes claims in a terminal phase (Terminated or Failed) whose
+// FinishedAt is older than the effective TTL: the claim's
+// spec.ttlSecondsAfterFinished if set, else DefaultTTLSeconds. Deletion
+// triggers the terminate finalizer, which is bounded and tolerant. A claim
+// with no FinishedAt is skipped, and a claim already being deleted is left to
+// its finalizer. A claim freshly stamped terminal earlier in this same pass has
+// FinishedAt=now, so it is too young to delete here; SandboxForks have no
+// FinishedAt today, so TTL of forks is a follow-up.
+func (g *GarbageCollector) ttlFinished(ctx context.Context, logger logr.Logger, claims []v1alpha1.SandboxClaim) {
+	now := time.Now()
+	for i := range claims {
+		c := &claims[i]
+		if !c.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if c.Status.Phase != v1alpha1.SandboxTerminated && c.Status.Phase != v1alpha1.SandboxFailed {
+			continue
+		}
+		if c.Status.FinishedAt == nil {
+			continue
+		}
+		ttl := g.DefaultTTLSeconds
+		if c.Spec.TTLSecondsAfterFinished != nil {
+			ttl = *c.Spec.TTLSecondsAfterFinished
+		}
+		if now.Sub(c.Status.FinishedAt.Time) < time.Duration(ttl)*time.Second {
+			continue
+		}
+		if err := g.Client.Delete(ctx, c); err != nil {
+			logger.Error(err, "ttl delete finished claim", "claim", c.Name)
+			continue
+		}
+		logger.Info("ttl deleted finished claim", "claim", c.Name, "phase", c.Status.Phase)
 	}
 }
 
