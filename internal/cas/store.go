@@ -127,6 +127,33 @@ func (s *Store) writeChunk(d Digest, data []byte) error {
 	return atomicWrite(dst, data)
 }
 
+// PutChunk reads chunk bytes from r, verifies they hash to the claimed digest,
+// and writes them atomically into the store. A mismatch returns an error and
+// nothing is written: this is the integrity gate for chunks arriving over a
+// transport, where the sender is not trusted. Chunks are bounded by ChunkSize,
+// so reading the whole chunk into memory is safe.
+func (s *Store) PutChunk(d Digest, r io.Reader) error {
+	data, err := io.ReadAll(io.LimitReader(r, ChunkSize+1))
+	if err != nil {
+		return fmt.Errorf("read chunk %s: %w", d, err)
+	}
+	if len(data) > ChunkSize {
+		return fmt.Errorf("chunk %s exceeds max size %d", d, ChunkSize)
+	}
+	got := digestBytes(data)
+	if got != d {
+		return fmt.Errorf("chunk %s failed verification: got digest %s", d, got)
+	}
+	return s.writeChunk(d, data)
+}
+
+// PutManifest writes a manifest into the store under its own digest. It is the
+// transport-side companion to PutChunk: after every referenced chunk is
+// present, the manifest is stored so it becomes Materializable locally.
+func (s *Store) PutManifest(m Manifest) error {
+	return s.writeManifest(m)
+}
+
 // writeManifest writes the canonical manifest atomically under its digest.
 func (s *Store) writeManifest(m Manifest) error {
 	return atomicWrite(s.manifestPath(m.Digest()), m.Canonical())
