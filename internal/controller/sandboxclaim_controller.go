@@ -93,8 +93,21 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// Mint the sandbox API bearer token before forking; forkd registers it
+	// at fork time. The value reaches exactly two places: the ForkRequest
+	// and the owned token Secret below. Never status, conditions, events,
+	// or logs.
+	apiToken, err := mintAPIToken()
+	if err != nil {
+		logger.Error(err, "token minting failed")
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
+		return ctrl.Result{}, err
+	}
+
 	// Call forkd on the selected node: this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals)
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, apiToken)
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.
@@ -106,6 +119,18 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Best-effort status write; the return below already requeues or surfaces the error.
+		_ = r.Status().Update(ctx, &claim)
+		return ctrl.Result{}, err
+	}
+
+	// Hand the token to the claim's consumer via an owned Secret, BEFORE
+	// the Ready status write: a Ready claim whose token Secret does not
+	// exist would be unusable, and the Ready early-return above would never
+	// retry the Secret. The token exists only in this Secret.
+	if err := ensureSandboxTokenSecret(ctx, r.Client, &claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
+		logger.Error(err, "token secret write failed")
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)

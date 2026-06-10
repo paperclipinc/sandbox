@@ -22,8 +22,9 @@ func isNotFound(err error) bool {
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
 // The returned endpoint is the node's HTTP sandbox API: what clients (SDKs)
-// actually talk to.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string) (*forkResult, error) {
+// actually talk to. apiToken is the bearer token forkd registers for the
+// sandbox's HTTP API; it is never logged.
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, apiToken string) (*forkResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -33,6 +34,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		SandboxId:  sandboxID,
 		Env:        toEnvVars(env),
 		Secrets:    toSecretVars(secrets),
+		ApiToken:   apiToken,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("forkd fork on %s: %w", node.Name, err)
@@ -45,7 +47,9 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 }
 
 // forkRunningOnNode asks forkd to checkpoint a running sandbox and fork it.
-func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool) (*forkRunningResult, error) {
+// apiToken is the NEW sandbox's own bearer token (the source's token does
+// not open the fork); it is never logged.
+func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool, apiToken string) (*forkRunningResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -54,6 +58,7 @@ func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *Nod
 		SourceSandboxId: sourceSandboxID,
 		NewSandboxId:    newSandboxID,
 		PauseSource:     pauseSource,
+		ApiToken:        apiToken,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("forkd fork-running on %s: %w", node.Name, err)

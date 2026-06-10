@@ -52,7 +52,7 @@ func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	_, err := srv.Fork(context.Background(), "py", "sb-secret", nil,
-		map[string]string{"API_KEY": "v"})
+		map[string]string{"API_KEY": "v"}, "test-token")
 	if err == nil {
 		t.Fatal("fork with undeliverable secrets must fail")
 	}
@@ -73,7 +73,7 @@ func TestForkEnvOnlyIsBestEffortWhenAgentUnreachable(t *testing.T) {
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	result, err := srv.Fork(context.Background(), "py", "sb-env",
-		map[string]string{"SESSION": "abc"}, nil)
+		map[string]string{"SESSION": "abc"}, nil, "test-token")
 	if err != nil {
 		t.Fatalf("env-only fork should succeed best-effort: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestForkMockEngineSkipsDelivery(t *testing.T) {
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	if _, err := srv.Fork(context.Background(), "py", "sb-mock", nil,
-		map[string]string{"API_KEY": "v"}); err != nil {
+		map[string]string{"API_KEY": "v"}, "test-token"); err != nil {
 		t.Fatalf("mock-mode fork must not require delivery: %v", err)
 	}
 }
@@ -173,7 +173,7 @@ func TestForkDeliversConfigureToAgent(t *testing.T) {
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 	if _, err := srv.Fork(context.Background(), "py", "sb-ok",
 		map[string]string{"SESSION": "abc"},
-		map[string]string{"API_KEY": "v"}); err != nil {
+		map[string]string{"API_KEY": "v"}, "test-token"); err != nil {
 		t.Fatalf("fork with reachable agent: %v", err)
 	}
 

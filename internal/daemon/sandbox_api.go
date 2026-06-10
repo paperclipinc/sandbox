@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/paperclipinc/sandbox/internal/vsock"
@@ -16,17 +20,47 @@ import (
 type SandboxAPI struct {
 	mu       sync.RWMutex
 	agents   map[string]*vsock.Client // sandbox ID → agent connection
+	tokens   map[string]string        // sandbox ID → bearer token; values never logged
 	vsockDir string                   // directory containing vsock UDS files
 	// unixFallback allows RegisterSandbox to fall back to the agent's fixed
 	// local unix socket. Opt-in: see EnableUnixFallback.
 	unixFallback bool
+	// allowTokenless permits requests for sandboxes that have NO registered
+	// token. Opt-in: see AllowTokenless.
+	allowTokenless bool
 }
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	return &SandboxAPI{
 		agents:   make(map[string]*vsock.Client),
+		tokens:   make(map[string]string),
 		vsockDir: vsockDir,
 	}
+}
+
+// AllowTokenless permits requests targeting sandboxes that have no
+// registered bearer token. Used ONLY by the standalone sandbox-server
+// (which has no token-minting control plane) and by unit tests of other
+// layers. forkd never sets it: a forkd sandbox without a token fails
+// closed with 401. Sandboxes WITH a registered token are always enforced,
+// even under AllowTokenless.
+//
+// Must be called before the API serves requests; the flag is not synchronized.
+func (api *SandboxAPI) AllowTokenless() {
+	api.allowTokenless = true
+}
+
+// RegisterToken registers the bearer token required on every HTTP request
+// targeting sandboxID. An empty token is a no-op: the sandbox stays
+// tokenless and fails closed (unless AllowTokenless). Token values are
+// never logged.
+func (api *SandboxAPI) RegisterToken(sandboxID, token string) {
+	if token == "" {
+		return
+	}
+	api.mu.Lock()
+	api.tokens[sandboxID] = token
+	api.mu.Unlock()
 }
 
 // EnableUnixFallback lets RegisterSandbox fall back to the guest agent's
@@ -68,13 +102,15 @@ func (api *SandboxAPI) RegisterSandbox(sandboxID, vsockPath string) error {
 	return nil
 }
 
-// UnregisterSandbox closes the agent connection.
+// UnregisterSandbox closes the agent connection and clears the sandbox's
+// bearer token.
 func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	api.mu.Lock()
 	if client, ok := api.agents[sandboxID]; ok {
 		client.Close()
 		delete(api.agents, sandboxID)
 	}
+	delete(api.tokens, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -98,7 +134,8 @@ func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {
 	return client, nil
 }
 
-// Handler returns an http.Handler for the sandbox exec/files API.
+// Handler returns an http.Handler for the sandbox exec/files API. Every
+// route is wrapped in the per-sandbox bearer-token middleware.
 func (api *SandboxAPI) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/exec", api.handleExec)
@@ -107,7 +144,70 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
 	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
 	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
-	return mux
+	return api.requireBearer(mux)
+}
+
+// maxAuthBodyBytes bounds how much request body the auth middleware buffers.
+// File writes are hex-encoded JSON, so this is the effective request cap.
+const maxAuthBodyBytes = 32 << 20 // 32 MiB
+
+// requireBearer enforces per-sandbox bearer tokens. The body is read and
+// buffered ONCE: the middleware peeks the JSON "sandbox" field, checks
+// Authorization: Bearer against the registered token in constant time, and
+// hands the buffered body to the real handler. Failure modes:
+//   - no token registered for the sandbox: 401 (fail closed), unless
+//     AllowTokenless was set (standalone sandbox-server only)
+//   - missing or malformed Authorization header: 401
+//   - token mismatch: 401
+//
+// Token values never appear in responses or logs.
+func (api *SandboxAPI) requireBearer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxAuthBodyBytes+1))
+		if err != nil {
+			writeErr(w, "read request body", 400)
+			return
+		}
+		if len(body) > maxAuthBodyBytes {
+			writeErr(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+
+		var peek struct {
+			Sandbox string `json:"sandbox"`
+		}
+		if err := json.Unmarshal(body, &peek); err != nil {
+			writeErr(w, "invalid json", 400)
+			return
+		}
+
+		api.mu.RLock()
+		token, hasToken := api.tokens[peek.Sandbox]
+		api.mu.RUnlock()
+
+		if !hasToken {
+			if api.allowTokenless {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeErr(w, "unauthorized: no token registered for sandbox", 401)
+			return
+		}
+
+		auth := r.Header.Get("Authorization")
+		presented, ok := strings.CutPrefix(auth, "Bearer ")
+		if !ok {
+			writeErr(w, "unauthorized: bearer token required", 401)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+			writeErr(w, "unauthorized: invalid token", 401)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type execRequest struct {

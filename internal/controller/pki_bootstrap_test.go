@@ -15,7 +15,7 @@ import (
 )
 
 // newCoreClient builds a direct envtest client whose scheme knows core/v1,
-// because the suite's shared scheme only registers agentrun.dev types.
+// independent of the suite's shared scheme.
 func newCoreClient(t *testing.T) client.Client {
 	t.Helper()
 	c, err := client.New(cfg, client.Options{Scheme: clientgoscheme.Scheme})

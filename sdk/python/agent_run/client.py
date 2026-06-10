@@ -29,6 +29,9 @@ class AgentRun:
             k8s_config.load_kube_config(config_file=kubeconfig)
 
         self._api = k8s_client.CustomObjectsApi()
+        # Same loaded config as the CustomObjectsApi; used to read the
+        # per-sandbox bearer token Secrets.
+        self._core_api = k8s_client.CoreV1Api()
         self._namespace = namespace
 
     def create(
@@ -94,6 +97,7 @@ class AgentRun:
             namespace=self._namespace,
             pool=pool,
             api=self._api,
+            core_api=self._core_api,
         )
 
     def get(self, name: str) -> Sandbox:
@@ -108,14 +112,18 @@ class AgentRun:
         status = obj.get("status", {})
         pool = obj.get("spec", {}).get("poolRef", {}).get("name", "")
 
-        return Sandbox(
+        sandbox = Sandbox(
             name=name,
             namespace=self._namespace,
             pool=pool,
             api=self._api,
+            core_api=self._core_api,
             _endpoint=status.get("endpoint"),
             _phase=SandboxPhase(status.get("phase", "Pending")),
         )
+        if sandbox._phase == SandboxPhase.READY:
+            sandbox._load_token()
+        return sandbox
 
     def list(self, pool: Optional[str] = None) -> list[Sandbox]:
         """List sandboxes, optionally filtered by pool."""
@@ -137,6 +145,7 @@ class AgentRun:
                 namespace=self._namespace,
                 pool=obj_pool,
                 api=self._api,
+                core_api=self._core_api,
                 _endpoint=status.get("endpoint"),
                 _phase=SandboxPhase(status.get("phase", "Pending")),
             ))

@@ -1,5 +1,9 @@
 """Direct client for sandbox-server (no Kubernetes required).
 
+Tokenless by design: the standalone sandbox-server has no token-minting
+control plane and runs its sandbox API with AllowTokenless. The k8s-mode
+client (sandbox.py) sends per-sandbox bearer tokens instead.
+
 Usage:
     from agent_run.direct import SandboxServer
 

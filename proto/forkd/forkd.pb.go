@@ -642,12 +642,15 @@ func (*DeleteSnapshotResponse) Descriptor() ([]byte, []int) {
 }
 
 type ForkRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SnapshotId    string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	SandboxId     string                 `protobuf:"bytes,2,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	Env           []*EnvVar              `protobuf:"bytes,3,rep,name=env,proto3" json:"env,omitempty"`
-	Secrets       []*SecretVar           `protobuf:"bytes,4,rep,name=secrets,proto3" json:"secrets,omitempty"`
-	Network       *NetworkConfig         `protobuf:"bytes,5,opt,name=network,proto3" json:"network,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SnapshotId string                 `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	SandboxId  string                 `protobuf:"bytes,2,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	Env        []*EnvVar              `protobuf:"bytes,3,rep,name=env,proto3" json:"env,omitempty"`
+	Secrets    []*SecretVar           `protobuf:"bytes,4,rep,name=secrets,proto3" json:"secrets,omitempty"`
+	Network    *NetworkConfig         `protobuf:"bytes,5,opt,name=network,proto3" json:"network,omitempty"`
+	// Bearer token the HTTP sandbox API will require for this sandbox.
+	// Empty means no token is registered and HTTP calls fail closed (401).
+	ApiToken      string `protobuf:"bytes,6,opt,name=api_token,json=apiToken,proto3" json:"api_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -715,6 +718,13 @@ func (x *ForkRequest) GetNetwork() *NetworkConfig {
 		return x.Network
 	}
 	return nil
+}
+
+func (x *ForkRequest) GetApiToken() string {
+	if x != nil {
+		return x.ApiToken
+	}
+	return ""
 }
 
 type ForkResponse struct {
@@ -799,8 +809,11 @@ type ForkRunningRequest struct {
 	NewSandboxId    string                 `protobuf:"bytes,2,opt,name=new_sandbox_id,json=newSandboxId,proto3" json:"new_sandbox_id,omitempty"`
 	PauseSource     bool                   `protobuf:"varint,3,opt,name=pause_source,json=pauseSource,proto3" json:"pause_source,omitempty"`
 	Env             []*EnvVar              `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Bearer token the HTTP sandbox API will require for the new sandbox.
+	// Empty means no token is registered and HTTP calls fail closed (401).
+	ApiToken      string `protobuf:"bytes,5,opt,name=api_token,json=apiToken,proto3" json:"api_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ForkRunningRequest) Reset() {
@@ -859,6 +872,13 @@ func (x *ForkRunningRequest) GetEnv() []*EnvVar {
 		return x.Env
 	}
 	return nil
+}
+
+func (x *ForkRunningRequest) GetApiToken() string {
+	if x != nil {
+		return x.ApiToken
+	}
+	return ""
 }
 
 type ForkRunningResponse struct {
@@ -2076,7 +2096,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x15DeleteSnapshotRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\"\x18\n" +
-	"\x16DeleteSnapshotResponse\"\xca\x01\n" +
+	"\x16DeleteSnapshotResponse\"\xe7\x01\n" +
 	"\vForkRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12\x1d\n" +
@@ -2084,7 +2104,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"sandbox_id\x18\x02 \x01(\tR\tsandboxId\x12\x1f\n" +
 	"\x03env\x18\x03 \x03(\v2\r.forkd.EnvVarR\x03env\x12*\n" +
 	"\asecrets\x18\x04 \x03(\v2\x10.forkd.SecretVarR\asecrets\x12.\n" +
-	"\anetwork\x18\x05 \x01(\v2\x14.forkd.NetworkConfigR\anetwork\"\xcb\x01\n" +
+	"\anetwork\x18\x05 \x01(\v2\x14.forkd.NetworkConfigR\anetwork\x12\x1b\n" +
+	"\tapi_token\x18\x06 \x01(\tR\bapiToken\"\xcb\x01\n" +
 	"\fForkResponse\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1a\n" +
@@ -2092,12 +2113,13 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\ffork_time_ms\x18\x03 \x01(\x01R\n" +
 	"forkTimeMs\x12.\n" +
 	"\x13memory_unique_bytes\x18\x04 \x01(\x03R\x11memoryUniqueBytes\x12.\n" +
-	"\x13memory_shared_bytes\x18\x05 \x01(\x03R\x11memorySharedBytes\"\xaa\x01\n" +
+	"\x13memory_shared_bytes\x18\x05 \x01(\x03R\x11memorySharedBytes\"\xc7\x01\n" +
 	"\x12ForkRunningRequest\x12*\n" +
 	"\x11source_sandbox_id\x18\x01 \x01(\tR\x0fsourceSandboxId\x12$\n" +
 	"\x0enew_sandbox_id\x18\x02 \x01(\tR\fnewSandboxId\x12!\n" +
 	"\fpause_source\x18\x03 \x01(\bR\vpauseSource\x12\x1f\n" +
-	"\x03env\x18\x04 \x03(\v2\r.forkd.EnvVarR\x03env\"\xa0\x01\n" +
+	"\x03env\x18\x04 \x03(\v2\r.forkd.EnvVarR\x03env\x12\x1b\n" +
+	"\tapi_token\x18\x05 \x01(\tR\bapiToken\"\xa0\x01\n" +
 	"\x13ForkRunningResponse\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1a\n" +

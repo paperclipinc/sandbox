@@ -98,6 +98,9 @@ message ForkRequest {
   repeated EnvVar env = 3;
   repeated SecretVar secrets = 4;
   NetworkConfig network = 5;
+  // Bearer token the HTTP sandbox API will require for this sandbox.
+  // Empty means no token is registered and HTTP calls fail closed (401).
+  string api_token = 6;
 }
 
 message ForkResponse {
@@ -113,6 +116,9 @@ message ForkRunningRequest {
   string new_sandbox_id = 2;
   bool pause_source = 3;
   repeated EnvVar env = 4;
+  // Bearer token the HTTP sandbox API will require for the new sandbox.
+  // Empty means no token is registered and HTTP calls fail closed (401).
+  string api_token = 5;
 }
 
 message ForkRunningResponse {

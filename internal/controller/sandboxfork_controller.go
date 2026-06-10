@@ -121,10 +121,28 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			continue
 		}
 
+		// Per-fork bearer token: the source's token never opens the fork.
+		// The value reaches exactly two places: the ForkRunningRequest and
+		// the owned token Secret below. Never status, conditions, events,
+		// or logs.
+		apiToken, err := mintAPIToken()
+		if err != nil {
+			logger.Error(err, "token minting failed", "fork", forkID)
+			continue
+		}
+
 		// Call forkd.ForkRunning on the source node
-		result, err := r.forkRunningOnNode(ctx, node, source.Status.SandboxID, forkID, fork.Spec.PauseSource)
+		result, err := r.forkRunningOnNode(ctx, node, source.Status.SandboxID, forkID, fork.Spec.PauseSource, apiToken)
 		if err != nil {
 			logger.Error(err, "fork failed", "fork", forkID)
+			continue
+		}
+
+		// Hand the token to the fork's consumer via a Secret owned by the
+		// SandboxFork (GC'd with it). A fork without its token Secret is
+		// unusable, so it is not recorded as ready.
+		if err := ensureSandboxTokenSecret(ctx, r.Client, &fork, forkID+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
+			logger.Error(err, "token secret write failed", "fork", forkID)
 			continue
 		}
 

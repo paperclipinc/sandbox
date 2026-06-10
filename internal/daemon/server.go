@@ -78,8 +78,12 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	}
 }
 
-// Fork handles a fork request from the controller.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string) (*fork.ForkResult, error) {
+// Fork handles a fork request from the controller. apiToken is the bearer
+// token the HTTP sandbox API will require for this sandbox; an empty token
+// registers NOTHING, so HTTP calls to the sandbox fail closed with 401
+// (forkd never runs the API in tokenless mode). The token value is never
+// logged.
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, apiToken string) (*fork.ForkResult, error) {
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
@@ -99,6 +103,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 		return nil, fmt.Errorf("sandbox %s: secret delivery failed: %w", result.SandboxID, err)
 	}
 
+	s.sandboxAPI.RegisterToken(result.SandboxID, apiToken)
 	return result, nil
 }
 
@@ -139,7 +144,11 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // ForkRunning deliberately does NOT deliver new config: forks inherit the
 // source VM's memory, including any previously delivered env+secrets.
 // Fresh-credential reissue for live forks is issue #7's end state.
-func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error) {
+//
+// apiToken is the new sandbox's own bearer token (the source's token does
+// NOT open the fork). Empty means no token is registered and HTTP calls to
+// the fork fail closed with 401.
+func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID string, pauseSource bool, apiToken string) (*fork.ForkResult, error) {
 	result, err := s.engine.ForkRunning(sourceSandboxID, newSandboxID, pauseSource)
 	if err != nil {
 		return nil, err
@@ -149,6 +158,7 @@ func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID 
 	activeSandboxes.Inc()
 
 	s.registerAgent(result.SandboxID, result.VsockPath)
+	s.sandboxAPI.RegisterToken(result.SandboxID, apiToken)
 	return result, nil
 }
 

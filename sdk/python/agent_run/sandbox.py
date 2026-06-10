@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import time
 import uuid
 from typing import Optional
 
 import httpx
 from kubernetes import client as k8s_client
+from kubernetes.client.rest import ApiException
 
 from agent_run.types import ExecResult, FileInfo, ForkInfo, SandboxInfo, SandboxPhase
 
@@ -25,6 +27,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/read",
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
         return resp.json()["content"]
@@ -33,6 +36,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/read",
             json={"sandbox": self._sandbox._sandbox_ref, "path": path, "binary": True},
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
         return bytes.fromhex(resp.json()["content"])
@@ -48,6 +52,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/write",
             json=data,
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
 
@@ -55,6 +60,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/list",
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
         return [
@@ -79,6 +85,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/remove",
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
 
@@ -86,6 +93,7 @@ class SandboxFiles:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/mkdir",
             json={"sandbox": self._sandbox._sandbox_ref, "path": path},
+            headers=self._sandbox._auth_headers(),
         )
         resp.raise_for_status()
 
@@ -99,6 +107,7 @@ class Sandbox:
         namespace: str,
         pool: str,
         api: k8s_client.CustomObjectsApi,
+        core_api: Optional[k8s_client.CoreV1Api] = None,
         _endpoint: Optional[str] = None,
         _phase: SandboxPhase = SandboxPhase.PENDING,
     ):
@@ -106,9 +115,13 @@ class Sandbox:
         self.namespace = namespace
         self.pool = pool
         self._api = api
+        # Reads the <name>-sandbox-token Secret; defaults to a CoreV1Api on
+        # the same loaded kube config the CustomObjectsApi came from.
+        self._core_api = core_api if core_api is not None else k8s_client.CoreV1Api()
         self._endpoint = _endpoint
         self._phase = _phase
         self._sandbox_id: Optional[str] = None
+        self._token: Optional[str] = None
         self._http = httpx.Client(timeout=30.0)
         self.files = SandboxFiles(self)
 
@@ -137,6 +150,32 @@ class Sandbox:
     def phase(self) -> SandboxPhase:
         return self._phase
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Bearer auth for the sandbox API; empty when no token is known."""
+        if self._token:
+            return {"Authorization": f"Bearer {self._token}"}
+        return {}
+
+    def _load_token(self) -> None:
+        """Read the sandbox API bearer token from <name>-sandbox-token.
+
+        The controller creates the Secret alongside the Ready claim (or
+        fork). A missing Secret is tolerated: the sandbox stays tokenless
+        and the API will answer 401 to every call, which surfaces the
+        misconfiguration without crashing here. The token value is held in
+        memory only.
+        """
+        try:
+            secret = self._core_api.read_namespaced_secret(
+                name=f"{self.name}-sandbox-token", namespace=self.namespace
+            )
+        except ApiException:
+            return
+        data = secret.data or {}
+        token_b64 = data.get("token")
+        if token_b64:
+            self._token = base64.b64decode(token_b64).decode()
+
     def _wait_ready(self, timeout: float = 30.0) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -153,6 +192,7 @@ class Sandbox:
             self._sandbox_id = status.get("sandboxID")
 
             if self._phase == SandboxPhase.READY and self._endpoint:
+                self._load_token()
                 return
             if self._phase == SandboxPhase.FAILED:
                 raise RuntimeError(f"sandbox {self.name} failed")
@@ -182,6 +222,7 @@ class Sandbox:
             f"{self._base_url}/exec",
             json=payload,
             timeout=timeout + 5,
+            headers=self._auth_headers(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -243,10 +284,14 @@ class Sandbox:
                         namespace=self.namespace,
                         pool=self.pool,
                         api=self._api,
+                        core_api=self._core_api,
                         _endpoint=f.get("endpoint"),
                         _phase=SandboxPhase.READY,
                     )
                     sandbox._sandbox_id = f.get("sandboxID")
+                    # Each fork has its own token Secret (<forkID>-sandbox-token);
+                    # the source's token does not open the fork.
+                    sandbox._load_token()
                     result.append(sandbox)
                 return result
 

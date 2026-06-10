@@ -9,6 +9,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/controller"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +36,8 @@ func TestMain(m *testing.M) {
 
 	scheme = runtime.NewScheme()
 	_ = v1alpha1.AddToScheme(scheme)
+	// core/v1 too: the claim and fork reconcilers create token Secrets.
+	_ = clientgoscheme.AddToScheme(scheme)
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{

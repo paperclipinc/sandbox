@@ -74,14 +74,18 @@ rules:
   # PKI bootstrap: the controller creates and heals the control plane TLS
   # Secrets (agent-run-ca, agent-run-forkd-tls, agent-run-controller-tls).
   # create cannot be scoped by resourceNames (the object does not exist yet
-  # at admission time), so it gets its own unscoped rule; update is scoped
-  # to exactly the three PKI secret names.
+  # at admission time), so it gets its own unscoped rule.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
+  # update is deliberately unscoped: besides the three fixed PKI secret
+  # names, the controller updates per-sandbox token Secrets
+  # (<claim>-sandbox-token, <forkID>-sandbox-token) whose names are dynamic
+  # and cannot be enumerated in resourceNames. The controller already holds
+  # unscoped get+list+create on secrets, so this widens write reach only to
+  # objects it could already read.
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["agent-run-ca", "agent-run-forkd-tls", "agent-run-controller-tls"]
     verbs: ["update"]
   - apiGroups: [""]
     resources: ["events"]

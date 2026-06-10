@@ -6,7 +6,9 @@ package controller
 import (
 	"crypto/tls"
 	"net"
+	"net/http/httptest"
 	"os"
+	"strings"
 
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
@@ -40,7 +42,8 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 	if err != nil {
 		return nil, err
 	}
-	srv := daemon.NewServer(engine, daemon.NewSandboxAPI(dir))
+	sandboxAPI := daemon.NewSandboxAPI(dir)
+	srv := daemon.NewServer(engine, sandboxAPI)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -55,16 +58,22 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 	daemon.RegisterForkDaemonServer(gs, srv)
 	go gs.Serve(lis)
 
+	// Real HTTP sandbox API on a real listener, exactly the handler forkd
+	// serves on :9091, so envtest claims can exercise bearer-token auth
+	// end to end against the registered HTTPEndpoint.
+	httpSrv := httptest.NewServer(sandboxAPI.Handler())
+
 	registry.Register(&NodeInfo{
 		Name:         nodeName,
 		Endpoint:     lis.Addr().String(),
-		HTTPEndpoint: lis.Addr().String(), // tests only need a non-empty reachable-shaped value
+		HTTPEndpoint: strings.TrimPrefix(httpSrv.URL, "http://"),
 		TemplateIDs:  templates,
 		MaxSandboxes: 100,
 		TLS:          clientTLS,
 	})
 	return func() {
 		gs.Stop()
+		httpSrv.Close()
 		os.RemoveAll(dir)
 		registry.Unregister(nodeName)
 	}, nil

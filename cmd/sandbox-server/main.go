@@ -82,6 +82,10 @@ func main() {
 	// exist, fall back to a guest agent running directly on the host
 	// (/tmp/sandbox-agent-52.sock). forkd does not opt in to this fallback.
 	s.sandboxAPI.EnableUnixFallback()
+	// Standalone mode has no token-minting control plane; its sandboxes are
+	// tokenless by design. forkd never sets this: there, a sandbox without
+	// a registered token fails closed with 401.
+	s.sandboxAPI.AllowTokenless()
 
 	if !mockMode {
 		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir)
