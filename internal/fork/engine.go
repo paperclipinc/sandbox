@@ -160,9 +160,15 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("start firecracker: %w", err)
 	}
-	// The vsock UDS appears where the (possibly jailed) Firecracker
-	// process creates it on the host.
-	vsockPath := fcClient.HostPath(filepath.Join(sandboxDir, "vsock.sock"))
+	// The template snapshot bakes a RELATIVE vsock uds_path
+	// (firecracker.VsockRelPath); every restored Firecracker process
+	// rebinds that exact string against its own working directory, so two
+	// forks of one snapshot never collide on a single host socket. In raw
+	// direct-exec mode the working directory is this sandbox's WorkDir
+	// (sandboxDir, set as cmd.Dir in StartVM); under the jailer it is the
+	// per-VM chroot root. VsockHostPath resolves the baked relative path
+	// to the absolute host location for whichever mode is active.
+	vsockPath := fcClient.VsockHostPath(firecracker.VsockRelPath)
 
 	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE
 	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {

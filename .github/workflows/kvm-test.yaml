@@ -294,10 +294,21 @@ jobs:
 
           sudo chmod 666 /dev/kvm
 
-          # Boot the source VM with vsock and wait for the agent.
+          # Fork-correctness depends on a RELATIVE vsock uds_path: Firecracker
+          # bakes the exact uds_path string into the snapshot and rebinds it
+          # verbatim on every restore. A relative "vsock.sock" is resolved
+          # against each Firecracker process's working directory, so identical
+          # baked path + distinct per-process cwd = distinct host socket. That
+          # is why the source runs in $WORKDIR/src and each fork runs in its
+          # own $WORKDIR/fork<n>. This mirrors what the jailer chroot provides
+          # in production; raw-forkd mode relies on the per-sandbox cwd.
+          mkdir -p $WORKDIR/src
+
+          # Boot the source VM with a relative vsock uds_path and wait for the
+          # agent. The api-sock stays absolute; only the vsock path is relative
+          # so it gets baked relative into the snapshot.
           SOCK=$WORKDIR/source.sock
-          SRC_VSOCK=$WORKDIR/source-vsock.sock
-          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/source-serial.log 2>&1 &
+          ( cd $WORKDIR/src && exec /usr/local/bin/firecracker --api-sock $SOCK ) > $WORKDIR/source-serial.log 2>&1 &
           SRC_PID=$!
           sleep 1
 
@@ -312,7 +323,7 @@ jobs:
             -d '{"vcpu_count": 1, "mem_size_mib": 256}'
           curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
             -H 'Content-Type: application/json' \
-            -d "{\"guest_cid\": 3, \"uds_path\": \"$SRC_VSOCK\"}"
+            -d "{\"guest_cid\": 3, \"uds_path\": \"vsock.sock\"}"
           curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
             -H 'Content-Type: application/json' \
             -d '{"action_type": "InstanceStart"}'
@@ -336,11 +347,20 @@ jobs:
           sleep 1
 
           # restore_fork <n> <generation> -> prints test-agent stdout to $WORKDIR/fork<n>.out
+          #
+          # Each fork runs in its own working directory $WORKDIR/fork<n>, so the
+          # relative "vsock.sock" baked into the snapshot is rebound by this
+          # fork's Firecracker at $WORKDIR/fork<n>/vsock.sock. Distinct cwd =
+          # distinct host socket, so forks never collide on one UDS (the bug
+          # this phase regression-tests). test-agent is pointed at exactly that
+          # absolute path.
           restore_fork() {
             local n=$1 gen=$2
             local sock=$WORKDIR/fork${n}.sock
-            local vsock=$WORKDIR/fork${n}-vsock.sock
-            /usr/local/bin/firecracker --api-sock $sock > $WORKDIR/fork${n}-serial.log 2>&1 &
+            local forkdir=$WORKDIR/fork${n}
+            local vsock=$forkdir/vsock.sock
+            mkdir -p $forkdir
+            ( cd $forkdir && exec /usr/local/bin/firecracker --api-sock $sock ) > $WORKDIR/fork${n}-serial.log 2>&1 &
             echo $! > $WORKDIR/fork${n}.pid
             sleep 1
             curl --unix-socket $sock -X PUT 'http://localhost/snapshot/load' \

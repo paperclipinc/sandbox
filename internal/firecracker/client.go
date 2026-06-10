@@ -21,6 +21,11 @@ type Client struct {
 	socketPath string
 	http       *http.Client
 	process    *os.Process
+	// workDir is the working directory the Firecracker process was
+	// launched with (cmd.Dir). A relative vsock uds_path is bound by
+	// Firecracker against this directory, so the host path of the vsock
+	// socket is workDir/<uds_path>. Empty for ConnectVM clients.
+	workDir string
 	// wait reaps the launched process (exec.Cmd.Wait for StartVM
 	// clients). Kill calls it after the kill signal so the process is
 	// gone before its uid is released; nil for clients without a child
@@ -72,6 +77,7 @@ func StartVM(cfg VMConfig) (*Client, error) {
 		socketPath: socketPath,
 		process:    cmd.Process,
 		wait:       cmd.Wait,
+		workDir:    cfg.WorkDir,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -199,6 +205,20 @@ func (c *Client) HostPath(p string) string {
 		return p
 	}
 	return filepath.Join(c.chrootDir, filepath.Clean(p))
+}
+
+// VsockHostPath returns the host path at which Firecracker binds the vsock
+// UDS for a (relative) uds_path. Firecracker resolves a relative uds_path
+// against its own working directory: in direct-exec mode that is the
+// per-VM WorkDir (cmd.Dir), in jailer mode it is the chroot root after the
+// jailer chdir's into it. Either way distinct VMs get distinct sockets,
+// which is the whole point of baking a relative path into the snapshot.
+func (c *Client) VsockHostPath(relUDSPath string) string {
+	base := c.workDir
+	if c.chrootDir != "" {
+		base = c.chrootDir
+	}
+	return filepath.Join(base, relUDSPath)
 }
 
 // ConnectVM connects to an already-running Firecracker instance.

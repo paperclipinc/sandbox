@@ -126,6 +126,31 @@ Test: parent holds an open TCP connection to a host-side echo server; fork;
 assert in the fork that (a) MAC and IP differ from parent, (b) writing to the
 inherited socket fd fails within 5s, (c) parent's connection still works.
 
+### vsock UDS identity (device-identity-after-fork)
+
+The host-side vsock device is itself a device-identity hazard. Firecracker
+bakes the vsock `uds_path` string verbatim into the snapshot and rebinds that
+exact path on every restore. If a template were snapshotted with an *absolute*
+`uds_path`, every fork of that one snapshot would try to bind the same host
+socket: the second and later restores fail with `VsockUnixBackend: Error
+binding to the host-side Unix socket: Address in use (os error 98)`, and a
+lingering socket file from a killed source VM blocks even the first restore.
+
+Handling: template snapshots bake a *relative* `uds_path`
+(`firecracker.VsockRelPath` = `"vsock.sock"`). A relative path is resolved by
+each restored Firecracker process against its own working directory, so an
+identical baked path plus a distinct per-VM cwd yields a distinct host socket
+and forks never collide. In raw direct-exec (`forkd`) mode the working
+directory is the per-sandbox `WorkDir`, set as the Firecracker process's
+`cmd.Dir` in `internal/firecracker/client.go:StartVM`; the engine reports the
+resolved socket via `Client.VsockHostPath`. Under the jailer the chroot already
+isolates each VM (the relative path resolves against the per-VM chroot root), so
+the hazard is moot there; raw mode is the one that depends on the relative path.
+The invariant is locked in by `TestVsockHostPathPerCwd`
+(`internal/firecracker/jailer_test.go`) and exercised end to end by the
+`fork-correctness` CI phase, which restores two VMs from one snapshot in
+separate working directories and asserts both bind distinct sockets and answer.
+
 ## 5. Memory accounting truthfulness
 
 "~KB per fork" measured at T=0 is the dirty-page count immediately after

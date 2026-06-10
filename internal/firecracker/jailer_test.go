@@ -579,3 +579,35 @@ func TestClientHostPath(t *testing.T) {
 		t.Fatalf("jailed HostPath = %q, want %q", got, want)
 	}
 }
+
+// TestVsockHostPathPerCwd locks in the fork-correctness invariant:
+// template snapshots bake a RELATIVE vsock uds_path (VsockRelPath), and
+// each forked VM resolves it against its own working directory, so two
+// forks of one snapshot never collide on a single host socket. In raw
+// direct-exec mode the base is the per-VM WorkDir; under the jailer it is
+// the per-VM chroot root. Regressing to an absolute baked path would make
+// every fork rebind the same host socket (Address in use).
+func TestVsockHostPathPerCwd(t *testing.T) {
+	// Two raw-mode forks with distinct WorkDirs resolve the same baked
+	// relative path to distinct host sockets.
+	rawA := &Client{workDir: "/var/lib/agent-run/sandboxes/a"}
+	rawB := &Client{workDir: "/var/lib/agent-run/sandboxes/b"}
+	gotA := rawA.VsockHostPath(VsockRelPath)
+	gotB := rawB.VsockHostPath(VsockRelPath)
+	if gotA == gotB {
+		t.Fatalf("two forks collided on one vsock host path %q", gotA)
+	}
+	if want := "/var/lib/agent-run/sandboxes/a/vsock.sock"; gotA != want {
+		t.Fatalf("raw VsockHostPath = %q, want %q", gotA, want)
+	}
+
+	// Under the jailer the baked relative path resolves against the
+	// per-VM chroot root.
+	jailed := &Client{
+		workDir:   "/var/lib/agent-run/sandboxes/c",
+		chrootDir: "/srv/jailer/firecracker/vm-c/root",
+	}
+	if want := "/srv/jailer/firecracker/vm-c/root/vsock.sock"; jailed.VsockHostPath(VsockRelPath) != want {
+		t.Fatalf("jailed VsockHostPath = %q, want %q", jailed.VsockHostPath(VsockRelPath), want)
+	}
+}
