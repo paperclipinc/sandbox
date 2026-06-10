@@ -124,6 +124,18 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 	return agent.Configure(env, secrets)
 }
 
+// NotifyForked tells a sandbox's guest agent a restore just happened so it can
+// reseed the kernel CRNG, step the wall clock, and signal userspace. Entropy
+// is sensitive seed material and is never logged.
+func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte) error {
+	agent, err := api.getAgent(sandboxID)
+	if err != nil {
+		return err
+	}
+	_, err = agent.NotifyForked(generation, entropy)
+	return err
+}
+
 func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {
 	api.mu.RLock()
 	client, ok := api.agents[sandboxID]
