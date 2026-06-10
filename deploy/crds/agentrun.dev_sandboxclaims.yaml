@@ -310,8 +310,9 @@ spec:
               endpoint:
                 type: string
               finishedAt:
-                description: FinishedAt is set when the claim reaches the terminal
-                  Terminated phase.
+                description: |-
+                  FinishedAt is set when the claim reaches a terminal phase (Terminated or
+                  Failed), so the GC TTL pass can reap it.
                 format: date-time
                 type: string
               forkTimeMicros:

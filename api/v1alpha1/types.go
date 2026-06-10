@@ -223,13 +223,14 @@ const (
 )
 
 type SandboxClaimStatus struct {
-	Phase          SandboxPhase       `json:"phase,omitempty"`
-	Endpoint       string             `json:"endpoint,omitempty"`
-	Node           string             `json:"node,omitempty"`
-	SandboxID      string             `json:"sandboxID,omitempty"`
-	ForkTimeMicros int64              `json:"forkTimeMicros,omitempty"`
-	StartedAt      *metav1.Time       `json:"startedAt,omitempty"`
-	// FinishedAt is set when the claim reaches the terminal Terminated phase.
+	Phase          SandboxPhase `json:"phase,omitempty"`
+	Endpoint       string       `json:"endpoint,omitempty"`
+	Node           string       `json:"node,omitempty"`
+	SandboxID      string       `json:"sandboxID,omitempty"`
+	ForkTimeMicros int64        `json:"forkTimeMicros,omitempty"`
+	StartedAt      *metav1.Time `json:"startedAt,omitempty"`
+	// FinishedAt is set when the claim reaches a terminal phase (Terminated or
+	// Failed), so the GC TTL pass can reap it.
 	FinishedAt *metav1.Time       `json:"finishedAt,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
