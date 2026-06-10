@@ -11,8 +11,8 @@ test missing or incomplete. `done` = implemented + test runs in the
 
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
-| 1 | Shared RNG state after restore | Reseed CRNG on every fork | `TestForkDistinctRandomness` | **open** |
-| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step | `TestForkClockCorrectness` | **open** |
+| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked) | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`; KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial** (guest reseed + forkd notify done; virtio-rng device attachment NOT wired; KVM proof is guest-only, see CI job) |
+| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial** (guest clock step done, 500ms tolerance; KVM proof is guest-only, see CI job) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
@@ -24,23 +24,30 @@ CRNG state, identical userspace PRNG state in any already-started runtime, and
 identical TLS library state. Consequences: colliding UUIDs, predictable session
 tokens, identical TLS ClientHello randoms, broken nonce-based crypto.
 
-Required implementation:
+Implemented reseed path: the host delivers fresh entropy over vsock. forkd
+calls `NotifyForked(generation, entropy)` immediately after restore
+(`internal/daemon/server.go:notifyForked` generates a fresh generation plus 32
+bytes of `crypto/rand` entropy). The guest agent on `NotifyForked` writes that
+entropy into the kernel CRNG via `RNDADDENTROPY`, records the generation at
+`/run/sandbox/fork-generation`, and signals userspace runtimes
+(`guest/agent/notifyforked.go`). VMGenID is not exposed by Firecracker, so this
+host-entropy-over-vsock hook is our equivalent.
 
-- virtio-rng device attached to every restored VM, backed by host entropy.
-- A fork-generation signal the guest can observe (VMGenID is not exposed by
-  Firecracker; our equivalent is a guest-agent hook: forkd calls
-  `NotifyForked(generation)` over vsock immediately after restore).
-- Guest agent on `NotifyForked`: write fresh entropy from virtio-rng into
-  `/dev/urandom` via `RNDADDENTROPY`, then deliver a userspace signal
-  (configurable: SIGUSR2 to session leader, or an inotify-able generation file
-  at `/run/sandbox/fork-generation`) so language runtimes and TLS libraries can
-  regenerate state.
+**Follow-up (not wired):** a virtio-rng device attached to every restored VM
+backed by host entropy is NOT implemented; the current path injects entropy
+only at fork time via NotifyForked, not continuously. Tracked as a follow-up.
 
-Test (`fork-correctness` CI job): fork N=8 sandboxes from one snapshot and
-assert pairwise-distinct: (a) 1KB reads from `/dev/urandom`, (b) UUIDs from
-Python `uuid.uuid4()` in a runtime started *before* snapshot, (c) TLS
-ClientHello random captured from an in-guest `openssl s_client` against a local
-listener.
+Tests. go (`internal/daemon`): `TestForkNotifiesAgentWithFreshEntropy` asserts
+forkd sends entropy, `TestForkGenerationIncrementsAcrossForks` asserts distinct
+generations across forks, `TestForkFailsWhenNotifyForkedErrors` asserts a
+real-engine fork fails closed when the guest cannot reseed.
+
+KVM (`kvm-test.yaml`): one snapshot is taken after the agent is up, two VMs are
+restored from it, and `test-agent --mode notify` runs against each. The phase
+asserts the two `URANDOM=` base64 samples differ (equal would be the shared-RNG
+bug). This proves the GUEST applies the reseed; forkd end-to-end notify is
+covered by the go tests above. The N=8 / `uuid.uuid4()` / TLS-ClientHello
+variants remain a follow-up.
 
 ## 2. Clock correctness
 
@@ -48,18 +55,20 @@ A restored guest's wall clock is frozen at snapshot time. TLS certificate
 validation (`notBefore`) and JWT `iat`/`exp` checks fail silently or, worse,
 pass when they should fail.
 
-Required implementation:
+Implemented clock step: `NotifyForked` carries `HostWallClockNanos`, stamped by
+the host at send time (`internal/vsock/client.go`). The guest agent reads it
+and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a 500ms tolerance,
+then signals userspace as in section 1 (`guest/agent/notifyforked.go`). kvm-clock
+remaining the active clocksource and Firecracker's restore path updating it is
+relied on but not separately asserted here.
 
-- Verify kvm-clock is the active clocksource in the guest kernel config and
-  that Firecracker's snapshot restore path updates it.
-- Guest agent on `NotifyForked`: read host wall time delivered in the
-  notification payload, `clock_settime(CLOCK_REALTIME)` if drift exceeds
-  tolerance, then SIGHUP/notify as in §1 so chrony-like daemons (if any) and
-  userspace re-read time.
+Tests. go: `TestForkNotifiesAgentWithFreshEntropy` covers that forkd sends the
+notification carrying the host wall clock.
 
-Test: snapshot a VM, wait ≥10s, fork, immediately exec `date +%s%N` and assert
-within 500ms of host time. Also exec a TLS handshake against a cert issued
-*after* the snapshot was taken; it must validate.
+KVM (`kvm-test.yaml`): each restored fork's `WALLCLOCK_NS` (from in-guest
+`date +%s%N`) is asserted within 2 seconds of the runner clock. This proves the
+GUEST holds a correct wall clock after restore. The post-snapshot TLS-cert
+validation variant remains a follow-up.
 
 ## 3. Live-fork memory hygiene (secrets)
 
@@ -137,8 +146,15 @@ exported metric grows accordingly and that `GetCapacity` reflects it.
 
 ## CI job
 
-`fork-correctness` (GitHub Actions, KVM-capable runner) runs all tests above on
-every PR touching `internal/fork/`, `internal/firecracker/`, or `guest/`.
-**Status: job not yet created**; it lands with the first test in this list.
+`kvm-test.yaml` (GitHub Actions, KVM-capable runner) runs the RNG and clock
+proofs above on every PR touching `internal/firecracker/`, `internal/fork/`,
+`guest/`, `cmd/test-agent/`, or `internal/vsock/`. It takes one snapshot after
+the agent is up, restores two VMs from it, and asserts distinct `/dev/urandom`,
+each wall clock within 2s of the runner, and the fork-generation file matching
+the generation sent. A jailer-boot phase restores the same snapshot under the
+jailer to prove the chroot/uid mechanics (it does not prove the dropped
+capability set, since the runner is root; that sub-step is `continue-on-error`,
+see issue #2).
+
 Until every row above is `done`, fork correctness is the top engineering
 priority and blocks feature work (see `ROADMAP.md`).

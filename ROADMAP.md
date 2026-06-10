@@ -110,16 +110,20 @@ Spec: `docs/fork-correctness.md`, `docs/threat-model.md`. Blocks everything
 below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 `internal/firecracker/`, `guest/`.
 
-- ⬜ RNG reseed on every fork (virtio-rng + guest-agent NotifyForked hook +
-  userspace signal); test: distinct urandom/UUID/TLS-randoms across N forks
-- ⬜ Clock resync after restore; test: wall-clock within 500ms, post-snapshot
-  TLS cert validates
+- 🔨 RNG reseed on every fork (guest-agent NotifyForked hook delivers host
+  entropy over vsock + userspace signal; virtio-rng device NOT wired);
+  go tests assert forkd sends entropy and fails closed; kvm-test asserts two
+  forks of one snapshot produce distinct urandom (UUID/TLS-randoms follow-up)
+- 🔨 Clock resync after restore (NotifyForked steps CLOCK_REALTIME from the
+  host wall clock, 500ms tolerance); kvm-test asserts each fork wall clock
+  within 2s of the runner (post-snapshot TLS cert validation follow-up)
 - ⬜ Live-fork secret policy: reject without `allowSecretInheritance: true`
 - 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
-  `privileged: true` for an explicit capability list (implemented;
-  capability set unproven until kvm-test runs under `--jailer`; direct-exec
-  dev path behind an empty `--jailer` and sandbox-server remain unjailed;
-  tracked in threat model residuals)
+  `privileged: true` for an explicit capability list (implemented; kvm-test
+  jailer-boot phase restores a snapshot under the jailer to prove the
+  chroot/uid mechanics, but the dropped capability set is still unproven since
+  the runner is root; direct-exec dev path behind an empty `--jailer` and
+  sandbox-server remain unjailed; tracked in threat model residuals)
 - ✅ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
   (rotation and token expiry pending; tracked in threat model residuals)
 - ⬜ Snapshot content addressing (digest in CRD status, verify-on-load)
