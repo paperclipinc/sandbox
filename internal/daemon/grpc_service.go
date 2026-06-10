@@ -10,8 +10,9 @@ import (
 )
 
 // grpcService implements forkdpb.ForkDaemonServer over Server.
-// Exec and file RPCs are intentionally Unimplemented: that traffic is served
-// by the HTTP sandbox API on the forkd HTTP port (default :9091).
+// Exec returns Unimplemented with a pointer to the HTTP sandbox API on the
+// forkd HTTP port (default :9091), which serves exec and file traffic today;
+// the remaining unimplemented RPCs fall through to the embedded stub.
 type grpcService struct {
 	forkdpb.UnimplementedForkDaemonServer
 	srv *Server
@@ -32,11 +33,10 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 }
 
 func (g *grpcService) ForkRunning(ctx context.Context, req *forkdpb.ForkRunningRequest) (*forkdpb.ForkRunningResponse, error) {
-	result, err := g.srv.engine.ForkRunning(req.SourceSandboxId, req.NewSandboxId, req.PauseSource)
+	result, err := g.srv.ForkRunning(ctx, req.SourceSandboxId, req.NewSandboxId, req.PauseSource)
 	if err != nil {
 		return nil, grpcError(err)
 	}
-	g.srv.sandboxAPI.RegisterSandbox(result.SandboxID, result.VsockPath)
 	return &forkdpb.ForkRunningResponse{
 		SandboxId:  result.SandboxID,
 		Endpoint:   result.Endpoint,

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
@@ -40,7 +41,7 @@ func newTestClient(t *testing.T) (forkdpb.ForkDaemonClient, *fork.MockEngine) {
 }
 
 func TestGRPCForkLifecycle(t *testing.T) {
-	client, _ := newTestClient(t)
+	client, engine := newTestClient(t)
 	ctx := context.Background()
 
 	if _, err := client.CreateTemplate(ctx, &forkdpb.CreateTemplateRequest{
@@ -71,6 +72,10 @@ func TestGRPCForkLifecycle(t *testing.T) {
 		t.Fatalf("got %q, want sb-2", runResp.SandboxId)
 	}
 
+	if len(engine.PausedSources) != 1 || engine.PausedSources[0] != "sb-1" {
+		t.Fatalf("PausedSources = %v, want [sb-1]", engine.PausedSources)
+	}
+
 	capResp, err := client.GetCapacity(ctx, &forkdpb.GetCapacityRequest{})
 	if err != nil {
 		t.Fatalf("GetCapacity: %v", err)
@@ -84,6 +89,14 @@ func TestGRPCForkLifecycle(t *testing.T) {
 
 	if _, err := client.Terminate(ctx, &forkdpb.TerminateRequest{SandboxId: "sb-1"}); err != nil {
 		t.Fatalf("Terminate: %v", err)
+	}
+
+	capAfter, err := client.GetCapacity(ctx, &forkdpb.GetCapacityRequest{})
+	if err != nil {
+		t.Fatalf("GetCapacity after terminate: %v", err)
+	}
+	if capAfter.ActiveSandboxes != 1 {
+		t.Fatalf("active after terminate = %d, want 1", capAfter.ActiveSandboxes)
 	}
 }
 
@@ -102,5 +115,8 @@ func TestGRPCUnimplementedRPCsSayWhere(t *testing.T) {
 	_, err := client.Exec(context.Background(), &forkdpb.ExecRequest{SandboxId: "sb", Command: "true"})
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("code = %v, want Unimplemented", status.Code(err))
+	}
+	if !strings.Contains(status.Convert(err).Message(), "HTTP sandbox API") {
+		t.Fatalf("message = %q, want pointer to HTTP sandbox API", status.Convert(err).Message())
 	}
 }

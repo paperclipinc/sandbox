@@ -130,15 +130,15 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 	return out
 }
 
-// GetConnection returns a gRPC connection to a node's forkd.
+// GetConnection returns a gRPC connection to a node's forkd, dialing once.
 func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
-	r.mu.RLock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	node, ok := r.nodes[nodeName]
-	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("node %s not found", nodeName)
 	}
-
 	if node.conn != nil {
 		return node.conn, nil
 	}
@@ -150,11 +150,7 @@ func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) 
 	if err != nil {
 		return nil, fmt.Errorf("connect to forkd on %s: %w", nodeName, err)
 	}
-
-	r.mu.Lock()
 	node.conn = conn
-	r.mu.Unlock()
-
 	return conn, nil
 }
 

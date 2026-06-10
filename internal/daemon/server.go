@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
@@ -88,10 +89,32 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	// Connect to the guest agent so exec/files work
-	s.sandboxAPI.RegisterSandbox(result.SandboxID, result.VsockPath)
+	s.registerAgent(result.SandboxID, result.VsockPath)
 
 	return result, nil
+}
+
+// ForkRunning checkpoints a running sandbox and forks it.
+func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error) {
+	result, err := s.engine.ForkRunning(sourceSandboxID, newSandboxID, pauseSource)
+	if err != nil {
+		return nil, err
+	}
+
+	forkDuration.Observe(result.ForkTimeMs / 1000.0)
+	activeSandboxes.Inc()
+
+	s.registerAgent(result.SandboxID, result.VsockPath)
+	return result, nil
+}
+
+// registerAgent connects the sandbox API to the guest agent. Failure is
+// logged, not fatal: the sandbox is running, but exec/files will 404 until
+// an agent connection is established (mock mode has no agent at all).
+func (s *Server) registerAgent(sandboxID, vsockPath string) {
+	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+		log.Printf("forkd: sandbox %s: guest agent not connected: %v", sandboxID, err)
+	}
 }
 
 // Terminate handles a sandbox termination request.
