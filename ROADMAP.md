@@ -68,6 +68,18 @@ Family maturity bar before 1.0: Grafana dashboards, PrometheusRule alerts
 with runbooks, `docs/conditions.md` reason-code catalogue, shipped with the
 Helm chart.
 
+## Foundations (decide once, early)
+
+Six clusters around the outside that are cheap to set now and expensive to
+retrofit. Three are **design constraints that block format freeze** because
+they touch the on-disk and on-wire formats: per-workspace encryption keys
+(erasure = crypto-shredding, #31), the snapshot version-compatibility
+contract (memory resumability has a stated window, #32), and CoW-aware
+metering (the shared-pages billing primitive, #33). The rest is process:
+licensing/IP posture (#34), security operations — we ship a kernel
+(#35), hosted-service abuse controls with OSS hooks (#36), and
+community/credibility operations (#37).
+
 ## 0. Make the claimed system real (in progress)
 
 The README previously described an end-to-end system; parts of it were stubs.
