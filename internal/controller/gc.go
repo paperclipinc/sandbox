@@ -7,6 +7,7 @@ import (
 	"github.com/go-logr/logr"
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -77,6 +78,11 @@ func (g *GarbageCollector) runOnce(ctx context.Context) {
 
 	desired := g.desiredAlive(claims.Items, forks.Items)
 
+	// Order matters only loosely: markNodeLost only touches claims whose node is
+	// unhealthy/absent, and sweepOrphans only visits healthy nodes, so the two
+	// never act on the same node. A claim just marked NodeLost stamps
+	// FinishedAt=now, so it is too fresh for any later TTL pass to delete.
+	g.markNodeLost(ctx, logger, claims.Items)
 	g.sweepOrphans(ctx, logger, desired)
 }
 
@@ -135,6 +141,41 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 			}
 			logger.Info("terminated orphan sandbox", "node", node.Name, "sandbox", sb.SandboxId)
 		}
+	}
+}
+
+// markNodeLost transitions Ready claims whose node is no longer a healthy
+// registered node to a terminal Failed phase with a NodeLost condition.
+//
+// We reuse the existing SandboxFailed phase with a NodeLost reason rather than
+// adding a dedicated phase const: the phase set stays small and a NodeLost
+// claim is, for every consumer, just a failed claim with a specific reason.
+// The node is gone, so there is nothing to terminate; we only stamp state,
+// bounded by the GC interval.
+func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger, claims []v1alpha1.SandboxClaim) {
+	for i := range claims {
+		c := &claims[i]
+		if c.Status.Phase != v1alpha1.SandboxReady {
+			continue
+		}
+		if c.Status.Node == "" || g.Registry.NodeHealthy(c.Status.Node) {
+			continue
+		}
+		now := metav1.Now()
+		c.Status.Phase = v1alpha1.SandboxFailed
+		c.Status.FinishedAt = &now
+		setCondition(&c.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "NodeLost",
+			Message:            "node running this sandbox is no longer healthy or registered",
+		})
+		if err := g.Client.Status().Update(ctx, c); err != nil {
+			logger.Error(err, "mark claim NodeLost", "claim", c.Name, "node", c.Status.Node)
+			continue
+		}
+		logger.Info("claim transitioned to NodeLost", "claim", c.Name, "node", c.Status.Node)
 	}
 }
 
