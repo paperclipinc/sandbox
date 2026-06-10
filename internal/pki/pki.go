@@ -175,9 +175,9 @@ func (ca *CA) Issue(dnsName string) (*Leaf, error) {
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: dnsName},
-		DNSNames:     []string{dnsName},
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: dnsName},
+		DNSNames:              []string{dnsName},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.AddDate(2, 0, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
