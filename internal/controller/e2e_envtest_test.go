@@ -43,6 +43,11 @@ func TestClaimReachesReadyEndToEnd(t *testing.T) {
 	if err := k8sClient.Create(ctx, claim); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, claim)
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {

@@ -36,7 +36,7 @@ func main() {
 	logger := ctrl.Log.WithName("setup")
 
 	if mockMode {
-		logger.Info("running in mock mode — no KVM required, fork operations are simulated")
+		logger.Info("--mock on the controller is a no-op: mock mode now lives in forkd (run `forkd --mock`); the controller discovers mock forkd instances via pod discovery")
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

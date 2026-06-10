@@ -6,6 +6,8 @@ import (
 	"time"
 
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -71,22 +73,24 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 		if !ok {
 			continue
 		}
-		// Register first so GetConnection can dial; refresh fills capacity,
-		// then re-register stores the refreshed fields (Register is an upsert).
-		d.Registry.Register(info)
+		// Populate capacity before the registry ever sees the struct —
+		// registered NodeInfo fields are read under the registry's RLock and
+		// must never be mutated afterwards outside it.
 		d.refreshCapacity(ctx, info)
 		d.Registry.Register(info)
 	}
 }
 
-// refreshCapacity fills template/capacity fields via forkd's GetCapacity.
-// Registration still happens when the call fails — SelectNode's health window
-// and the next sync handle flapping pods.
+// refreshCapacity fills template/capacity fields via forkd's GetCapacity,
+// dialing the node directly (the node is not registered yet — the registry
+// must only ever see fully-populated NodeInfo structs; see AddTemplate's
+// locking contract).
 func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
-	conn, err := d.Registry.GetConnection(info.Name)
+	conn, err := grpc.NewClient(info.Endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return
 	}
+	defer conn.Close()
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	resp, err := forkdpb.NewForkDaemonClient(conn).GetCapacity(cctx, &forkdpb.GetCapacityRequest{})

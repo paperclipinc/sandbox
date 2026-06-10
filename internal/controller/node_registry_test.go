@@ -32,6 +32,35 @@ func TestSelectNodePrefersSnapshotHolder(t *testing.T) {
 	}
 }
 
+func TestRegisterCarriesConnectionForward(t *testing.T) {
+	r := NewNodeRegistry()
+	r.Register(&NodeInfo{Name: "n1", Endpoint: "127.0.0.1:1"})
+	conn, err := r.GetConnection("n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-register same endpoint: connection must be carried forward.
+	r.Register(&NodeInfo{Name: "n1", Endpoint: "127.0.0.1:1"})
+	conn2, err := r.GetConnection("n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn2 != conn {
+		t.Fatal("connection was not carried forward on same-endpoint re-register")
+	}
+
+	// Re-register with a NEW endpoint: old conn closed, fresh dial happens.
+	r.Register(&NodeInfo{Name: "n1", Endpoint: "127.0.0.1:2"})
+	conn3, err := r.GetConnection("n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn3 == conn {
+		t.Fatal("stale connection survived endpoint change")
+	}
+}
+
 func TestNodesWithTemplate(t *testing.T) {
 	r := NewNodeRegistry()
 	r.Register(&NodeInfo{Name: "a", TemplateIDs: []string{"py"}})

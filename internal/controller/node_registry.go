@@ -46,6 +46,13 @@ func (r *NodeRegistry) Register(info *NodeInfo) {
 	if r.nodes == nil {
 		r.nodes = make(map[string]*NodeInfo)
 	}
+	if old, ok := r.nodes[info.Name]; ok && old.conn != nil {
+		if old.Endpoint == info.Endpoint && info.conn == nil {
+			info.conn = old.conn // carry the dialed connection forward
+		} else {
+			old.conn.Close()
+		}
+	}
 	info.LastHeartbeat = time.Now()
 	r.nodes[info.Name] = info
 }
@@ -198,7 +205,7 @@ func (r *NodeRegistry) PruneStale(maxAge time.Duration) int {
 
 	pruned := 0
 	for name, node := range r.nodes {
-		if time.Since(node.LastHeartbeat) > maxAge {
+		if time.Since(node.LastHeartbeat) >= maxAge {
 			if node.conn != nil {
 				node.conn.Close()
 			}
