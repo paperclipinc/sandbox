@@ -42,7 +42,7 @@ Two ways to run it:
 ## Features
 
 **Fast**
-- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; the mechanism targets sub-10ms forks, and the reproducible benchmark program that backs every public number is in progress ([#15](https://github.com/paperclipinc/sandbox/issues/15))
+- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; fork->first-exec is now measured reproducibly in CI (shared-runner-class, see [BENCHMARKS.md](BENCHMARKS.md)), and bare-metal reference numbers are pending the reference hardware ([#15](https://github.com/paperclipinc/sandbox/issues/15))
 - Pre-snapshotted pools: no cold start on claim
 - CoW memory sharing across forks: you pay for unique pages, not for copies
 

@@ -215,16 +215,24 @@ or spoof.
 
 ## 4. Benchmark program + honest comparison
 
-- ⬜ `bench/` harness: claim→first-exec P50/P99, fork→first-exec P50/P99
-  (end-to-end, not just the KVM restore syscall), exec round-trip, sustained
-  claims/sec, density curves, pool-rebuild propagation
-- ⬜ CI runs on pinned bare-metal hardware per release → `BENCHMARKS.md`
-  with methodology
+- ✅ `bench/` harness (`cmd/bench` + `internal/benchstat`): drives the real
+  fork engine in-process and measures fork->first-exec and warm exec
+  round-trip distributions (count/min/p50/p90/p99/max/mean). Reproducible in
+  CI: the KVM workflow runs it every run and publishes the tables to the job
+  summary plus a JSON artifact. Methodology in `BENCHMARKS.md`,
+  reproduction in `bench/README.md`.
+- ⬜ claim->first-exec end to end through the controller on a real cluster
+  (the harness measures the engine data path, not the controller + pool path)
+- ⬜ sustained claims/sec, density curves, pool-rebuild propagation
+- ⬜ Bare-metal reference numbers on the Hetzner + Talos reference node; CI
+  runs on pinned bare-metal hardware per release → `BENCHMARKS.md` results
+  section (current CI numbers are shared-runner-class, not representative)
 - ⬜ Comparison table regenerated from in-repo scripts against E2B
   self-hosted, Daytona OSS, Agent Sandbox + Kata warm pools on the same
   hardware; reproducible by anyone
-- ⬜ Track exec hot-path latency (gRPC → vsock → spawn) with the same rigor
-  as fork latency; it dominates agent tokens-to-completion
+- ✅ Exec hot-path latency (vsock round-trip + guest spawn) is measured by the
+  `exec-rt` mode with the same percentile rigor as fork latency; end-to-end
+  gRPC->vsock->spawn through the API remains open
 
 ## 5. Talos + Hetzner reference platform
 
