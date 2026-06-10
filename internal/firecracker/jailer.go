@@ -96,13 +96,13 @@ func chrootPath(baseDir, vmID, p string) string {
 // for one VM. Everything after "--" is passed through to Firecracker,
 // which resolves paths inside the chroot. The jailer itself appends
 // --id to the Firecracker args.
-func jailerArgs(cfg VMConfig, uid, gid uint32) []string {
+func jailerArgs(cfg VMConfig, id string, uid, gid uint32) []string {
 	cgroupVersion := cfg.Jailer.CgroupVersion
 	if cgroupVersion == 0 {
 		cgroupVersion = 2
 	}
 	return []string{
-		"--id", cfg.ID,
+		"--id", id,
 		"--exec-file", cfg.FirecrackerBin,
 		"--uid", strconv.FormatUint(uint64(uid), 10),
 		"--gid", strconv.FormatUint(uint64(gid), 10),
@@ -274,6 +274,25 @@ func guardChrootSource(cfg VMConfig, p string) error {
 		}
 	}
 	return fmt.Errorf("refusing to expose %q inside the jailer chroot: outside the VM workspace (%q) and the data dir (%q); place VM artifacts under the data dir", p, cfg.WorkDir, cfg.Jailer.DataDir)
+}
+
+// guardExportPath refuses a snapshot export destination that is not bound to
+// the forkd data dir. It uses the canonical containment shape recognized by
+// CodeQL go/path-injection: clean the path, then require it to equal the data
+// dir or sit beneath it under a path separator. This dominates every os.*
+// sink in exportFromJail, so a caller-derived snapshot path can never link or
+// remove a file outside the data dir. An empty dataDir disables the check
+// (direct exec and tests that do not set a data dir).
+func guardExportPath(p, dataDir string) error {
+	if dataDir == "" {
+		return nil
+	}
+	root := filepath.Clean(dataDir)
+	cleaned := filepath.Clean(p)
+	if cleaned == root || strings.HasPrefix(cleaned, root+string(os.PathSeparator)) {
+		return nil
+	}
+	return fmt.Errorf("refusing snapshot export path %q: outside the data dir %q", p, dataDir)
 }
 
 // ErrUIDRangeExhausted is returned by UIDAllocator.Acquire when every uid

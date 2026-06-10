@@ -33,8 +33,10 @@ type Client struct {
 	wait func() error
 
 	// Jailer state; zero values for direct exec.
+	id          string // validated VM id (passed validateVMID), "" for ConnectVM
 	chrootDir   string // host path of the chroot root, "" when not jailed
 	jailerVMDir string // per-VM jailer workspace, removed on Kill
+	dataDir     string // forkd data dir; bounds export-from-jail host paths
 	jailedUID   uint32
 	jailedGID   uint32
 	allocator   *UIDAllocator
@@ -48,6 +50,16 @@ type Client struct {
 func StartVM(cfg VMConfig) (*Client, error) {
 	if cfg.Jailer.Enabled() {
 		return startJailedVM(cfg)
+	}
+
+	// Validate the id before it is used anywhere, so the same allowlist
+	// barrier that protects the jailed path builders also guards direct
+	// exec. An empty id is allowed here (direct exec does not require one);
+	// a non-empty id must pass the allowlist.
+	if cfg.ID != "" {
+		if err := validateVMID(cfg.ID); err != nil {
+			return nil, err
+		}
 	}
 
 	socketPath := cfg.SocketPath
@@ -105,6 +117,13 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	if cfg.ID == "" {
 		return nil, fmt.Errorf("jailer launch requires a VM id (jailer --id)")
 	}
+	// Allowlist barrier: the id is joined into every per-VM path below, so
+	// validate it before ANY path is built from it (CodeQL go/path-injection
+	// sanitizer). All downstream path builders consume this validated id.
+	if err := validateVMID(cfg.ID); err != nil {
+		return nil, err
+	}
+	id := cfg.ID
 	if filepath.Base(cfg.FirecrackerBin) != jailerExecFileName {
 		return nil, fmt.Errorf("jailer launch requires the firecracker binary to be named %q (the jailer derives the chroot layout from the --exec-file basename); got %q", jailerExecFileName, cfg.FirecrackerBin)
 	}
@@ -129,19 +148,19 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 		}
 	}()
 
-	chrootDir := jailerChrootDir(cfg.Jailer.ChrootBaseDir, cfg.ID)
+	chrootDir := jailerChrootDir(cfg.Jailer.ChrootBaseDir, id)
 	if err := os.MkdirAll(filepath.Join(chrootDir, "run"), 0o755); err != nil {
 		return nil, fmt.Errorf("create chroot run dir: %w", err)
 	}
-	if _, err := prepareChroot(cfg, cfg.ID, cfg.ChrootFiles); err != nil {
-		return nil, fmt.Errorf("prepare chroot for %s: %w", cfg.ID, err)
+	if _, err := prepareChroot(cfg, id, cfg.ChrootFiles); err != nil {
+		return nil, fmt.Errorf("prepare chroot for %s: %w", id, err)
 	}
-	chownIntoJail(chrootDir, cfg, uid, gid)
+	chownIntoJail(chrootDir, cfg, id, uid, gid)
 
-	socketPath := jailedAPISocketPath(cfg.Jailer.ChrootBaseDir, cfg.ID)
+	socketPath := jailedAPISocketPath(cfg.Jailer.ChrootBaseDir, id)
 	os.Remove(socketPath)
 
-	cmd := exec.Command(cfg.Jailer.JailerBin, jailerArgs(cfg, uid, gid)...)
+	cmd := exec.Command(cfg.Jailer.JailerBin, jailerArgs(cfg, id, uid, gid)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -153,8 +172,10 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 		socketPath:  socketPath,
 		process:     cmd.Process,
 		wait:        cmd.Wait,
+		id:          id,
 		chrootDir:   chrootDir,
-		jailerVMDir: jailerVMDir(cfg.Jailer.ChrootBaseDir, cfg.ID),
+		jailerVMDir: jailerVMDir(cfg.Jailer.ChrootBaseDir, id),
+		dataDir:     cfg.Jailer.DataDir,
 		jailedUID:   uid,
 		jailedGID:   gid,
 		allocator:   cfg.Jailer.Allocator,
@@ -185,10 +206,10 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 // Failures are logged (path only, never contents) and not fatal: on a
 // correctly deployed root forkd they do not happen, and the VM fails
 // later with a clear permission error if one slipped through.
-func chownIntoJail(chrootDir string, cfg VMConfig, uid, gid uint32) {
+func chownIntoJail(chrootDir string, cfg VMConfig, id string, uid, gid uint32) {
 	targets := []string{filepath.Join(chrootDir, "run")}
 	for _, f := range cfg.ChrootFiles {
-		targets = append(targets, chrootPath(cfg.Jailer.ChrootBaseDir, cfg.ID, f))
+		targets = append(targets, chrootPath(cfg.Jailer.ChrootBaseDir, id, f))
 	}
 	for _, t := range targets {
 		if err := os.Chown(t, int(uid), int(gid)); err != nil {
@@ -346,9 +367,19 @@ func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
 
 // exportFromJail hard-links a file Firecracker produced inside the
 // chroot back to its host path (copy on EXDEV). No-op for direct exec.
+//
+// The destination host path is bounded to the forkd data dir with a
+// canonical containment check (filepath.Clean plus a separator-anchored
+// prefix) before it reaches any os.* sink. This is the CodeQL-recognized
+// sanitizer for the snapshot export flow (go/path-injection): the snapshot
+// mem and vmstate paths originate from caller-supplied sandbox ids, and this
+// barrier guarantees a cleaned path cannot escape the data dir.
 func (c *Client) exportFromJail(hostPath string) error {
 	if c.chrootDir == "" {
 		return nil
+	}
+	if err := guardExportPath(hostPath, c.dataDir); err != nil {
+		return err
 	}
 	src := c.HostPath(hostPath)
 	if same, err := sameInode(src, hostPath); err == nil && same {

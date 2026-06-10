@@ -30,7 +30,7 @@ func TestJailerArgs(t *testing.T) {
 	cfg.FirecrackerBin = "/usr/local/bin/firecracker"
 	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/agent-run")
 
-	args := jailerArgs(cfg, 64000, 64000)
+	args := jailerArgs(cfg, cfg.ID, 64000, 64000)
 	want := []string{
 		"--id", "vm-1",
 		"--exec-file", "/usr/local/bin/firecracker",
@@ -57,7 +57,7 @@ func TestJailerArgsExplicitCgroupVersion(t *testing.T) {
 	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/agent-run")
 	cfg.Jailer.CgroupVersion = 1
 
-	args := jailerArgs(cfg, 64001, 64001)
+	args := jailerArgs(cfg, cfg.ID, 64001, 64001)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--cgroup-version 1") {
 		t.Fatalf("expected --cgroup-version 1 in %v", args)
