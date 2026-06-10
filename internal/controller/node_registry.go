@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"crypto/tls"
 	"fmt"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -15,6 +17,11 @@ import (
 type NodeRegistry struct {
 	mu    sync.RWMutex
 	nodes map[string]*NodeInfo
+
+	// TLS, when set, is the controller's mTLS client config used to dial
+	// every node that does not carry its own NodeInfo.TLS. Set once at
+	// startup before any dial; nil means insecure (tests, mock mode).
+	TLS *tls.Config
 }
 
 type NodeInfo struct {
@@ -30,7 +37,10 @@ type NodeInfo struct {
 	TemplateIDs     []string
 	SnapshotIDs     []string
 	LastHeartbeat   time.Time
-	conn            *grpc.ClientConn
+	// TLS, when set, overrides the registry-level TLS config for dials to
+	// this node; lets tests run mixed TLS/insecure fleets in one registry.
+	TLS  *tls.Config
+	conn *grpc.ClientConn
 }
 
 func NewNodeRegistry() *NodeRegistry {
@@ -163,6 +173,8 @@ func (r *NodeRegistry) GetNode(name string) (*NodeInfo, bool) {
 }
 
 // GetConnection returns a gRPC connection to a node's forkd, dialing once.
+// Transport credentials are chosen per node: NodeInfo.TLS wins, then the
+// registry-level TLS config, then insecure (tests and mock mode).
 func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -175,9 +187,16 @@ func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) 
 		return node.conn, nil
 	}
 
+	creds := insecure.NewCredentials()
+	switch {
+	case node.TLS != nil:
+		creds = credentials.NewTLS(node.TLS)
+	case r.TLS != nil:
+		creds = credentials.NewTLS(r.TLS)
+	}
 	conn, err := grpc.NewClient(
 		node.Endpoint,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to forkd on %s: %w", nodeName, err)

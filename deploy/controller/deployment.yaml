@@ -71,6 +71,18 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list"]
+  # PKI bootstrap: the controller creates and heals the control plane TLS
+  # Secrets (agent-run-ca, agent-run-forkd-tls, agent-run-controller-tls).
+  # create cannot be scoped by resourceNames (the object does not exist yet
+  # at admission time), so it gets its own unscoped rule; update is scoped
+  # to exactly the three PKI secret names.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["agent-run-ca", "agent-run-forkd-tls", "agent-run-controller-tls"]
+    verbs: ["update"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

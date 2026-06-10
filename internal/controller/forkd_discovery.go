@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"time"
 
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +27,11 @@ type ForkdDiscovery struct {
 	Interval  time.Duration // default 15s
 	GRPCPort  int           // default 9090
 	HTTPPort  int           // default 9091
+	// TLS, when set, is the controller's mTLS client config; discovery uses
+	// it for its own capacity dials and stamps it onto every NodeInfo it
+	// registers so registry dials to discovered nodes use mTLS too. Nil
+	// means insecure (tests, mock mode).
+	TLS *tls.Config
 }
 
 func (d *ForkdDiscovery) Start(ctx context.Context) error {
@@ -73,6 +80,7 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 		if !ok {
 			continue
 		}
+		info.TLS = d.TLS
 		// Populate capacity before the registry ever sees the struct;
 		// registered NodeInfo fields are read under the registry's RLock and
 		// must never be mutated afterwards outside it.
@@ -86,7 +94,11 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 // must only ever see fully-populated NodeInfo structs; see AddTemplate's
 // locking contract).
 func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
-	conn, err := grpc.NewClient(info.Endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if d.TLS != nil {
+		creds = credentials.NewTLS(d.TLS)
+	}
+	conn, err := grpc.NewClient(info.Endpoint, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return
 	}

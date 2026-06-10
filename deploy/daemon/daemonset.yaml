@@ -42,6 +42,9 @@ spec:
             - --firecracker=/usr/local/bin/firecracker
             - --kernel=/var/lib/agent-run/vmlinux
             - --http=:9091
+            - --tls-cert=/etc/forkd/tls/tls.crt
+            - --tls-key=/etc/forkd/tls/tls.key
+            - --tls-ca=/etc/forkd/ca/ca.crt
           ports:
             - name: grpc
               containerPort: 9090
@@ -61,6 +64,12 @@ spec:
               mountPath: /var/lib/agent-run
             - name: kvm
               mountPath: /dev/kvm
+            - name: tls
+              mountPath: /etc/forkd/tls
+              readOnly: true
+            - name: ca
+              mountPath: /etc/forkd/ca
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -83,3 +92,15 @@ spec:
           hostPath:
             path: /dev/kvm
             type: CharDevice
+        # Created by the controller's PKI bootstrap (EnsurePKI) at startup.
+        - name: tls
+          secret:
+            secretName: agent-run-forkd-tls
+        # Only the CA certificate is projected; the CA private key in this
+        # secret must never reach forkd.
+        - name: ca
+          secret:
+            secretName: agent-run-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
