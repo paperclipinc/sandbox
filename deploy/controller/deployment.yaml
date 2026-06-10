@@ -59,12 +59,23 @@ kind: ClusterRole
 metadata:
   name: agent-run-controller
 rules:
+  # delete drives TTL cleanup of finished claims and forks; update writes the
+  # terminate finalizer onto a claim before it acquires a VM, so no Ready
+  # object can disappear without forkd reaping its sandbox.
   - apiGroups: ["agentrun.dev"]
     resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # update on /status writes phase, FinishedAt, and conditions (NodeLost,
+  # Terminated, lifecycle reaping).
   - apiGroups: ["agentrun.dev"]
     resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status"]
     verbs: ["get", "update", "patch"]
+  # update on /finalizers: adding or removing the terminate finalizer touches
+  # the finalizers subresource. Some apiservers gate this separately from the
+  # main resource update, so grant it explicitly for the finalizer-based reap.
+  - apiGroups: ["agentrun.dev"]
+    resources: ["sandboxclaims/finalizers", "sandboxforks/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["agentrun.dev"]
     resources: ["sandboxpools/scale"]
     verbs: ["get", "update"]

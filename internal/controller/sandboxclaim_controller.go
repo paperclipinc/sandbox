@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -27,13 +28,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Already assigned; nothing to do
-	if claim.Status.Phase == v1alpha1.SandboxReady {
-		return r.reconcileTimeout(ctx, &claim)
+	// A claim under deletion: reap its backing VM via the finalizer before the
+	// API object is allowed to disappear.
+	if !claim.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, &claim)
 	}
 
-	// Already failed; don't retry
-	if claim.Status.Phase == v1alpha1.SandboxFailed {
+	// Already assigned; drive maxLifetime / idleTimeout reaping.
+	if claim.Status.Phase == v1alpha1.SandboxReady {
+		return r.reconcileLifetime(ctx, &claim)
+	}
+
+	// Terminal phases: don't retry.
+	if claim.Status.Phase == v1alpha1.SandboxFailed || claim.Status.Phase == v1alpha1.SandboxTerminated {
 		return ctrl.Result{}, nil
 	}
 
@@ -56,6 +63,15 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// Add the terminate finalizer before the claim acquires a backing VM, so
+	// no Ready claim can ever be deleted without forkd reaping its sandbox.
+	// This is a metadata Update, distinct from the status writes below.
+	if controllerutil.AddFinalizer(&claim, FinalizerTerminate) {
+		if err := r.Update(ctx, &claim); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Mark as restoring
 	claim.Status.Phase = v1alpha1.SandboxRestoring
 	if err := r.Status().Update(ctx, &claim); err != nil {
@@ -76,7 +92,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	volumes, err := r.prepareVolumes(ctx, template.Spec.Volumes, claim.Name, claim.Spec.VolumeOverrides)
 	if err != nil {
 		logger.Error(err, "volume preparation failed")
+		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+		// without it ttlFinished skips the claim forever (etcd leak).
+		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
@@ -87,7 +107,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
+		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+		// without it ttlFinished skips the claim forever (etcd leak).
+		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
@@ -100,7 +124,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	apiToken, err := mintAPIToken()
 	if err != nil {
 		logger.Error(err, "token minting failed")
+		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+		// without it ttlFinished skips the claim forever (etcd leak).
+		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
@@ -119,7 +147,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
+		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+		// without it ttlFinished skips the claim forever (etcd leak).
+		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
@@ -131,7 +163,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// retry the Secret. The token exists only in this Secret.
 	if err := ensureSandboxTokenSecret(ctx, r.Client, &claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
 		logger.Error(err, "token secret write failed")
+		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
+		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
+		// without it ttlFinished skips the claim forever (etcd leak).
+		claim.Status.FinishedAt = &now
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{}, err
@@ -166,21 +202,130 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-func (r *SandboxClaimReconciler) reconcileTimeout(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
-	if claim.Spec.Timeout == nil || claim.Status.StartedAt == nil {
+// reconcileDelete reaps the claim's backing VM via forkd Terminate, then
+// removes the finalizer so the API object can be garbage collected. A claim
+// that never acquired a sandbox (no Node or SandboxID) skips straight to
+// finalizer removal. terminateOnNode treats a NotFound sandbox and a
+// vanished node as already-terminated, so a node that left the registry never
+// hangs deletion.
+func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(claim, FinalizerTerminate) {
 		return ctrl.Result{}, nil
 	}
 
-	deadline := claim.Status.StartedAt.Add(claim.Spec.Timeout.Duration)
-	if time.Now().After(deadline) {
-		claim.Status.Phase = v1alpha1.SandboxTerminating
-		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, claim)
-		// Terminate via forkd
+	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
+		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
+			logger.Error(err, "terminate backing sandbox on delete", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{}, err
+		}
+	}
+
+	controllerutil.RemoveFinalizer(claim, FinalizerTerminate)
+	if err := r.Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// reconcileLifetime drives a Ready claim to the terminal Terminated phase when
+// it exceeds maxLifetime (Spec.Timeout from StartedAt) or goes idle
+// (Spec.IdleTimeout from the later of last-activity and StartedAt). Expiry
+// terminates the backing VM directly via terminateOnNode and leaves the
+// finalizer in place; the bounded, tolerant terminateOnNode keeps eventual
+// delete safe. A claim already Terminated returns immediately (idempotent).
+func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if claim.Status.Phase == v1alpha1.SandboxTerminated {
+		return ctrl.Result{}, nil
+	}
+	if claim.Status.StartedAt == nil {
 		return ctrl.Result{}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: time.Until(deadline)}, nil
+	hasMaxLifetime := claim.Spec.Timeout != nil
+	hasIdle := claim.Spec.IdleTimeout != nil
+	if !hasMaxLifetime && !hasIdle {
+		return ctrl.Result{}, nil
+	}
+
+	now := time.Now()
+	startedAt := claim.Status.StartedAt.Time
+
+	// maxLifetime takes precedence: it does not depend on a reachable forkd.
+	if hasMaxLifetime {
+		deadline := startedAt.Add(claim.Spec.Timeout.Duration)
+		if !now.Before(deadline) {
+			return r.terminateLifetime(ctx, claim, "MaxLifetimeExceeded",
+				fmt.Sprintf("max lifetime %s exceeded", claim.Spec.Timeout.Duration))
+		}
+	}
+
+	// Idle check needs last-activity from forkd. An unreachable node means we
+	// cannot evaluate idle this pass; requeue and try again.
+	requeue := time.Duration(0)
+	if hasIdle {
+		_, lastActivity, ok := sandboxActivity(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID)
+		if !ok {
+			logger.Info("cannot evaluate idle, node unreachable; requeueing", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		}
+		last := startedAt
+		if lastActivity.After(last) {
+			last = lastActivity
+		}
+		idleDeadline := last.Add(claim.Spec.IdleTimeout.Duration)
+		if now.After(idleDeadline) {
+			return r.terminateLifetime(ctx, claim, "IdleTimeout",
+				fmt.Sprintf("idle for more than %s", claim.Spec.IdleTimeout.Duration))
+		}
+		requeue = time.Until(idleDeadline)
+	}
+
+	// Requeue at the nearest deadline.
+	if hasMaxLifetime {
+		untilMax := time.Until(startedAt.Add(claim.Spec.Timeout.Duration))
+		if requeue == 0 || untilMax < requeue {
+			requeue = untilMax
+		}
+	}
+	if requeue <= 0 {
+		requeue = 1 * time.Second
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// terminateLifetime reaps the claim's backing VM and stamps the terminal
+// Terminated phase with a FinishedAt time and a Terminated condition. The
+// finalizer stays in place; the bounded terminateOnNode keeps later delete
+// safe.
+func (r *SandboxClaimReconciler) terminateLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim, reason, message string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
+		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
+			logger.Error(err, "terminate backing sandbox on lifetime expiry", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{}, err
+		}
+	}
+
+	now := metav1.Now()
+	claim.Status.Phase = v1alpha1.SandboxTerminated
+	claim.Status.FinishedAt = &now
+	setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Terminated",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+	})
+	if err := r.Status().Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
+	logger.Info("claim terminated by lifetime policy", "claim", claim.Name, "reason", reason)
+	return ctrl.Result{}, nil
 }
 
 type forkResult struct {

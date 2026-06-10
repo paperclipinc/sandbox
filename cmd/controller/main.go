@@ -117,6 +117,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := mgr.Add(&controller.GarbageCollector{
+		Client:   mgr.GetClient(),
+		Registry: nodeRegistry,
+	}); err != nil {
+		logger.Error(err, "unable to add garbage collector")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up health check")
 		os.Exit(1)

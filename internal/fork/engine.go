@@ -61,6 +61,14 @@ type ForkResult struct {
 	VsockPath    string
 }
 
+// SandboxRecord is the minimal view of a live sandbox an engine reports
+// through ListSandboxes. Last-activity is tracked by the SandboxAPI, not the
+// engine (the engine never sees exec or file traffic), so it is absent here.
+type SandboxRecord struct {
+	ID        string
+	CreatedAt time.Time
+}
+
 // NewEngine builds the real KVM-backed engine. A zero jailer config
 // launches Firecracker directly (development only; flagged in the threat
 // model); with JailerBin set every VM runs through the jailer with a
@@ -295,6 +303,19 @@ func (e *Engine) Terminate(sandboxID string) error {
 	os.RemoveAll(sandboxDir)
 
 	return nil
+}
+
+// ListSandboxes returns a record for every sandbox this engine currently
+// holds. Order is unspecified.
+func (e *Engine) ListSandboxes() []SandboxRecord {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	records := make([]SandboxRecord, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		records = append(records, SandboxRecord{ID: s.ID, CreatedAt: s.CreatedAt})
+	}
+	return records
 }
 
 // GetCapacity returns the current node capacity.

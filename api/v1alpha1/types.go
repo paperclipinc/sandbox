@@ -181,11 +181,22 @@ type SandboxClaimSpec struct {
 	// Override fork policies for specific volumes on this claim.
 	VolumeOverrides []VolumeOverride `json:"volumeOverrides,omitempty"`
 
-	// Maximum wall-clock time for this sandbox. Zero means no limit.
+	// Maximum wall-clock time for this sandbox (maxLifetime). Zero means no
+	// limit.
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// IdleTimeout reaps the sandbox after this much time with no exec or file
+	// activity. Zero means no idle limit.
+	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
 
 	// Node preference. Empty means any node with capacity.
 	NodeName string `json:"nodeName,omitempty"`
+
+	// TTLSecondsAfterFinished bounds how long a finished claim (terminal
+	// Terminated or Failed phase) lingers in the API after FinishedAt before the
+	// garbage collector deletes it, freeing etcd. Unset uses the controller's
+	// default. Job-like semantics.
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 type SecretMount struct {
@@ -207,17 +218,21 @@ const (
 	SandboxRestoring   SandboxPhase = "Restoring"
 	SandboxReady       SandboxPhase = "Ready"
 	SandboxTerminating SandboxPhase = "Terminating"
+	SandboxTerminated  SandboxPhase = "Terminated"
 	SandboxFailed      SandboxPhase = "Failed"
 )
 
 type SandboxClaimStatus struct {
-	Phase          SandboxPhase       `json:"phase,omitempty"`
-	Endpoint       string             `json:"endpoint,omitempty"`
-	Node           string             `json:"node,omitempty"`
-	SandboxID      string             `json:"sandboxID,omitempty"`
-	ForkTimeMicros int64              `json:"forkTimeMicros,omitempty"`
-	StartedAt      *metav1.Time       `json:"startedAt,omitempty"`
-	Conditions     []metav1.Condition `json:"conditions,omitempty"`
+	Phase          SandboxPhase `json:"phase,omitempty"`
+	Endpoint       string       `json:"endpoint,omitempty"`
+	Node           string       `json:"node,omitempty"`
+	SandboxID      string       `json:"sandboxID,omitempty"`
+	ForkTimeMicros int64        `json:"forkTimeMicros,omitempty"`
+	StartedAt      *metav1.Time `json:"startedAt,omitempty"`
+	// FinishedAt is set when the claim reaches a terminal phase (Terminated or
+	// Failed), so the GC TTL pass can reap it.
+	FinishedAt *metav1.Time       `json:"finishedAt,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -1326,6 +1326,155 @@ func (x *TerminateResponse) GetUptimeSeconds() float64 {
 	return 0
 }
 
+type ListSandboxesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSandboxesRequest) Reset() {
+	*x = ListSandboxesRequest{}
+	mi := &file_proto_forkd_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSandboxesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSandboxesRequest) ProtoMessage() {}
+
+func (x *ListSandboxesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSandboxesRequest.ProtoReflect.Descriptor instead.
+func (*ListSandboxesRequest) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{21}
+}
+
+type ListSandboxesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sandboxes     []*SandboxInfo         `protobuf:"bytes,1,rep,name=sandboxes,proto3" json:"sandboxes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSandboxesResponse) Reset() {
+	*x = ListSandboxesResponse{}
+	mi := &file_proto_forkd_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSandboxesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSandboxesResponse) ProtoMessage() {}
+
+func (x *ListSandboxesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSandboxesResponse.ProtoReflect.Descriptor instead.
+func (*ListSandboxesResponse) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ListSandboxesResponse) GetSandboxes() []*SandboxInfo {
+	if x != nil {
+		return x.Sandboxes
+	}
+	return nil
+}
+
+type SandboxInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	CreatedAtUnix int64                  `protobuf:"varint,2,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
+	// zero when never accessed
+	LastActivityUnix int64 `protobuf:"varint,3,opt,name=last_activity_unix,json=lastActivityUnix,proto3" json:"last_activity_unix,omitempty"`
+	UptimeSeconds    int64 `protobuf:"varint,4,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *SandboxInfo) Reset() {
+	*x = SandboxInfo{}
+	mi := &file_proto_forkd_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SandboxInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SandboxInfo) ProtoMessage() {}
+
+func (x *SandboxInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SandboxInfo.ProtoReflect.Descriptor instead.
+func (*SandboxInfo) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *SandboxInfo) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *SandboxInfo) GetCreatedAtUnix() int64 {
+	if x != nil {
+		return x.CreatedAtUnix
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetLastActivityUnix() int64 {
+	if x != nil {
+		return x.LastActivityUnix
+	}
+	return 0
+}
+
+func (x *SandboxInfo) GetUptimeSeconds() int64 {
+	if x != nil {
+		return x.UptimeSeconds
+	}
+	return 0
+}
+
 type ReadFileRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -1336,7 +1485,7 @@ type ReadFileRequest struct {
 
 func (x *ReadFileRequest) Reset() {
 	*x = ReadFileRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[21]
+	mi := &file_proto_forkd_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1348,7 +1497,7 @@ func (x *ReadFileRequest) String() string {
 func (*ReadFileRequest) ProtoMessage() {}
 
 func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[21]
+	mi := &file_proto_forkd_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1361,7 +1510,7 @@ func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileRequest.ProtoReflect.Descriptor instead.
 func (*ReadFileRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{21}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ReadFileRequest) GetSandboxId() string {
@@ -1388,7 +1537,7 @@ type ReadFileResponse struct {
 
 func (x *ReadFileResponse) Reset() {
 	*x = ReadFileResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[22]
+	mi := &file_proto_forkd_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1400,7 +1549,7 @@ func (x *ReadFileResponse) String() string {
 func (*ReadFileResponse) ProtoMessage() {}
 
 func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[22]
+	mi := &file_proto_forkd_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1413,7 +1562,7 @@ func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadFileResponse.ProtoReflect.Descriptor instead.
 func (*ReadFileResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{22}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ReadFileResponse) GetContent() []byte {
@@ -1442,7 +1591,7 @@ type WriteFileRequest struct {
 
 func (x *WriteFileRequest) Reset() {
 	*x = WriteFileRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[23]
+	mi := &file_proto_forkd_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1454,7 +1603,7 @@ func (x *WriteFileRequest) String() string {
 func (*WriteFileRequest) ProtoMessage() {}
 
 func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[23]
+	mi := &file_proto_forkd_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1467,7 +1616,7 @@ func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteFileRequest.ProtoReflect.Descriptor instead.
 func (*WriteFileRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{23}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *WriteFileRequest) GetSandboxId() string {
@@ -1506,7 +1655,7 @@ type WriteFileResponse struct {
 
 func (x *WriteFileResponse) Reset() {
 	*x = WriteFileResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[24]
+	mi := &file_proto_forkd_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1518,7 +1667,7 @@ func (x *WriteFileResponse) String() string {
 func (*WriteFileResponse) ProtoMessage() {}
 
 func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[24]
+	mi := &file_proto_forkd_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1531,7 +1680,7 @@ func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteFileResponse.ProtoReflect.Descriptor instead.
 func (*WriteFileResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{24}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{27}
 }
 
 type ListDirRequest struct {
@@ -1544,7 +1693,7 @@ type ListDirRequest struct {
 
 func (x *ListDirRequest) Reset() {
 	*x = ListDirRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[25]
+	mi := &file_proto_forkd_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1556,7 +1705,7 @@ func (x *ListDirRequest) String() string {
 func (*ListDirRequest) ProtoMessage() {}
 
 func (x *ListDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[25]
+	mi := &file_proto_forkd_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1569,7 +1718,7 @@ func (x *ListDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDirRequest.ProtoReflect.Descriptor instead.
 func (*ListDirRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{25}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListDirRequest) GetSandboxId() string {
@@ -1595,7 +1744,7 @@ type ListDirResponse struct {
 
 func (x *ListDirResponse) Reset() {
 	*x = ListDirResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[26]
+	mi := &file_proto_forkd_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1607,7 +1756,7 @@ func (x *ListDirResponse) String() string {
 func (*ListDirResponse) ProtoMessage() {}
 
 func (x *ListDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[26]
+	mi := &file_proto_forkd_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1620,7 +1769,7 @@ func (x *ListDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDirResponse.ProtoReflect.Descriptor instead.
 func (*ListDirResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{26}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ListDirResponse) GetEntries() []*FileInfo {
@@ -1643,7 +1792,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_proto_forkd_proto_msgTypes[27]
+	mi := &file_proto_forkd_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1655,7 +1804,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[27]
+	mi := &file_proto_forkd_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1668,7 +1817,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{27}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *FileInfo) GetName() string {
@@ -1714,7 +1863,7 @@ type GetCapacityRequest struct {
 
 func (x *GetCapacityRequest) Reset() {
 	*x = GetCapacityRequest{}
-	mi := &file_proto_forkd_proto_msgTypes[28]
+	mi := &file_proto_forkd_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1726,7 +1875,7 @@ func (x *GetCapacityRequest) String() string {
 func (*GetCapacityRequest) ProtoMessage() {}
 
 func (x *GetCapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[28]
+	mi := &file_proto_forkd_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1739,7 +1888,7 @@ func (x *GetCapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapacityRequest.ProtoReflect.Descriptor instead.
 func (*GetCapacityRequest) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{28}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{31}
 }
 
 type GetCapacityResponse struct {
@@ -1758,7 +1907,7 @@ type GetCapacityResponse struct {
 
 func (x *GetCapacityResponse) Reset() {
 	*x = GetCapacityResponse{}
-	mi := &file_proto_forkd_proto_msgTypes[29]
+	mi := &file_proto_forkd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1770,7 +1919,7 @@ func (x *GetCapacityResponse) String() string {
 func (*GetCapacityResponse) ProtoMessage() {}
 
 func (x *GetCapacityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[29]
+	mi := &file_proto_forkd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1783,7 +1932,7 @@ func (x *GetCapacityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapacityResponse.ProtoReflect.Descriptor instead.
 func (*GetCapacityResponse) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{29}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetCapacityResponse) GetActiveSandboxes() int32 {
@@ -1852,7 +2001,7 @@ type ResourceSpec struct {
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_proto_forkd_proto_msgTypes[30]
+	mi := &file_proto_forkd_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1864,7 +2013,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[30]
+	mi := &file_proto_forkd_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1877,7 +2026,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{30}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ResourceSpec) GetVcpus() int32 {
@@ -1904,7 +2053,7 @@ type EnvVar struct {
 
 func (x *EnvVar) Reset() {
 	*x = EnvVar{}
-	mi := &file_proto_forkd_proto_msgTypes[31]
+	mi := &file_proto_forkd_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1916,7 +2065,7 @@ func (x *EnvVar) String() string {
 func (*EnvVar) ProtoMessage() {}
 
 func (x *EnvVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[31]
+	mi := &file_proto_forkd_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1929,7 +2078,7 @@ func (x *EnvVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvVar.ProtoReflect.Descriptor instead.
 func (*EnvVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{31}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *EnvVar) GetKey() string {
@@ -1956,7 +2105,7 @@ type SecretVar struct {
 
 func (x *SecretVar) Reset() {
 	*x = SecretVar{}
-	mi := &file_proto_forkd_proto_msgTypes[32]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1968,7 +2117,7 @@ func (x *SecretVar) String() string {
 func (*SecretVar) ProtoMessage() {}
 
 func (x *SecretVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[32]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1981,7 +2130,7 @@ func (x *SecretVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretVar.ProtoReflect.Descriptor instead.
 func (*SecretVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{32}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SecretVar) GetKey() string {
@@ -2008,7 +2157,7 @@ type NetworkConfig struct {
 
 func (x *NetworkConfig) Reset() {
 	*x = NetworkConfig{}
-	mi := &file_proto_forkd_proto_msgTypes[33]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2020,7 +2169,7 @@ func (x *NetworkConfig) String() string {
 func (*NetworkConfig) ProtoMessage() {}
 
 func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[33]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2033,7 +2182,7 @@ func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkConfig.ProtoReflect.Descriptor instead.
 func (*NetworkConfig) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{33}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *NetworkConfig) GetEgressPolicy() string {
@@ -2163,7 +2312,16 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\":\n" +
 	"\x11TerminateResponse\x12%\n" +
-	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds\"D\n" +
+	"\x0euptime_seconds\x18\x01 \x01(\x01R\ruptimeSeconds\"\x16\n" +
+	"\x14ListSandboxesRequest\"I\n" +
+	"\x15ListSandboxesResponse\x120\n" +
+	"\tsandboxes\x18\x01 \x03(\v2\x12.forkd.SandboxInfoR\tsandboxes\"\xa9\x01\n" +
+	"\vSandboxInfo\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12&\n" +
+	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x12,\n" +
+	"\x12last_activity_unix\x18\x03 \x01(\x03R\x10lastActivityUnix\x12%\n" +
+	"\x0euptime_seconds\x18\x04 \x01(\x03R\ruptimeSeconds\"D\n" +
 	"\x0fReadFileRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x12\n" +
@@ -2212,7 +2370,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\rNetworkConfig\x12#\n" +
 	"\regress_policy\x18\x01 \x01(\tR\fegressPolicy\x12\x1d\n" +
 	"\n" +
-	"allow_list\x18\x02 \x03(\tR\tallowList2\xbe\a\n" +
+	"allow_list\x18\x02 \x03(\tR\tallowList2\x8a\b\n" +
 	"\n" +
 	"ForkDaemon\x12M\n" +
 	"\x0eCreateTemplate\x12\x1c.forkd.CreateTemplateRequest\x1a\x1d.forkd.CreateTemplateResponse\x12M\n" +
@@ -2225,7 +2383,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x04Exec\x12\x12.forkd.ExecRequest\x1a\x13.forkd.ExecResponse\x12C\n" +
 	"\n" +
 	"ExecStream\x12\x18.forkd.ExecStreamRequest\x1a\x19.forkd.ExecStreamResponse0\x01\x12>\n" +
-	"\tTerminate\x12\x17.forkd.TerminateRequest\x1a\x18.forkd.TerminateResponse\x12;\n" +
+	"\tTerminate\x12\x17.forkd.TerminateRequest\x1a\x18.forkd.TerminateResponse\x12J\n" +
+	"\rListSandboxes\x12\x1b.forkd.ListSandboxesRequest\x1a\x1c.forkd.ListSandboxesResponse\x12;\n" +
 	"\bReadFile\x12\x16.forkd.ReadFileRequest\x1a\x17.forkd.ReadFileResponse\x12>\n" +
 	"\tWriteFile\x12\x17.forkd.WriteFileRequest\x1a\x18.forkd.WriteFileResponse\x128\n" +
 	"\aListDir\x12\x15.forkd.ListDirRequest\x1a\x16.forkd.ListDirResponse\x12D\n" +
@@ -2244,7 +2403,7 @@ func file_proto_forkd_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_forkd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_proto_forkd_proto_goTypes = []any{
 	(ExecStreamResponse_Stream)(0), // 0: forkd.ExecStreamResponse.Stream
 	(*CreateTemplateRequest)(nil),  // 1: forkd.CreateTemplateRequest
@@ -2268,64 +2427,70 @@ var file_proto_forkd_proto_goTypes = []any{
 	(*ExecStreamResponse)(nil),     // 19: forkd.ExecStreamResponse
 	(*TerminateRequest)(nil),       // 20: forkd.TerminateRequest
 	(*TerminateResponse)(nil),      // 21: forkd.TerminateResponse
-	(*ReadFileRequest)(nil),        // 22: forkd.ReadFileRequest
-	(*ReadFileResponse)(nil),       // 23: forkd.ReadFileResponse
-	(*WriteFileRequest)(nil),       // 24: forkd.WriteFileRequest
-	(*WriteFileResponse)(nil),      // 25: forkd.WriteFileResponse
-	(*ListDirRequest)(nil),         // 26: forkd.ListDirRequest
-	(*ListDirResponse)(nil),        // 27: forkd.ListDirResponse
-	(*FileInfo)(nil),               // 28: forkd.FileInfo
-	(*GetCapacityRequest)(nil),     // 29: forkd.GetCapacityRequest
-	(*GetCapacityResponse)(nil),    // 30: forkd.GetCapacityResponse
-	(*ResourceSpec)(nil),           // 31: forkd.ResourceSpec
-	(*EnvVar)(nil),                 // 32: forkd.EnvVar
-	(*SecretVar)(nil),              // 33: forkd.SecretVar
-	(*NetworkConfig)(nil),          // 34: forkd.NetworkConfig
+	(*ListSandboxesRequest)(nil),   // 22: forkd.ListSandboxesRequest
+	(*ListSandboxesResponse)(nil),  // 23: forkd.ListSandboxesResponse
+	(*SandboxInfo)(nil),            // 24: forkd.SandboxInfo
+	(*ReadFileRequest)(nil),        // 25: forkd.ReadFileRequest
+	(*ReadFileResponse)(nil),       // 26: forkd.ReadFileResponse
+	(*WriteFileRequest)(nil),       // 27: forkd.WriteFileRequest
+	(*WriteFileResponse)(nil),      // 28: forkd.WriteFileResponse
+	(*ListDirRequest)(nil),         // 29: forkd.ListDirRequest
+	(*ListDirResponse)(nil),        // 30: forkd.ListDirResponse
+	(*FileInfo)(nil),               // 31: forkd.FileInfo
+	(*GetCapacityRequest)(nil),     // 32: forkd.GetCapacityRequest
+	(*GetCapacityResponse)(nil),    // 33: forkd.GetCapacityResponse
+	(*ResourceSpec)(nil),           // 34: forkd.ResourceSpec
+	(*EnvVar)(nil),                 // 35: forkd.EnvVar
+	(*SecretVar)(nil),              // 36: forkd.SecretVar
+	(*NetworkConfig)(nil),          // 37: forkd.NetworkConfig
 }
 var file_proto_forkd_proto_depIdxs = []int32{
-	31, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
+	34, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
 	7,  // 1: forkd.ListTemplatesResponse.templates:type_name -> forkd.TemplateInfo
-	32, // 2: forkd.ForkRequest.env:type_name -> forkd.EnvVar
-	33, // 3: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
-	34, // 4: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
-	32, // 5: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
-	32, // 6: forkd.ExecRequest.env:type_name -> forkd.EnvVar
-	32, // 7: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
+	35, // 2: forkd.ForkRequest.env:type_name -> forkd.EnvVar
+	36, // 3: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
+	37, // 4: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
+	35, // 5: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
+	35, // 6: forkd.ExecRequest.env:type_name -> forkd.EnvVar
+	35, // 7: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
 	0,  // 8: forkd.ExecStreamResponse.stream:type_name -> forkd.ExecStreamResponse.Stream
-	28, // 9: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
-	1,  // 10: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
-	3,  // 11: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
-	5,  // 12: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
-	8,  // 13: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
-	10, // 14: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
-	12, // 15: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
-	14, // 16: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
-	16, // 17: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
-	18, // 18: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
-	20, // 19: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
-	22, // 20: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
-	24, // 21: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
-	26, // 22: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
-	29, // 23: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
-	2,  // 24: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
-	4,  // 25: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
-	6,  // 26: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
-	9,  // 27: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
-	11, // 28: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
-	13, // 29: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
-	15, // 30: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
-	17, // 31: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
-	19, // 32: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
-	21, // 33: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
-	23, // 34: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
-	25, // 35: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
-	27, // 36: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
-	30, // 37: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
-	24, // [24:38] is the sub-list for method output_type
-	10, // [10:24] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	24, // 9: forkd.ListSandboxesResponse.sandboxes:type_name -> forkd.SandboxInfo
+	31, // 10: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
+	1,  // 11: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
+	3,  // 12: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
+	5,  // 13: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
+	8,  // 14: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
+	10, // 15: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
+	12, // 16: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
+	14, // 17: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
+	16, // 18: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
+	18, // 19: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
+	20, // 20: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
+	22, // 21: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
+	25, // 22: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
+	27, // 23: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
+	29, // 24: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
+	32, // 25: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
+	2,  // 26: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
+	4,  // 27: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
+	6,  // 28: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
+	9,  // 29: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
+	11, // 30: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
+	13, // 31: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
+	15, // 32: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
+	17, // 33: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
+	19, // 34: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
+	21, // 35: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
+	23, // 36: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
+	26, // 37: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
+	28, // 38: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
+	30, // 39: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
+	33, // 40: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
+	26, // [26:41] is the sub-list for method output_type
+	11, // [11:26] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_proto_forkd_proto_init() }
@@ -2339,7 +2504,7 @@ func file_proto_forkd_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_forkd_proto_rawDesc), len(file_proto_forkd_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   34,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

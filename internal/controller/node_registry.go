@@ -172,6 +172,18 @@ func (r *NodeRegistry) GetNode(name string) (*NodeInfo, bool) {
 	return node, ok
 }
 
+// NodeHealthy reports whether the named node is registered and still
+// heartbeating. It returns false when the node is absent.
+func (r *NodeRegistry) NodeHealthy(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	node, ok := r.nodes[name]
+	if !ok {
+		return false
+	}
+	return node.isHealthy()
+}
+
 // GetConnection returns a gRPC connection to a node's forkd, dialing once.
 // Transport credentials are chosen per node: NodeInfo.TLS wins, then the
 // registry-level TLS config, then insecure (tests and mock mode).

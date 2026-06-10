@@ -145,6 +145,60 @@ func TestMockEngine_MemoryAccounting(t *testing.T) {
 	}
 }
 
+func TestMockEngine_ListSandboxes(t *testing.T) {
+	engine := NewMockEngine()
+	engine.ForkDelay = 0
+	if err := engine.CreateTemplate("py", "python:3.12-slim", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if recs := engine.ListSandboxes(); len(recs) != 0 {
+		t.Fatalf("ListSandboxes on empty engine = %d records, want 0", len(recs))
+	}
+
+	if _, err := engine.Fork("py", "sb-a", ForkOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Fork("py", "sb-b", ForkOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	recs := engine.ListSandboxes()
+	if len(recs) != 2 {
+		t.Fatalf("ListSandboxes = %d records, want 2", len(recs))
+	}
+	got := map[string]time.Time{}
+	for _, r := range recs {
+		got[r.ID] = r.CreatedAt
+	}
+	for _, id := range []string{"sb-a", "sb-b"} {
+		ts, ok := got[id]
+		if !ok {
+			t.Fatalf("ListSandboxes missing %s", id)
+		}
+		if ts.IsZero() {
+			t.Fatalf("ListSandboxes %s has zero CreatedAt", id)
+		}
+	}
+
+	// Live forks and terminations are reflected.
+	if _, err := engine.ForkRunning("sb-a", "sb-c", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Terminate("sb-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	recs = engine.ListSandboxes()
+	live := map[string]bool{}
+	for _, r := range recs {
+		live[r.ID] = true
+	}
+	if !live["sb-a"] || !live["sb-c"] || live["sb-b"] || len(recs) != 2 {
+		t.Fatalf("ListSandboxes after fork/terminate = %v, want sb-a and sb-c only", live)
+	}
+}
+
 func TestMockForkRunning(t *testing.T) {
 	e := NewMockEngine()
 	e.ForkDelay = 0

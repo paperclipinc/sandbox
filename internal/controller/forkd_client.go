@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc/codes"
@@ -18,6 +19,37 @@ func isNotFound(err error) bool {
 		}
 	}
 	return false
+}
+
+// sandboxActivity queries the forkd on nodeName via ListSandboxes for
+// sandboxID and returns its created-at and last-activity times. ok is false
+// when the node is unreachable or the sandbox is not in the listing; the
+// caller must then treat the idle check as not-yet-evaluable and requeue. The
+// dial and RPC are bounded by a short timeout so a slow or dead forkd cannot
+// block the reconcile. lastActivity is the zero time when the sandbox has
+// never been accessed.
+func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sandboxID string) (created, lastActivity time.Time, ok bool) {
+	conn, err := registry.GetConnection(nodeName)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := forkdpb.NewForkDaemonClient(conn).ListSandboxes(cctx, &forkdpb.ListSandboxesRequest{})
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	for _, s := range resp.Sandboxes {
+		if s.SandboxId != sandboxID {
+			continue
+		}
+		var last time.Time
+		if s.LastActivityUnix != 0 {
+			last = time.Unix(s.LastActivityUnix, 0)
+		}
+		return time.Unix(s.CreatedAtUnix, 0), last, true
+	}
+	return time.Time{}, time.Time{}, false
 }
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.

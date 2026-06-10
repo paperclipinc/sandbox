@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
@@ -225,6 +226,34 @@ func (s *Server) Terminate(ctx context.Context, sandboxID string) error {
 	}
 	activeSandboxes.Dec()
 	return nil
+}
+
+// ListSandboxes returns one SandboxInfo per sandbox the engine currently
+// holds, merging the engine's created-at with the SandboxAPI's last-activity
+// time. last_activity_unix is zero for sandboxes that have never been
+// accessed; uptime_seconds is computed from created-at against the current
+// time.
+func (s *Server) ListSandboxes() []*forkdpb.SandboxInfo {
+	records := s.engine.ListSandboxes()
+	now := time.Now()
+	out := make([]*forkdpb.SandboxInfo, 0, len(records))
+	for _, rec := range records {
+		var lastActivityUnix int64
+		if last, ok := s.sandboxAPI.LastActivity(rec.ID); ok {
+			lastActivityUnix = last.Unix()
+		}
+		var uptimeSeconds int64
+		if !rec.CreatedAt.IsZero() {
+			uptimeSeconds = int64(now.Sub(rec.CreatedAt).Seconds())
+		}
+		out = append(out, &forkdpb.SandboxInfo{
+			SandboxId:        rec.ID,
+			CreatedAtUnix:    rec.CreatedAt.Unix(),
+			LastActivityUnix: lastActivityUnix,
+			UptimeSeconds:    uptimeSeconds,
+		})
+	}
+	return out
 }
 
 // UpdateMetrics refreshes capacity metrics.
