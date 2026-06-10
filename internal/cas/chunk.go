@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 )
 
 // ChunkSize is the fixed chunk size used for content-addressed splitting.
@@ -19,6 +20,22 @@ const ChunkSize = 4 << 20
 
 // Digest is a lowercase hex sha256 string. Digests are safe to log.
 type Digest string
+
+// digestPattern matches a sha256 digest: exactly 64 lowercase hex characters.
+var digestPattern = regexp.MustCompile("^[a-f0-9]{64}$")
+
+// Validate reports whether d is a well-formed sha256 digest. A Digest can
+// arrive from an untrusted source (an HTTP request path, a remote manifest),
+// and is used to build on-disk paths; validating it against this strict
+// allowlist is the barrier that blocks path traversal (e.g. "../../etc/passwd")
+// and avoids the short-string slice panic in path construction. Callers that
+// build a path or open a file from a Digest must Validate it first.
+func (d Digest) Validate() error {
+	if !digestPattern.MatchString(string(d)) {
+		return fmt.Errorf("invalid digest %q: must be 64 lowercase hex chars", string(d))
+	}
+	return nil
+}
 
 // ChunkRef identifies a single chunk by its digest and byte length.
 type ChunkRef struct {

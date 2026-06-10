@@ -29,6 +29,9 @@ type Transport interface {
 // Materializable from local. Only the delta is transferred: chunks local
 // already holds (shared with earlier snapshots) are never fetched.
 func Pull(ctx context.Context, local *Store, remote Transport, manifestDigest Digest) error {
+	if err := manifestDigest.Validate(); err != nil {
+		return fmt.Errorf("pull: %w", err)
+	}
 	m, err := remote.GetManifest(ctx, manifestDigest)
 	if err != nil {
 		return fmt.Errorf("get remote manifest %s: %w", manifestDigest, err)

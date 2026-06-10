@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -270,6 +271,42 @@ func uniqueChunkCount(m Manifest) int {
 		}
 	}
 	return len(seen)
+}
+
+// TestHTTPHandlerRejectsInvalidDigest asserts the read surface returns 400 Bad
+// Request for a malformed or traversal digest before touching the store, so an
+// encoded "../../etc/passwd" in the request path cannot escape the store root.
+func TestHTTPHandlerRejectsInvalidDigest(t *testing.T) {
+	srv := httptest.NewServer(NewHTTPHandler(newStore(t)))
+	defer srv.Close()
+
+	cases := []string{
+		"/cas/chunk/" + url.PathEscape("../../etc/passwd"),
+		"/cas/chunk/not-a-digest",
+		"/cas/manifest/" + url.PathEscape("../../etc/passwd"),
+		"/cas/manifest/short",
+	}
+	for _, path := range cases {
+		resp, err := http.Get(srv.URL + path) //nolint:noctx,bodyclose // test
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("GET %s: status %d, want 400", path, resp.StatusCode)
+		}
+	}
+
+	// POST /cas/has must reject a body containing any invalid digest.
+	resp, err := http.Post(srv.URL+"/cas/has", "application/json", //nolint:noctx,bodyclose // test
+		bytes.NewReader([]byte(`["../../etc/passwd"]`)))
+	if err != nil {
+		t.Fatalf("POST /cas/has: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /cas/has with invalid digest: status %d, want 400", resp.StatusCode)
+	}
 }
 
 func newStore(t *testing.T) *Store {

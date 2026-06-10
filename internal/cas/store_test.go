@@ -173,6 +173,36 @@ func TestMissingChunks(t *testing.T) {
 	}
 }
 
+// TestGetManifestRejectsTraversalDigest asserts a traversal digest never
+// reaches the filesystem: GetManifest returns an error rather than reading a
+// file outside the store root.
+func TestGetManifestRejectsTraversalDigest(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, bad := range []Digest{"../../x", "../../etc/passwd", "", "x"} {
+		if _, err := store.GetManifest(bad); err == nil {
+			t.Fatalf("GetManifest(%q) returned nil error; traversal not blocked", string(bad))
+		}
+	}
+}
+
+// TestHasRejectsInvalidDigest asserts the bool-returning lookups treat an
+// invalid digest as not-present without touching an attacker-controlled path.
+func TestHasRejectsInvalidDigest(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if store.HasChunk("../../etc/passwd") {
+		t.Fatalf("HasChunk reported a traversal digest as present")
+	}
+	if store.HasManifest("../../etc/passwd") {
+		t.Fatalf("HasManifest reported a traversal digest as present")
+	}
+}
+
 // countChunks counts unique chunk files in the store.
 func countChunks(t *testing.T, s *Store) int {
 	t.Helper()

@@ -22,6 +22,13 @@ import (
 // Only digests are ever exposed; no secret values cross this surface. Authn and
 // authz (mTLS gating) are the caller's responsibility, layered around this
 // handler.
+//
+// Every digest taken from the request (the {digest} path segment, or each entry
+// in the /cas/has body) is validated against the strict sha256 hex allowlist
+// before any store or filesystem access. A malformed digest returns 400 Bad
+// Request: this is the barrier that blocks path traversal via the request URL
+// (e.g. an encoded "../../etc/passwd"). /cas/has rejects the whole request if
+// any digest in the body is invalid.
 func NewHTTPHandler(store *Store) http.Handler {
 	h := &httpHandler{store: store}
 	mux := http.NewServeMux()
@@ -37,6 +44,10 @@ type httpHandler struct {
 
 func (h *httpHandler) getManifest(w http.ResponseWriter, r *http.Request) {
 	d := Digest(r.PathValue("digest"))
+	if err := d.Validate(); err != nil {
+		http.Error(w, "invalid digest", http.StatusBadRequest)
+		return
+	}
 	m, err := h.store.GetManifest(d)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("manifest %s not found", d), http.StatusNotFound)
@@ -52,6 +63,15 @@ func (h *httpHandler) postHas(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid digest list", http.StatusBadRequest)
 		return
 	}
+	// Reject the whole request if any digest is malformed. The body is
+	// attacker-controlled, so an invalid digest is treated as a bad request
+	// rather than silently coerced to not-present.
+	for _, d := range digests {
+		if err := d.Validate(); err != nil {
+			http.Error(w, "invalid digest", http.StatusBadRequest)
+			return
+		}
+	}
 	present := make(map[Digest]bool, len(digests))
 	for _, d := range digests {
 		present[d] = h.store.HasChunk(d)
@@ -62,7 +82,11 @@ func (h *httpHandler) postHas(w http.ResponseWriter, r *http.Request) {
 
 func (h *httpHandler) getChunk(w http.ResponseWriter, r *http.Request) {
 	d := Digest(r.PathValue("digest"))
-	f, err := os.Open(h.store.chunkPath(d)) //nolint:gosec // path derived from digest path value
+	if err := d.Validate(); err != nil {
+		http.Error(w, "invalid digest", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(h.store.chunkPath(d)) //nolint:gosec // digest validated above against the strict hex allowlist
 	if err != nil {
 		http.Error(w, fmt.Sprintf("chunk %s not found", d), http.StatusNotFound)
 		return

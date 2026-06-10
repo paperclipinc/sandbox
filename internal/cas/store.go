@@ -46,21 +46,35 @@ func (s *Store) manifestPath(d Digest) string {
 	return filepath.Join(s.root, "manifests", string(d))
 }
 
-// HasChunk reports whether the chunk is present in the store.
+// HasChunk reports whether the chunk is present in the store. An invalid
+// digest can never name a stored chunk, so it reports false rather than
+// touching the filesystem with an attacker-controlled path.
 func (s *Store) HasChunk(d Digest) bool {
+	if d.Validate() != nil {
+		return false
+	}
 	_, err := os.Stat(s.chunkPath(d))
 	return err == nil
 }
 
-// HasManifest reports whether the manifest is present in the store.
+// HasManifest reports whether the manifest is present in the store. An invalid
+// digest can never name a stored manifest, so it reports false rather than
+// touching the filesystem with an attacker-controlled path.
 func (s *Store) HasManifest(d Digest) bool {
+	if d.Validate() != nil {
+		return false
+	}
 	_, err := os.Stat(s.manifestPath(d))
 	return err == nil
 }
 
-// GetManifest loads and decodes a stored manifest by its digest.
+// GetManifest loads and decodes a stored manifest by its digest. The digest is
+// validated first so a traversal string never reaches the filesystem.
 func (s *Store) GetManifest(d Digest) (Manifest, error) {
-	data, err := os.ReadFile(s.manifestPath(d)) //nolint:gosec // path derived from validated digest
+	if err := d.Validate(); err != nil {
+		return Manifest{}, err
+	}
+	data, err := os.ReadFile(s.manifestPath(d)) //nolint:gosec // digest validated above against the strict hex allowlist
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %s: %w", d, err)
 	}
@@ -153,6 +167,9 @@ func (s *Store) writeChunk(d Digest, data []byte) error {
 // transport, where the sender is not trusted. Chunks are bounded by ChunkSize,
 // so reading the whole chunk into memory is safe.
 func (s *Store) PutChunk(d Digest, r io.Reader) error {
+	if err := d.Validate(); err != nil {
+		return err
+	}
 	data, err := io.ReadAll(io.LimitReader(r, ChunkSize+1))
 	if err != nil {
 		return fmt.Errorf("read chunk %s: %w", d, err)
@@ -237,6 +254,9 @@ func (s *Store) MissingChunks(m Manifest) []Digest {
 // and verifying each chunk's digest as it reads. A corrupted or missing chunk
 // produces an error naming the offending chunk and file.
 func (s *Store) Materialize(manifestDigest Digest, dstDir string) error {
+	if err := manifestDigest.Validate(); err != nil {
+		return err
+	}
 	m, err := s.GetManifest(manifestDigest)
 	if err != nil {
 		return err

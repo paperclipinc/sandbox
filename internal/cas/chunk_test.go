@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,28 @@ func TestChunkFileEmpty(t *testing.T) {
 	}
 	if len(chunks) != 0 {
 		t.Fatalf("expected 0 chunks for empty file, got %d", len(chunks))
+	}
+}
+
+func TestDigestValidate(t *testing.T) {
+	real := digestBytes([]byte("hello world"))
+	if err := real.Validate(); err != nil {
+		t.Fatalf("real sha256 digest rejected: %v", err)
+	}
+
+	bad := []Digest{
+		"",
+		"..",
+		"../../etc/passwd",
+		Digest(strings.ToUpper(string(real))),                 // uppercase hex
+		Digest(string(real)[:63]),                             // 63 chars
+		Digest(string(real) + "0"),                            // 65 chars
+		"g000000000000000000000000000000000000000000000000000000000000000", // non-hex
+	}
+	for _, d := range bad {
+		if err := d.Validate(); err == nil {
+			t.Fatalf("Validate accepted invalid digest %q", string(d))
+		}
 	}
 }
 
