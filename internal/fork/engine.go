@@ -435,7 +435,7 @@ func (e *Engine) CreateTemplate(id string, rootfsPath string, initWaitSecs int) 
 // discovered on disk after a forkd restart. It is intentionally NOT called per
 // fork: see verify.go for the verify-once-at-registration rationale.
 func (e *Engine) VerifyTemplate(id string) error {
-	d, err := verifyTemplate(e.casStore, e.dataDir, id, e.vmmVersion)
+	d, err := verifyTemplate(e.dataDir, id, e.vmmVersion)
 	if err != nil {
 		return err
 	}

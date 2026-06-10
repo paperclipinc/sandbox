@@ -58,7 +58,7 @@ func TestRecordAndVerifyTemplateRoundTrip(t *testing.T) {
 	}
 
 	// Recorded digest must persist and match what verifyTemplate re-derives.
-	got, err := verifyTemplate(store, dataDir, id, "")
+	got, err := verifyTemplate(dataDir, id, "")
 	if err != nil {
 		t.Fatalf("verifyTemplate: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestVerifyTemplateFailsOnTamperedMem(t *testing.T) {
 		t.Fatalf("remove marker: %v", err)
 	}
 
-	if _, err := verifyTemplate(store, dataDir, id, ""); err == nil {
+	if _, err := verifyTemplate(dataDir, id, ""); err == nil {
 		t.Fatal("expected verifyTemplate to fail on tampered mem")
 	}
 	if isVerified(dataDir, id) {

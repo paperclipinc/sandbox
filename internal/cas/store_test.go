@@ -115,6 +115,36 @@ func TestMaterializeCorruptedChunkFails(t *testing.T) {
 	}
 }
 
+func TestMaterializeCorruptedChunkLeavesNoOutput(t *testing.T) {
+	src := t.TempDir()
+	mem := writeFile(t, src, "mem", bytes.Repeat([]byte{0x42}, 5<<20))
+
+	store, err := New(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m, err := store.PutSnapshot(map[string]string{"mem": mem}, "v1", 1)
+	if err != nil {
+		t.Fatalf("PutSnapshot: %v", err)
+	}
+
+	// Corrupt the first chunk on disk so verification fails mid-file.
+	victim := m.Files[0].Chunks[0].Digest
+	if err := os.WriteFile(store.chunkPath(victim), []byte("corrupted"), 0o644); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+
+	dst := t.TempDir()
+	if err := store.Materialize(m.Digest(), dst); err == nil {
+		t.Fatalf("expected Materialize to fail on corrupted chunk")
+	}
+
+	// The partial/corrupt destination file must not remain.
+	if _, err := os.Stat(filepath.Join(dst, "mem")); !os.IsNotExist(err) {
+		t.Fatalf("expected no destination file after failed Materialize, stat err: %v", err)
+	}
+}
+
 func TestMissingChunks(t *testing.T) {
 	src := t.TempDir()
 	mem := writeFile(t, src, "mem", bytes.Repeat([]byte{0x42}, 5<<20))

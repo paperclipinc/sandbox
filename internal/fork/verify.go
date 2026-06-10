@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/paperclipinc/sandbox/internal/cas"
 )
@@ -37,6 +38,8 @@ func templateDir(dataDir, id string) string {
 // templateSnapshotFiles maps the CAS logical names to the on-disk paths of a
 // template's snapshot files. The rootfs is included only when present, since
 // some templates (live-fork checkpoints) carry no separate rootfs copy.
+// Whether a rootfs is present is part of the template's content identity: its
+// presence adds a file entry to the manifest and therefore changes the digest.
 func templateSnapshotFiles(dataDir, id string) map[string]string {
 	dir := templateDir(dataDir, id)
 	files := map[string]string{
@@ -86,7 +89,7 @@ func recordTemplateDigest(store *cas.Store, dataDir, id, vmmVersion string) (cas
 // and does NOT write the marker. This is the verify-on-load gate used for
 // templates this process did not build (e.g. discovered on disk after a
 // restart).
-func verifyTemplate(store *cas.Store, dataDir, id, vmmVersion string) (cas.Digest, error) {
+func verifyTemplate(dataDir, id, vmmVersion string) (cas.Digest, error) {
 	want, err := readDigestFile(dataDir, id)
 	if err != nil {
 		return "", fmt.Errorf("read recorded digest for template %s: %w", id, err)
@@ -105,7 +108,6 @@ func verifyTemplate(store *cas.Store, dataDir, id, vmmVersion string) (cas.Diges
 	if err := writeVerifiedMarker(dataDir, id); err != nil {
 		return "", err
 	}
-	_ = store // store reserved for future chunk-presence checks
 	return want, nil
 }
 
@@ -130,7 +132,9 @@ func readDigestFile(dataDir, id string) (cas.Digest, error) {
 	if err != nil {
 		return "", err
 	}
-	return cas.Digest(data), nil
+	// Trim surrounding whitespace to harden the write/read round-trip against a
+	// stray trailing newline a tool or editor might have added.
+	return cas.Digest(strings.TrimSpace(string(data))), nil
 }
 
 func writeVerifiedMarker(dataDir, id string) error {

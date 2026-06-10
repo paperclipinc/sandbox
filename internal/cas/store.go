@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -66,36 +67,54 @@ func (s *Store) GetManifest(d Digest) (Manifest, error) {
 	return decodeManifest(data)
 }
 
-// PutSnapshot chunks each file, writes every missing chunk atomically
-// (skipping chunks already present, which is the dedup mechanism), then writes
-// the manifest. The returned manifest's digest is the snapshot identifier.
+// PutSnapshot streams each file exactly once: every chunk is hashed and, if not
+// already present, written atomically (the dedup skip) in the same pass that
+// collects the chunk refs. The manifest is assembled from those refs and
+// written last. Single-pass keeps I/O to one read of each file (it halves I/O
+// on multi-GB images) while memory stays bounded to one ChunkSize buffer. The
+// returned manifest's digest is the snapshot identifier.
 func (s *Store) PutSnapshot(files map[string]string, vmmVersion string, createdUnix int64) (Manifest, error) {
-	m, err := BuildManifest(files, vmmVersion, createdUnix)
-	if err != nil {
-		return Manifest{}, err
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
 	}
+	sort.Strings(names)
 
-	for name, path := range files {
-		if err := s.putFileChunks(path); err != nil {
+	entries := make([]FileEntry, 0, len(names))
+	for _, name := range names {
+		fe, err := s.putFileChunks(name, files[name])
+		if err != nil {
 			return Manifest{}, fmt.Errorf("store chunks for %s: %w", name, err)
 		}
+		entries = append(entries, fe)
 	}
 
+	m := Manifest{
+		Files:       entries,
+		VMMVersion:  vmmVersion,
+		CreatedUnix: createdUnix,
+	}
 	if err := s.writeManifest(m); err != nil {
 		return Manifest{}, err
 	}
 	return m, nil
 }
 
-// putFileChunks streams the file, writing each chunk that is not already
-// present. Memory stays bounded to one ChunkSize block.
-func (s *Store) putFileChunks(path string) error {
+// putFileChunks streams the file once, hashing each chunk, writing it if not
+// already present (the dedup skip), and accumulating the ordered ChunkRefs into
+// a FileEntry. Memory stays bounded to one ChunkSize block.
+func (s *Store) putFileChunks(name, path string) (FileEntry, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileEntry{}, fmt.Errorf("stat %s: %w", path, err)
+	}
 	f, err := os.Open(path) //nolint:gosec // internal snapshot file
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return FileEntry{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	var chunks []ChunkRef
 	buf := make([]byte, ChunkSize)
 	for {
 		n, rerr := io.ReadFull(f, buf)
@@ -104,18 +123,19 @@ func (s *Store) putFileChunks(path string) error {
 			d := digestBytes(block)
 			if !s.HasChunk(d) {
 				if err := s.writeChunk(d, block); err != nil {
-					return err
+					return FileEntry{}, err
 				}
 			}
+			chunks = append(chunks, ChunkRef{Digest: d, Size: n})
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			break
 		}
 		if rerr != nil {
-			return fmt.Errorf("read %s: %w", path, rerr)
+			return FileEntry{}, fmt.Errorf("read %s: %w", path, rerr)
 		}
 	}
-	return nil
+	return FileEntry{Name: name, Size: info.Size(), Chunks: chunks}, nil
 }
 
 // writeChunk writes a chunk atomically (temp + rename) under its digest path.
@@ -150,6 +170,11 @@ func (s *Store) PutChunk(d Digest, r io.Reader) error {
 // PutManifest writes a manifest into the store under its own digest. It is the
 // transport-side companion to PutChunk: after every referenced chunk is
 // present, the manifest is stored so it becomes Materializable locally.
+//
+// Precondition: every chunk referenced by m must already be present in the
+// store. PutManifest does not verify chunk presence; ensuring it is the
+// caller's responsibility. Pull satisfies this by fetching all MissingChunks
+// (each verified via PutChunk) before calling PutManifest.
 func (s *Store) PutManifest(m Manifest) error {
 	return s.writeManifest(m)
 }
@@ -228,8 +253,11 @@ func (s *Store) Materialize(manifestDigest Digest, dstDir string) error {
 }
 
 // materializeFile reconstructs a single file by concatenating its verified
-// chunks, then updates each chunk's access time (mtime) for LRU tracking.
-func (s *Store) materializeFile(fe FileEntry, dstDir string) error {
+// chunks, then updates each chunk's access time (mtime) for LRU tracking. On
+// ANY error (chunk digest mismatch, missing chunk, copy or sync failure) the
+// partially written destination file is removed before returning, so a verify
+// failure never leaves corrupt bytes behind for a caller to consume.
+func (s *Store) materializeFile(fe FileEntry, dstDir string) (err error) {
 	dst := filepath.Join(dstDir, fe.Name)
 	out, err := os.Create(dst) //nolint:gosec // dst derived from manifest name
 	if err != nil {
@@ -237,17 +265,23 @@ func (s *Store) materializeFile(fe FileEntry, dstDir string) error {
 	}
 	defer out.Close() //nolint:errcheck // explicit Sync+Close below
 
+	defer func() {
+		if err != nil {
+			_ = os.Remove(dst) //nolint:errcheck // best-effort partial-output cleanup
+		}
+	}()
+
 	for _, c := range fe.Chunks {
-		if err := s.copyVerifiedChunk(out, c, fe.Name); err != nil {
+		if err = s.copyVerifiedChunk(out, c, fe.Name); err != nil {
 			return err
 		}
 		s.touchChunk(c.Digest)
 	}
 
-	if err := out.Sync(); err != nil {
+	if err = out.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", dst, err)
 	}
-	if err := out.Close(); err != nil {
+	if err = out.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", dst, err)
 	}
 	return nil
