@@ -24,7 +24,7 @@ class SandboxFiles:
     def read(self, path: str) -> str:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/read",
-            json={"path": path},
+            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
         )
         resp.raise_for_status()
         return resp.json()["content"]
@@ -32,13 +32,13 @@ class SandboxFiles:
     def read_bytes(self, path: str) -> bytes:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/read",
-            json={"path": path, "binary": True},
+            json={"sandbox": self._sandbox._sandbox_ref, "path": path, "binary": True},
         )
         resp.raise_for_status()
         return bytes.fromhex(resp.json()["content"])
 
     def write(self, path: str, content: str | bytes, mode: int = 0o644) -> None:
-        data: dict = {"path": path, "mode": mode}
+        data: dict = {"sandbox": self._sandbox._sandbox_ref, "path": path, "mode": mode}
         if isinstance(content, bytes):
             data["content"] = content.hex()
             data["binary"] = True
@@ -54,7 +54,7 @@ class SandboxFiles:
     def list(self, path: str = "/") -> list[FileInfo]:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/list",
-            json={"path": path},
+            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
         )
         resp.raise_for_status()
         return [
@@ -78,14 +78,14 @@ class SandboxFiles:
     def remove(self, path: str) -> None:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/remove",
-            json={"path": path},
+            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
         )
         resp.raise_for_status()
 
     def mkdir(self, path: str) -> None:
         resp = self._sandbox._http.post(
             f"{self._sandbox._base_url}/files/mkdir",
-            json={"path": path},
+            json={"sandbox": self._sandbox._sandbox_ref, "path": path},
         )
         resp.raise_for_status()
 
@@ -108,6 +108,7 @@ class Sandbox:
         self._api = api
         self._endpoint = _endpoint
         self._phase = _phase
+        self._sandbox_id: Optional[str] = None
         self._http = httpx.Client(timeout=30.0)
         self.files = SandboxFiles(self)
 
@@ -115,7 +116,13 @@ class Sandbox:
     def _base_url(self) -> str:
         if not self._endpoint:
             self._wait_ready()
-        return f"http://{self._endpoint}"
+        return f"http://{self._endpoint}/v1"
+
+    @property
+    def _sandbox_ref(self) -> str:
+        if self._sandbox_id is None:
+            self._wait_ready()
+        return self._sandbox_id or self.name
 
     @property
     def endpoint(self) -> str:
@@ -140,6 +147,7 @@ class Sandbox:
             status = obj.get("status", {})
             self._phase = SandboxPhase(status.get("phase", "Pending"))
             self._endpoint = status.get("endpoint")
+            self._sandbox_id = status.get("sandboxID")
 
             if self._phase == SandboxPhase.READY and self._endpoint:
                 return
@@ -159,6 +167,7 @@ class Sandbox:
     ) -> ExecResult:
         """Execute a command in the sandbox."""
         payload: dict = {
+            "sandbox": self._sandbox_ref,
             "command": command,
             "timeout": timeout,
             "working_dir": working_dir,
@@ -224,8 +233,9 @@ class Sandbox:
 
             ready = [f for f in forks if f.get("phase") == "Ready"]
             if len(ready) >= expected:
-                return [
-                    Sandbox(
+                result = []
+                for f in ready:
+                    sandbox = Sandbox(
                         name=f["name"],
                         namespace=self.namespace,
                         pool=self.pool,
@@ -233,8 +243,9 @@ class Sandbox:
                         _endpoint=f.get("endpoint"),
                         _phase=SandboxPhase.READY,
                     )
-                    for f in ready
-                ]
+                    sandbox._sandbox_id = f.get("sandboxID")
+                    result.append(sandbox)
+                return result
 
             time.sleep(POLL_INTERVAL)
 
