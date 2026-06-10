@@ -14,7 +14,7 @@ service ForkDaemon {
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
 
-  // Fork operations (hot path — must be <2ms)
+  // Fork operations (hot path; must be <2ms)
   rpc Fork(ForkRequest) returns (ForkResponse);
   rpc ForkRunning(ForkRunningRequest) returns (ForkRunningResponse);
 

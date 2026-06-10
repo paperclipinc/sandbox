@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: pip
+    directory: /sdk/python
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      pip-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: npm
+    directory: /plugins/paperclip
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch

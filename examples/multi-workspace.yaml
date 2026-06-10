@@ -11,7 +11,7 @@ spec:
     cpu: "2"
     memory: "2Gi"
   volumes:
-    # Shared dataset from S3 — same bucket mounted read-only across all forks
+    # Shared dataset from S3: same bucket mounted read-only across all forks
     - name: datasets
       mountPath: /data
       readOnly: true
@@ -22,7 +22,7 @@ spec:
           prefix: /training
           region: us-east-1
 
-    # Git repo cloned as workspace — each fork gets a CoW snapshot
+    # Git repo cloned as workspace: each fork gets a CoW snapshot
     - name: code
       mountPath: /workspace
       size: 10Gi
@@ -34,13 +34,13 @@ spec:
           repo: https://github.com/org/agent-workspace
           branch: main
 
-    # Persistent agent state — fully cloned on fork (independent copy)
+    # Persistent agent state: fully cloned on fork (independent copy)
     - name: state
       mountPath: /state
       size: 2Gi
       forkPolicy: Clone
 
-    # Scratch space — wiped fresh on every fork
+    # Scratch space: wiped fresh on every fork
     - name: scratch
       mountPath: /tmp
       size: 1Gi

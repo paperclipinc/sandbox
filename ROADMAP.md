@@ -13,7 +13,7 @@ owner; summaries here so sequencing is explicit). All inherit the core
 operating principles, and **none ships to production tenants before the
 fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
 
-- **W1 — Husk pods (pod-native execution).** Every sandbox VM moves inside a
+- **W1: Husk pods (pod-native execution).** Every sandbox VM moves inside a
   pod's cgroup/netns: pools pre-schedule minimal "husk" pods running a dormant
   VMM stub; claim = activate (mmap snapshot + KVM restore inside the pod),
   /dev/kvm via device plugin instead of `privileged: true`. Gains real
@@ -24,30 +24,30 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   (Pss/Rss + cgroup-v2 accounting test). Deliverable: `docs/husk-pods.md` +
   device plugin + stub + migrated controllers + before/after benchmarks.
   Raw-forkd mode stays behind a flag.
-- **W2 — agents.x-k8s.io conformance facade.** `cmd/facade` implements the
+- **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in
   `docs/facade-conformance.md`, never silently diverge. Depends on W1 (their
   API implies pod semantics). Includes the naming-collision ADR
-  (our SandboxTemplate/SandboxClaim vs theirs — rename to
+  (our SandboxTemplate/SandboxClaim vs theirs; rename to
   ForkTemplate/ForkClaim/ForkPool is the preferred candidate; decide before
   1.0).
-- **W3 — Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
+- **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge
   egress as claim-time allowlist; claim-time secrets), paperclip-operator
   `backend: microvm`, shared operator core extracted as a library, OpenClaw
   sandbox driver. Hard-gated on §1+§2 (hostile inputs + real credentials in
   forked VMs). Deferred non-goal, tracked: whole-instance microVM hosting
-  ("scale-to-snapshot") — waits on durable per-VM volumes, stable inbound
+  ("scale-to-snapshot"); waits on durable per-VM volumes, stable inbound
   endpoints across suspend/resume, balloon reclaim, multi-process guests,
   live-snapshot secrets.
-- **W4 — Workspace & state.** A `Workspace` CRD: durable, versioned,
+- **W4: Workspace & state.** A `Workspace` CRD: durable, versioned,
   forkable agent state independent of any sandbox (PVC:Pod analogy);
   hydrate/dehydrate via the SAME content-addressed transfer layer as
-  snapshot distribution (§3 — one pipeline, two artifact types); revision
+  snapshot distribution (§3: one pipeline, two artifact types); revision
   DAG lineage (`fromClaim:`/`fromWorkspaceRevision:`); outputs extraction +
-  git rendezvous for fork-and-merge (git is the merge layer — we never do
+  git rendezvous for fork-and-merge (git is the merge layer; we never do
   filesystem merge); single-writer-per-revision doctrine; memory-snapshot
   pairing is principal-bound per the secrets policy. Plus: revision change
   feed for external indexers (no embedded vector DB), per-node toolchain
@@ -57,7 +57,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
 **Compliance & observability addendum (amends W1/W4):** permitted claim
 language is limited to what a CI job proves (CNCF-conformant clusters, PSA
 `restricted` with exactly one documented /dev/kvm exception, standard
-quota/policy/eviction semantics, vendored conformance suite) — never "fully
+quota/policy/eviction semantics, vendored conformance suite); never "fully
 Kubernetes conformant". Residuals ship as ADRs in `docs/adr/` (kvm device
 exception; the guest boundary; Workspace-not-CSI; forkd control channel
 mirrored into Kubernetes Events with a bounded-delay CI test). Observability
@@ -76,7 +76,7 @@ they touch the on-disk and on-wire formats: per-workspace encryption keys
 (erasure = crypto-shredding, #31), the snapshot version-compatibility
 contract (memory resumability has a stated window, #32), and CoW-aware
 metering (the shared-pages billing primitive, #33). The rest is process:
-licensing/IP posture (#34), security operations — we ship a kernel
+licensing/IP posture (#34), security operations: we ship a kernel
 (#35), hosted-service abuse controls with OSS hooks (#36), and
 community/credibility operations (#37).
 
@@ -90,7 +90,7 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
   measured-or-target
 - ✅ controller ↔ forkd gRPC (claim/fork actually produce sandboxes;
   was `not implemented` stubs)
-- ✅ SandboxPool snapshot accounting and creation (was a no-op) — works
+- ✅ SandboxPool snapshot accounting and creation (was a no-op); works
   against the mock engine; the real engine needs an image→rootfs build
   pipeline (template.Spec.Image is currently passed as a rootfs file path)
 - ⬜ Image→rootfs build pipeline so pool templates can be built from OCI
@@ -115,7 +115,7 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - ⬜ Clock resync after restore; test: wall-clock within 500ms, post-snapshot
   TLS cert validates
 - ⬜ Live-fork secret policy: reject without `allowSecretInheritance: true`
-- ⬜ Firecracker under jailer (per-VM UID, chroot, cgroup) — priority zero in
+- ⬜ Firecracker under jailer (per-VM UID, chroot, cgroup); priority zero in
   the threat model
 - ⬜ mTLS + authz on controller↔forkd gRPC; auth on the :9091 sandbox API
 - ⬜ Snapshot content addressing (digest in CRD status, verify-on-load)
@@ -143,7 +143,7 @@ out of capacity. Chaos suite in CI.
 ## 3. Snapshot distribution
 
 forkd loading snapshots "from local storage" reinvents image pull with
-multi-GB artifacts. No competitor solves this well in open source — treat as
+multi-GB artifacts. No competitor solves this well in open source; treat as
 a differentiator.
 
 - ⬜ Content-addressed snapshot store (OCI artifact), chunked incremental
@@ -163,7 +163,7 @@ a differentiator.
   with methodology
 - ⬜ Comparison table regenerated from in-repo scripts against E2B
   self-hosted, Daytona OSS, Agent Sandbox + Kata warm pools on the same
-  hardware — reproducible by anyone
+  hardware; reproducible by anyone
 - ⬜ Track exec hot-path latency (gRPC → vsock → spawn) with the same rigor
   as fork latency; it dominates agent tokens-to-completion
 
@@ -191,18 +191,18 @@ a differentiator.
 The DX gap against E2B/Daytona is the adoption bottleneck once the core is
 verified. In rough order of leverage:
 
-- ⬜ **MCP server interface** — expose sandboxes as an MCP tool server
+- ⬜ **MCP server interface**: expose sandboxes as an MCP tool server
   (create/exec/files/fork as tools); every MCP-speaking agent becomes a user
   with zero SDK integration. Candidate to pull forward as soon as the exec
   path is verified end-to-end.
 - ⬜ Streaming exec (stdout/stderr), stdin, **PTY mode**, file transfer,
-  port forwarding — the daily-driver agent-harness needs
+  port forwarding, the daily-driver agent-harness needs
 - ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex
   sandbox integrations)
 - ⬜ `kubectl sandbox` plugin (claim/exec/cp/port-forward for operators)
 - ⬜ TypeScript SDK (currently does not exist; README labels it planned)
   + shared Python/TS conformance suite; README samples executed in CI
-- ⬜ Agent Sandbox (k8s-sigs) CRD adapter — assess, decide, document either way
+- ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
 - ⬜ `make dev` one-command local story (kind + mock engine today; document
   KVM-passthrough path)
 - ⬜ Helm chart (README previously implied one exists; it does not yet)
@@ -213,5 +213,5 @@ verified. In rough order of leverage:
   KVM restore → guest-ready → first exec
 - ⬜ Metrics: pending-claims depth, snapshot distribution lag, orphan-sweep
   counts, per-pool claim error rates (some specced metrics are not yet
-  exported — README lists only what is real)
+  exported; README lists only what is real)
 - ⬜ Toggleable structured audit log of every exec/file op

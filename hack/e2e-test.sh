@@ -5,7 +5,7 @@ set -euo pipefail
 # Tests the full CRD lifecycle: Template → Pool → Claim → Fork
 #
 # Prerequisites: kind, kubectl
-# No KVM required — runs in mock mode.
+# No KVM required; runs in mock mode.
 
 CLUSTER_NAME="${CLUSTER_NAME:-sandbox-e2e}"
 PASSED=0

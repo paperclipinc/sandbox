@@ -23,7 +23,7 @@ EOF
 
 echo ""
 echo "==> Installing CRDs"
-kubectl apply -f deploy/crds/ 2>/dev/null || echo "    (CRDs not generated yet — run 'make manifests' first)"
+kubectl apply -f deploy/crds/ 2>/dev/null || echo "    (CRDs not generated yet; run 'make manifests' first)"
 
 echo ""
 echo "==> Cluster ready: $CLUSTER_NAME"

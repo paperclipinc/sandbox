@@ -10,7 +10,7 @@ spec:
     cpu: "1"
     memory: "512Mi"
   volumes:
-    # Agent working directory — CoW-forked so each sandbox gets independent writes
+    # Agent working directory: CoW-forked so each sandbox gets independent writes
     - name: workspace
       mountPath: /workspace
       size: 5Gi
@@ -18,7 +18,7 @@ spec:
       forkPolicy: Snapshot
       snapshotClass: btrfs-snapshots
 
-    # Scratch space — wiped on every fork
+    # Scratch space: wiped on every fork
     - name: tmp
       mountPath: /tmp
       size: 1Gi

@@ -9,11 +9,11 @@
 **Tech Stack:** Go 1.26, controller-runtime + envtest, gRPC + protobuf, Python 3.12 + pytest + httpx.
 
 **Context for the implementer (read first):**
-- `internal/fork/engine.go` — real Firecracker engine. `internal/fork/mock.go` — `MockEngine` (no KVM). Both partially satisfy `internal/daemon/interface.go:ForkEngine`.
-- `internal/daemon/server.go` — `Server` wraps a `ForkEngine` + `SandboxAPI`; `RegisterForkDaemonServer` is an empty TODO.
+- `internal/fork/engine.go`: real Firecracker engine. `internal/fork/mock.go`: `MockEngine` (no KVM). Both partially satisfy `internal/daemon/interface.go:ForkEngine`.
+- `internal/daemon/server.go`: `Server` wraps a `ForkEngine` + `SandboxAPI`; `RegisterForkDaemonServer` is an empty TODO.
 - `internal/controller/sandboxclaim_controller.go:forkOnNode` and `sandboxfork_controller.go:forkRunningOnNode` return `not implemented`.
 - `internal/controller/sandboxpool_controller.go:createSnapshots/countReadySnapshots` are no-ops.
-- `internal/controller/node_registry.go` — in-memory registry; `StartDiscovery` is a mock-only TODO.
+- `internal/controller/node_registry.go`: in-memory registry; `StartDiscovery` is a mock-only TODO.
 - Envtest suite: `internal/controller/suite_test.go` (needs `make test-controller`, which downloads envtest binaries via setup-envtest).
 - Run Go tests with `go test ./internal/<pkg>/... -count=1`. Controller tests: `make test-controller`. Python: `cd sdk/python && PYTHONPATH=. python3 -m pytest tests/ -v`.
 
@@ -83,7 +83,7 @@ git commit -m "feat: generate forkd gRPC code from proto"
 
 ### Task 2: NodeRegistry zero-value safety
 
-`cmd/controller/main.go:54` and `internal/controller/suite_test.go` construct `&controller.NodeRegistry{}` whose `nodes` map is nil — the first `Register` call panics. Fix both construction sites AND make the zero value safe.
+`cmd/controller/main.go:54` and `internal/controller/suite_test.go` construct `&controller.NodeRegistry{}` whose `nodes` map is nil; the first `Register` call panics. Fix both construction sites AND make the zero value safe.
 
 **Files:**
 - Create: `internal/controller/node_registry_test.go`
@@ -159,7 +159,7 @@ Expected: PASS.
 - [x] **Step 5: Use the constructor at both construction sites anyway**
 
 `cmd/controller/main.go`: `nodeRegistry := controller.NewNodeRegistry()`
-`internal/controller/suite_test.go`: `nodeRegistry := controller.NewNodeRegistry()` — and add a package-level `testRegistry *controller.NodeRegistry` var in the suite, assigned from it, so later e2e tests can register fake nodes:
+`internal/controller/suite_test.go`: `nodeRegistry := controller.NewNodeRegistry()`; and add a package-level `testRegistry *controller.NodeRegistry` var in the suite, assigned from it, so later e2e tests can register fake nodes:
 
 ```go
 // suite_test.go, package-level:
@@ -222,7 +222,7 @@ func TestMockForkRunning(t *testing.T) {
 - [x] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/fork/ -run TestMockForkRunning -count=1`
-Expected: FAIL — `e.ForkRunning undefined`.
+Expected: FAIL; `e.ForkRunning undefined`.
 
 - [x] **Step 3: Implement on MockEngine (append to `internal/fork/mock.go`)**
 
@@ -294,7 +294,7 @@ git commit -m "feat: add ForkRunning to ForkEngine interface and MockEngine"
 
 ### Task 4: forkd gRPC service implementation
 
-Implement the `ForkDaemon` gRPC service over `Server`. RPCs whose backing engine support doesn't exist yet (`Exec`, `ExecStream`, file ops, `CreateSnapshot`, `DeleteSnapshot`, `DeleteTemplate`) return `codes.Unimplemented` with an honest message — they are served today by the HTTP sandbox API on :9091.
+Implement the `ForkDaemon` gRPC service over `Server`. RPCs whose backing engine support doesn't exist yet (`Exec`, `ExecStream`, file ops, `CreateSnapshot`, `DeleteSnapshot`, `DeleteTemplate`) return `codes.Unimplemented` with an honest message; they are served today by the HTTP sandbox API on :9091.
 
 **Files:**
 - Create: `internal/daemon/grpc_service.go`
@@ -585,7 +585,7 @@ func TestNodesWithTemplate(t *testing.T) {
 - [x] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/controller/ -run TestNodesWithTemplate -count=1`
-Expected: FAIL — `r.NodesWithTemplate undefined`.
+Expected: FAIL; `r.NodesWithTemplate undefined`.
 
 - [x] **Step 3: Implement**
 
@@ -636,7 +636,7 @@ git commit -m "feat: NodeInfo.HTTPEndpoint and NodesWithTemplate"
 
 - [x] **Step 1: Write the failing test**
 
-`internal/controller/forkd_client_test.go` (in-package). It spins a real gRPC server with the MockEngine on a random localhost port — no bufconn needed because `NodeRegistry.GetConnection` dials a TCP endpoint.
+`internal/controller/forkd_client_test.go` (in-package). It spins a real gRPC server with the MockEngine on a random localhost port; no bufconn needed because `NodeRegistry.GetConnection` dials a TCP endpoint.
 
 ```go
 package controller
@@ -735,7 +735,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 - [x] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/controller/ -run 'TestForkOnNode|TestForkRunningOnNode' -count=1`
-Expected: FAIL — `not implemented` errors from the stubs.
+Expected: FAIL; `not implemented` errors from the stubs.
 
 - [x] **Step 3: Implement `internal/controller/forkd_client.go` and delete both stubs**
 
@@ -828,13 +828,13 @@ git commit -m "feat: controller calls forkd over gRPC for Fork and ForkRunning"
 
 ---
 
-### Task 7: Pool controller — real snapshot accounting and creation
+### Task 7: Pool controller: real snapshot accounting and creation
 
 **Files:**
 - Modify: `internal/controller/sandboxpool_controller.go:73-87`
-- Test: `internal/controller/forkd_client_test.go` (append — reuses `startFakeForkd`)
+- Test: `internal/controller/forkd_client_test.go` (append; reuses `startFakeForkd`)
 
-Semantics (document in code): one template snapshot per node; `readySnapshots` = number of healthy nodes holding the pool's template; `createSnapshots` asks nodes lacking the template to build it, up to the deficit. `spec.replicas` is therefore capped by node count for now — pool conditions say so honestly.
+Semantics (document in code): one template snapshot per node; `readySnapshots` = number of healthy nodes holding the pool's template; `createSnapshots` asks nodes lacking the template to build it, up to the deficit. `spec.replicas` is therefore capped by node count for now; pool conditions say so honestly.
 
 - [x] **Step 1: Write the failing test (append to forkd_client_test.go)**
 
@@ -870,7 +870,7 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 - [x] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/controller/ -run TestPoolSnapshotAccounting -count=1`
-Expected: FAIL — methods undefined.
+Expected: FAIL; methods undefined.
 
 - [x] **Step 3: Implement in `sandboxpool_controller.go`**
 
@@ -927,7 +927,7 @@ func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]i
 
 (imports: add `errors` and `forkdpb "github.com/paperclipinc/sandbox/proto/forkd"`.)
 
-Update `Reconcile` to use them — replace the deficit block and status lines:
+Update `Reconcile` to use them: replace the deficit block and status lines:
 
 ```go
 	templateID := pool.Spec.TemplateRef.Name
@@ -951,7 +951,7 @@ Update `Reconcile` to use them — replace the deficit block and status lines:
 	pool.Status.NodeDistribution = r.nodeDistribution(templateID)
 ```
 
-(Note: return `nil` error with requeue on snapshot-creation failure — re-erroring causes double requeue.)
+(Note: return `nil` error with requeue on snapshot-creation failure; re-erroring causes double requeue.)
 
 - [x] **Step 4: Run tests**
 
@@ -967,11 +967,11 @@ git commit -m "feat: pool controller tracks and creates snapshots via forkd"
 
 ---
 
-### Task 8: Envtest end-to-end — claim and fork reach Ready
+### Task 8: Envtest end-to-end: claim and fork reach Ready
 
 **Files:**
 - Create: `internal/controller/e2e_envtest_test.go` (package `controller_test`)
-- Modify: `internal/controller/suite_test.go` (export the registry to tests — done in Task 2; also export a helper to start a fake forkd, see below)
+- Modify: `internal/controller/suite_test.go` (export the registry to tests, done in Task 2; also export a helper to start a fake forkd, see below)
 - Possibly modify: `internal/controller/sandboxpool_controller_test.go` / claim test expectations that assumed stub behavior
 
 The fake-forkd helper from Task 6 lives in package `controller` (internal test). For `controller_test` we need an exported equivalent; put it in a shared file:
@@ -983,7 +983,7 @@ Create `internal/controller/testsupport.go`:
 ```go
 package controller
 
-// Test support — used by envtest suites. Kept in the main package so external
+// Test support: used by envtest suites. Kept in the main package so external
 // test packages (controller_test) can start fake forkd nodes.
 
 import (
@@ -1026,7 +1026,7 @@ func StartFakeForkdNode(registry *NodeRegistry, nodeName string, templates ...st
 }
 ```
 
-Then simplify Task 6's `startFakeForkd` test helper to reuse this if convenient (optional — duplication in tests is acceptable; do NOT block on it).
+Then simplify Task 6's `startFakeForkd` test helper to reuse this if convenient (optional; duplication in tests is acceptable; do NOT block on it).
 
 - [x] **Step 2: Write the failing e2e test**
 
@@ -1108,13 +1108,13 @@ func TestClaimReachesReadyEndToEnd(t *testing.T) {
 - [x] **Step 3: Run the controller suite**
 
 Run: `make test-controller`
-Expected: the new test passes. **If pre-existing tests (`TestSandboxClaim_CreateAndReconcile`, etc.) fail because they asserted the old stub behavior (claims failing or pending forever), read them and update the assertions to the new behavior — claims with no registered node should requeue as Pending, claims with a fake node should go Ready.** Do not delete assertions; update them to the now-correct semantics.
+Expected: the new test passes. **If pre-existing tests (`TestSandboxClaim_CreateAndReconcile`, etc.) fail because they asserted the old stub behavior (claims failing or pending forever), read them and update the assertions to the new behavior: claims with no registered node should requeue as Pending, claims with a fake node should go Ready.** Do not delete assertions; update them to the now-correct semantics.
 
 - [x] **Step 4: Commit**
 
 ```bash
 git add internal/controller/
-git commit -m "test: envtest e2e — SandboxClaim reaches Ready through fake forkd"
+git commit -m "test: envtest e2e; SandboxClaim reaches Ready through fake forkd"
 ```
 
 ---
@@ -1185,7 +1185,7 @@ func TestNodeInfoFromPodSkipsNotReady(t *testing.T) {
 - [x] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/controller/ -run TestNodeInfoFromPod -count=1`
-Expected: FAIL — `NodeInfoFromPod` undefined.
+Expected: FAIL; `NodeInfoFromPod` undefined.
 
 - [x] **Step 3: Implement `internal/controller/forkd_discovery.go`**
 
@@ -1264,7 +1264,7 @@ func (d *ForkdDiscovery) sync(ctx context.Context) {
 }
 
 // refreshCapacity fills template/capacity fields via forkd's GetCapacity.
-// Registration still happens if the call fails — SelectNode's health window
+// Registration still happens if the call fails; SelectNode's health window
 // and the next sync handle flapping pods.
 func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
 	conn, err := d.Registry.GetConnection(info.Name)
@@ -1299,7 +1299,7 @@ func NodeInfoFromPod(pod corev1.Pod, grpcPort, httpPort int) (*NodeInfo, bool) {
 }
 ```
 
-Note: `refreshCapacity` calls `GetConnection(info.Name)` which requires the node registered first — register-then-refresh on first sight. Reorder in `sync`: `d.Registry.Register(info)` first, then `d.refreshCapacity(ctx, info)`, then `d.Registry.Register(info)` again to store refreshed fields (Register is an upsert). Implement it that way:
+Note: `refreshCapacity` calls `GetConnection(info.Name)` which requires the node registered first: register-then-refresh on first sight. Reorder in `sync`: `d.Registry.Register(info)` first, then `d.refreshCapacity(ctx, info)`, then `d.Registry.Register(info)` again to store refreshed fields (Register is an upsert). Implement it that way:
 
 ```go
 	for _, pod := range pods.Items {
@@ -1313,7 +1313,7 @@ Note: `refreshCapacity` calls `GetConnection(info.Name)` which requires the node
 	}
 ```
 
-Delete `StartDiscovery` from `node_registry.go` (and its mock-node block — `cmd/controller` no longer calls it; verify with `grep -rn StartDiscovery`).
+Delete `StartDiscovery` from `node_registry.go` (and its mock-node block; `cmd/controller` no longer calls it; verify with `grep -rn StartDiscovery`).
 
 - [x] **Step 4: Wire into the manager (`cmd/controller/main.go`, after reconciler setup)**
 
@@ -1332,7 +1332,7 @@ Delete `StartDiscovery` from `node_registry.go` (and its mock-node block — `cm
 	}
 ```
 
-- [x] **Step 5: RBAC — add pods to the ClusterRole in `deploy/controller/deployment.yaml`**
+- [x] **Step 5: RBAC: add pods to the ClusterRole in `deploy/controller/deployment.yaml`**
 
 ```yaml
   - apiGroups: [""]
@@ -1354,13 +1354,13 @@ git commit -m "feat: forkd pod discovery with capacity heartbeats"
 
 ---
 
-### Task 10: Python SDK — align k8s mode with the forkd sandbox API
+### Task 10: Python SDK: align k8s mode with the forkd sandbox API
 
 `Sandbox.exec`/`files.*` post to `{endpoint}/exec` and `{endpoint}/files/read` with no sandbox ID; forkd serves `POST /v1/exec` etc. and routes by the `sandbox` field. Fix the SDK to (a) hit `/v1/...`, (b) send `"sandbox": <sandboxID from claim status>`.
 
 **Files:**
 - Modify: `sdk/python/agent_run/sandbox.py`
-- Test: `sdk/python/tests/test_sandbox.py` (append; follow the existing test style in that file — read it first)
+- Test: `sdk/python/tests/test_sandbox.py` (append; follow the existing test style in that file; read it first)
 
 - [x] **Step 1: Read the existing tests to match their fixtures**
 
@@ -1419,7 +1419,7 @@ def test_files_read_targets_v1_and_sends_sandbox_id():
 - [x] **Step 3: Run to verify failure**
 
 Run: `cd sdk/python && PYTHONPATH=. python3 -m pytest tests/test_sandbox.py -v -k 'targets_v1'`
-Expected: FAIL — URLs missing `/v1`, no `sandbox` field, no `_sandbox_id` attribute.
+Expected: FAIL; URLs missing `/v1`, no `sandbox` field, no `_sandbox_id` attribute.
 
 - [x] **Step 4: Implement in `sandbox.py`**
 
@@ -1451,7 +1451,7 @@ Expected: FAIL — URLs missing `/v1`, no `sandbox` field, no `_sandbox_id` attr
 - [x] **Step 5: Run the full Python suite**
 
 Run: `cd sdk/python && PYTHONPATH=. python3 -m pytest tests/ -v`
-Expected: PASS, including pre-existing tests. If pre-existing tests pinned the old URLs, update them to `/v1/...` + sandbox field — the old shape never worked against any server in this repo.
+Expected: PASS, including pre-existing tests. If pre-existing tests pinned the old URLs, update them to `/v1/...` + sandbox field; the old shape never worked against any server in this repo.
 
 - [x] **Step 6: Commit**
 
@@ -1466,7 +1466,7 @@ git commit -m "fix: Python SDK k8s mode speaks the forkd /v1 sandbox API"
 
 **Files:**
 - Modify (if needed): `README.md`, `ROADMAP.md` status lines
-- Modify: `.github/workflows/ci.yaml` (no change expected — verify generated proto code builds in CI)
+- Modify: `.github/workflows/ci.yaml` (no change expected; verify generated proto code builds in CI)
 
 - [x] **Step 1: Run everything**
 
@@ -1488,7 +1488,7 @@ Open `README.md` and `ROADMAP.md`. For each item this plan implemented, flip its
 - node discovery
 - SDK exec path alignment
 
-Leave everything else (volume policies, secrets delivery into guest, networking, TS SDK, benchmarks) marked not implemented — this plan deliberately did not touch them.
+Leave everything else (volume policies, secrets delivery into guest, networking, TS SDK, benchmarks) marked not implemented; this plan deliberately did not touch them.
 
 - [x] **Step 3: Commit**
 
@@ -1501,9 +1501,9 @@ git commit -m "docs: update status to match wired control plane"
 
 ## Out of scope (separate plans, in ROADMAP priority order)
 
-1. **Fork correctness on KVM** (RNG reseed, clock resync, secret-fork policy, network identity) — needs guest agent changes + KVM CI; see `docs/fork-correctness.md`.
-2. **forkd security hardening** — jailer, mTLS on the gRPC channel, authn on the HTTP sandbox API; see `docs/threat-model.md` §1/§3.
-3. **Failure/GC semantics** — orphan sweeps, NodeLost, claim TTLs, controller-restart reconciliation.
+1. **Fork correctness on KVM** (RNG reseed, clock resync, secret-fork policy, network identity): needs guest agent changes + KVM CI; see `docs/fork-correctness.md`.
+2. **forkd security hardening**: jailer, mTLS on the gRPC channel, authn on the HTTP sandbox API; see `docs/threat-model.md` §1/§3.
+3. **Failure/GC semantics**: orphan sweeps, NodeLost, claim TTLs, controller-restart reconciliation.
 4. **bench/ harness + honest comparison table.**
 5. **Snapshot distribution** (content-addressed store, P2P).
 6. **Talos/Hetzner reference platform.**

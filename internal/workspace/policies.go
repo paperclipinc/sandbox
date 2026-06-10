@@ -56,7 +56,7 @@ func (h *ShareHandler) Prepare(ctx context.Context, vol v1alpha1.SandboxVolume, 
 }
 
 func (h *ShareHandler) Cleanup(ctx context.Context, vol v1alpha1.SandboxVolume, sandboxID string) error {
-	// Nothing to clean up — the shared volume persists
+	// Nothing to clean up; the shared volume persists
 	return nil
 }
 
@@ -88,7 +88,7 @@ type SnapshotHandler struct{}
 
 func (h *SnapshotHandler) Prepare(ctx context.Context, vol v1alpha1.SandboxVolume, sandboxID string) (*PreparedVolume, error) {
 	// Create a btrfs snapshot (or CSI VolumeSnapshot) of the source subvolume.
-	// The snapshot is CoW — writes go to new blocks, reads fall through to the source.
+	// The snapshot is CoW: writes go to new blocks, reads fall through to the source.
 	// On btrfs this is <1ms.
 	return &PreparedVolume{
 		Name:      vol.Name,

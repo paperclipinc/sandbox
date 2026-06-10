@@ -48,7 +48,7 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Live-fork secret gate: duplicating guest memory duplicates any
 	// delivered secrets into every fork. Default-deny without explicit
-	// opt-in. Spec-level check — fires regardless of source readiness.
+	// opt-in. Spec-level check: fires regardless of source readiness.
 	if len(source.Spec.Secrets) > 0 {
 		now := metav1.Now()
 		if !fork.Spec.AllowSecretInheritance {

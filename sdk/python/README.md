@@ -1,13 +1,13 @@
 # agent-run Python SDK
 
-Python client for [paperclipinc/sandbox](https://github.com/paperclipinc/sandbox) —
+Python client for [paperclipinc/sandbox](https://github.com/paperclipinc/sandbox):
 snapshot-fork sandboxes for AI agents on Kubernetes.
 
 Two modes:
 
-- `agent_run.direct.SandboxServer` — talks to a standalone `sandbox-server`
+- `agent_run.direct.SandboxServer`: talks to a standalone `sandbox-server`
   (no Kubernetes required). Works today.
-- `agent_run.AgentRun` / `Sandbox` — drives the Kubernetes CRDs
+- `agent_run.AgentRun` / `Sandbox`: drives the Kubernetes CRDs
   (`SandboxClaim`, `SandboxFork`) and execs through the forkd sandbox API.
 
 ```python
@@ -28,4 +28,4 @@ pytest tests/ -v
 ```
 
 See the [repository README](https://github.com/paperclipinc/sandbox#readme)
-for project status — this SDK is pre-alpha and its API may change.
+for project status; this SDK is pre-alpha and its API may change.

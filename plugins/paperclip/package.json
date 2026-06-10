@@ -2,7 +2,7 @@
   "name": "@paperclipai/sandbox-provider-sandbox",
   "version": "0.1.0",
   "private": true,
-  "description": "Paperclip sandbox provider plugin for paperclipinc/sandbox — sub-millisecond Firecracker sandbox forking",
+  "description": "Paperclip sandbox provider plugin for paperclipinc/sandbox: sub-millisecond Firecracker sandbox forking",
   "type": "module",
   "exports": {
     ".": "./dist/index.js"

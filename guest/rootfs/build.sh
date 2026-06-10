@@ -76,7 +76,7 @@ else
         ln -sf /bin/busybox "$MOUNT_DIR/bin/$cmd"
     done
     for cmd in python3 pip3; do
-        # Stub — real Python needs debootstrap or a pre-built rootfs
+        # Stub: real Python needs debootstrap or a pre-built rootfs
         cat > "$MOUNT_DIR/usr/bin/$cmd" << 'PYSTUB'
 #!/bin/sh
 echo "Python not available in minimal rootfs. Use FULL_ROOTFS=1 to build with Python."

@@ -16,7 +16,7 @@
 - Fork CRD: `api/v1alpha1/types.go` `SandboxForkSpec`; controller: `internal/controller/sandboxfork_controller.go` (fetches source claim, waits for Ready, calls forkd). `setCondition` helper lives in `sandboxpool_controller.go`.
 - Regen: `controller-gen` and `setup-envtest` are in `~/go/bin`. CRD regen: `make generate manifests`. Controller tests: `eval $(~/go/bin/setup-envtest use 1.31 -p env) && go test ./internal/controller/ -count=1 -race`.
 - Lint must stay clean: `golangci-lint run --timeout=5m` (and with `GOOS=linux` for the agent). NEVER touch README.md (intentional uncommitted local modification). `git add` explicit paths only; stay on the branch.
-- SECURITY RULE for every task: secret VALUES are never logged, never written to host paths, never put in error messages or condition messages — log/report keys-counts only.
+- SECURITY RULE for every task: secret VALUES are never logged, never written to host paths, never put in error messages or condition messages; log/report keys-counts only.
 
 ---
 
@@ -25,7 +25,7 @@
 **Files:**
 - Modify: `internal/vsock/protocol.go`
 - Modify: `internal/vsock/client.go`
-- Test: `internal/vsock/client_test.go` (append; follow the existing fake-server pattern in that file — read it first)
+- Test: `internal/vsock/client_test.go` (append; follow the existing fake-server pattern in that file; read it first)
 
 - [ ] **Step 1: Write the failing test** (append; adapt the fake-server scaffolding names to what the file already uses)
 
@@ -61,7 +61,7 @@ func TestConfigure(t *testing.T) {
 }
 ```
 
-If `client_test.go` has no reusable `startFakeAgent` helper, extract one from the inline fake-server code while you are there (refactor the existing tests to use it — behavior-preserving, keeps the file DRY).
+If `client_test.go` has no reusable `startFakeAgent` helper, extract one from the inline fake-server code while you are there (refactor the existing tests to use it; behavior-preserving, keeps the file DRY).
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -70,7 +70,7 @@ Expected: compile FAIL (`TypeConfigure`, `ConfigureRequest`, `client.Configure` 
 
 - [ ] **Step 3: Implement**
 
-`protocol.go` — add to the consts block:
+`protocol.go`: add to the consts block:
 
 ```go
 	TypeConfigure RequestType = "configure"
@@ -94,7 +94,7 @@ type ConfigureRequest struct {
 }
 ```
 
-`client.go` — add:
+`client.go`: add:
 
 ```go
 // Configure delivers claim-time env and secrets to the guest agent.
@@ -176,7 +176,7 @@ func TestMergeNilMaps(t *testing.T) {
 - [ ] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/guestenv/ -count=1`
-Expected: FAIL — package does not exist.
+Expected: FAIL; package does not exist.
 
 - [ ] **Step 3: Implement `internal/guestenv/merge.go`**
 
@@ -225,7 +225,7 @@ func Merge(base []string, configured, request map[string]string) []string {
 - [ ] **Step 4: Run tests**
 
 Run: `go test ./internal/guestenv/ -count=1`
-Expected: PASS. (Map-iteration order across `configured`/`request` is fine — `set` keys the order map, duplicates resolve by precedence, and tests assert membership not order.)
+Expected: PASS. (Map-iteration order across `configured`/`request` is fine; `set` keys the order map, duplicates resolve by precedence, and tests assert membership not order.)
 
 - [ ] **Step 5: Commit**
 
@@ -244,7 +244,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `guest/agent/main.go`
 - Modify: `cmd/test-agent/main.go`
 
-There is no host-side unit test for the linux-only agent; the contract is pinned by Task 1's protocol test, Task 2's merge test, and the KVM CI run of `test-agent` (`.github/workflows/kvm-test.yaml` already builds the agent into a rootfs and runs `cmd/test-agent` against the booted VM — no workflow change needed).
+There is no host-side unit test for the linux-only agent; the contract is pinned by Task 1's protocol test, Task 2's merge test, and the KVM CI run of `test-agent` (`.github/workflows/kvm-test.yaml` already builds the agent into a rootfs and runs `cmd/test-agent` against the booted VM; no workflow change needed).
 
 - [ ] **Step 1: Implement configure in the agent (`guest/agent/main.go`)**
 
@@ -271,7 +271,7 @@ In `handleRequest`, add a case (mirror the style of the others):
 		return handleConfigure(req.Configure)
 ```
 
-Add the handler — note it reports counts, never values:
+Add the handler; note it reports counts, never values:
 
 ```go
 func handleConfigure(req *vsock.ConfigureRequest) vsock.Response {
@@ -375,7 +375,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `internal/daemon/server.go` (delivery policy in `Fork`)
 - Test: `internal/daemon/delivery_test.go` (new)
 
-Policy (capture in code comments): if the engine is real (`GetCapacity().KVMAvailable`), a fork carrying secrets MUST deliver them — on any registration/configure failure the sandbox is terminated and the fork fails. Env-only payloads are best-effort (log). The mock engine has no guest at all, so delivery is skipped entirely (the envtest/kind paths keep working).
+Policy (capture in code comments): if the engine is real (`GetCapacity().KVMAvailable`), a fork carrying secrets MUST deliver them; on any registration/configure failure the sandbox is terminated and the fork fails. Env-only payloads are best-effort (log). The mock engine has no guest at all, so delivery is skipped entirely (the envtest/kind paths keep working).
 
 - [ ] **Step 1: Write the failing test** (`internal/daemon/delivery_test.go`)
 
@@ -461,16 +461,16 @@ func TestForkMockEngineSkipsDelivery(t *testing.T) {
 }
 ```
 
-NOTE: `RegisterSandbox` falls back to the fixed unix socket `/tmp/sandbox-agent-52.sock`. If something on the machine is listening there, the "unreachable" tests could accidentally connect. Make the tests robust: the strict test asserts failure OR — if you find the fallback connecting — remove that ambiguity by scoping the fallback (preferred): change `RegisterSandbox` to attempt the unix fallback ONLY when the vsock UDS path is empty (mock paths), not on every failure. Inspect the call paths and pick the cleanest; document what you chose in the test file.
+NOTE: `RegisterSandbox` falls back to the fixed unix socket `/tmp/sandbox-agent-52.sock`. If something on the machine is listening there, the "unreachable" tests could accidentally connect. Make the tests robust: the strict test asserts failure OR, if you find the fallback connecting, remove that ambiguity by scoping the fallback (preferred): change `RegisterSandbox` to attempt the unix fallback ONLY when the vsock UDS path is empty (mock paths), not on every failure. Inspect the call paths and pick the cleanest; document what you chose in the test file.
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `go test ./internal/daemon/ -run 'TestFork(WithSecrets|EnvOnly|MockEngine)' -count=1`
-Expected: FAIL — strict test fails because today's `Server.Fork` ignores secrets and succeeds.
+Expected: FAIL; strict test fails because today's `Server.Fork` ignores secrets and succeeds.
 
 - [ ] **Step 3: Implement**
 
-`sandbox_api.go` — add:
+`sandbox_api.go`: add:
 
 ```go
 // Configure delivers claim-time env and secrets to a sandbox's guest agent.
@@ -484,7 +484,7 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 }
 ```
 
-`server.go` — replace the `registerAgent` call inside `Fork` with a delivery step:
+`server.go`: replace the `registerAgent` call inside `Fork` with a delivery step:
 
 ```go
 	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets); err != nil {
@@ -502,7 +502,7 @@ and add:
 // deliverConfig connects the guest agent and delivers claim-time env+secrets.
 // Strict when the engine is real and secrets are present: failure is returned
 // so the caller can reap the sandbox. Env-only failures are logged
-// (best-effort), and the mock engine is skipped entirely — no guest exists.
+// (best-effort), and the mock engine is skipped entirely; no guest exists.
 // Secret values are never logged.
 func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string) error {
 	if !s.engine.GetCapacity().KVMAvailable {
@@ -532,7 +532,7 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 }
 ```
 
-Keep `registerAgent` if `ForkRunning` still uses it; `ForkRunning` deliberately does NOT deliver new config (forks inherit memory; fresh-credential reissue is issue #7's end state) — add that as a comment on `ForkRunning`.
+Keep `registerAgent` if `ForkRunning` still uses it; `ForkRunning` deliberately does NOT deliver new config (forks inherit memory; fresh-credential reissue is issue #7's end state); add that as a comment on `ForkRunning`.
 
 - [ ] **Step 4: Add a happy-path delivery test with a fake agent**
 
@@ -547,7 +547,7 @@ First, add a settable `VsockDir` field to `MockEngine` (`internal/fork/mock.go`)
 	VsockPath: fmt.Sprintf("%s/sandboxes/%s/vsock.sock", vsockDir, sandboxID),
 ```
 
-Then append to `delivery_test.go` (the fake must speak the Firecracker vsock-UDS preamble — `vsock.Connect` sends `CONNECT 52\n` and expects an `OK`-prefixed line — then newline-delimited JSON):
+Then append to `delivery_test.go` (the fake must speak the Firecracker vsock-UDS preamble: `vsock.Connect` sends `CONNECT 52\n` and expects an `OK`-prefixed line, then newline-delimited JSON):
 
 ```go
 // startFakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS
@@ -756,7 +756,7 @@ func TestLiveForkOptInProceedsPastTheGate(t *testing.T) {
 	})
 
 	// The gate must record the audit condition and NOT reject. (The fork then
-	// waits on source readiness, which never comes in this test — that's fine,
+	// waits on source readiness, which never comes in this test; that's fine,
 	// we are testing the gate, not the fork path.)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -789,8 +789,8 @@ In `api/v1alpha1/types.go`, `SandboxForkSpec`, after `PauseSource`:
 
 ```go
 	// AllowSecretInheritance permits forking a sandbox whose claim holds
-	// secrets. A live fork duplicates guest memory — including any delivered
-	// secret values — into every fork. Default is to reject such forks; see
+	// secrets. A live fork duplicates guest memory, including any delivered
+	// secret values, into every fork. Default is to reject such forks; see
 	// docs/fork-correctness.md §3. The long-term default is per-fork
 	// credential reissue.
 	AllowSecretInheritance bool `json:"allowSecretInheritance,omitempty"`
@@ -812,7 +812,7 @@ Right after fetching the source claim (BEFORE the readiness wait), insert:
 ```go
 	// Live-fork secret gate: duplicating guest memory duplicates any
 	// delivered secrets into every fork. Default-deny without explicit
-	// opt-in. Spec-level check — fires regardless of source readiness.
+	// opt-in. Spec-level check: fires regardless of source readiness.
 	if len(source.Spec.Secrets) > 0 {
 		now := metav1.Now()
 		if !fork.Spec.AllowSecretInheritance {
@@ -850,12 +850,12 @@ Also add an early return at the very top of Reconcile, right after the Get, so a
 	}
 ```
 
-(import `"k8s.io/apimachinery/pkg/api/meta"`.) NOTE: the status update inside the gate triggers a re-reconcile; the audit-condition branch must be idempotent — `setCondition` replaces in place, and the early-return covers the rejected branch.
+(import `"k8s.io/apimachinery/pkg/api/meta"`.) NOTE: the status update inside the gate triggers a re-reconcile; the audit-condition branch must be idempotent; `setCondition` replaces in place, and the early-return covers the rejected branch.
 
 - [ ] **Step 5: Run the tests**
 
 Run: `eval $(~/go/bin/setup-envtest use 1.31 -p env) && go test ./internal/controller/ -count=1 -race`
-Expected: both new tests PASS; the whole suite stays green (the e2e fork test in `suite` uses sources without secrets — verify; if any pre-existing fork test uses secrets, set the opt-in there and note it).
+Expected: both new tests PASS; the whole suite stays green (the e2e fork test in `suite` uses sources without secrets; verify; if any pre-existing fork test uses secrets, set the opt-in there and note it).
 
 - [ ] **Step 6: Commit**
 
@@ -888,9 +888,9 @@ All green required. STOP and report if not.
 
 - [ ] **Step 2: Docs**
 
-`docs/threat-model.md` §6, "Claim-time injection" row: update the Detail — delivery into the guest is now implemented over vsock post-restore (strict on real engines: undeliverable secrets fail the fork and reap the VM); plaintext wire transit note stays until mTLS (#4); status stays **partial** until the wire is encrypted.
+`docs/threat-model.md` §6, "Claim-time injection" row: update the Detail: delivery into the guest is now implemented over vsock post-restore (strict on real engines: undeliverable secrets fail the fork and reap the VM); plaintext wire transit note stays until mTLS (#4); status stays **partial** until the wire is encrypted.
 
-`docs/fork-correctness.md`: §3 — the default-deny rejection + opt-in audit trail are implemented (`sandboxfork_controller.go`), reissue remains open; delivery note (§3 paragraph about ForkOpts being dropped) updated to reflect reality. Status table row 3 → **partial** with "rejection + delivery done (envtest + KVM CI); reissue open". Row 1/2 unchanged.
+`docs/fork-correctness.md`: §3: the default-deny rejection + opt-in audit trail are implemented (`sandboxfork_controller.go`), reissue remains open; delivery note (§3 paragraph about ForkOpts being dropped) updated to reflect reality. Status table row 3 → **partial** with "rejection + delivery done (envtest + KVM CI); reissue open". Row 1/2 unchanged.
 
 `ROADMAP.md` §0: flip "Secrets delivered into the guest over vsock" to ✅ (note: wire encryption pending #4).
 
@@ -907,6 +907,6 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ## Out of scope (this PR)
 
-- mTLS / API auth — issue #4 (next PR; removes the plaintext-transit caveat)
-- Per-fork credential reissue — end state recorded in #7, follows #4's token machinery
-- `ForkRunning` env delivery — forks inherit memory by design; reissue covers freshening
+- mTLS / API auth: issue #4 (next PR; removes the plaintext-transit caveat)
+- Per-fork credential reissue: end state recorded in #7, follows #4's token machinery
+- `ForkRunning` env delivery: forks inherit memory by design; reissue covers freshening

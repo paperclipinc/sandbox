@@ -21,7 +21,7 @@ func isNotFound(err error) bool {
 }
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
-// The returned endpoint is the node's HTTP sandbox API — what clients (SDKs)
+// The returned endpoint is the node's HTTP sandbox API: what clients (SDKs)
 // actually talk to.
 func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string) (*forkResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)

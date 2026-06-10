@@ -1,6 +1,6 @@
 package controller
 
-// Test support — used by envtest suites. Kept in the main package so external
+// Test support: used by envtest suites. Kept in the main package so external
 // test packages (controller_test) can start fake forkd nodes.
 
 import (

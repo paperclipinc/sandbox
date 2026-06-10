@@ -97,7 +97,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			errs = append(errs, err)
 			continue
 		}
-		// CreateTemplate on the real engine boots a VM and snapshots it —
+		// CreateTemplate on the real engine boots a VM and snapshots it:
 		// O(minutes). This blocks the pool reconcile worker; bounded here so a
 		// hung node cannot stall pool reconciliation forever. Moving builds to
 		// a background queue is roadmap work (snapshot distribution).

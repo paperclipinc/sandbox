@@ -46,7 +46,7 @@ type ForkDaemonClient interface {
 	// Snapshot management
 	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
-	// Fork operations (hot path — must be <2ms)
+	// Fork operations (hot path; must be <2ms)
 	Fork(ctx context.Context, in *ForkRequest, opts ...grpc.CallOption) (*ForkResponse, error)
 	ForkRunning(ctx context.Context, in *ForkRunningRequest, opts ...grpc.CallOption) (*ForkRunningResponse, error)
 	// Sandbox lifecycle
@@ -229,7 +229,7 @@ type ForkDaemonServer interface {
 	// Snapshot management
 	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
-	// Fork operations (hot path — must be <2ms)
+	// Fork operations (hot path; must be <2ms)
 	Fork(context.Context, *ForkRequest) (*ForkResponse, error)
 	ForkRunning(context.Context, *ForkRunningRequest) (*ForkRunningResponse, error)
 	// Sandbox lifecycle

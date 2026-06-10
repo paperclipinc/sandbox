@@ -1,0 +1,6 @@
+{
+  "instructions": "Review against CLAUDE.md. Hard rules: no em or en dashes anywhere (U+2014, U+2013); secret values never logged or embedded in errors or conditions; every public performance number must cite a reproducible benchmark; threat-model delta (docs/threat-model.md) required in the same PR when the security surface moves; errcheck applies to production code; runtime errors need actionable remediation text. Flag any new unauthenticated network surface as a blocking finding.",
+  "labels": ["greptile"],
+  "strictness": 2,
+  "comment_types": ["logic", "syntax", "style"]
+}

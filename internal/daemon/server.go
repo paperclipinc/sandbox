@@ -69,7 +69,7 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 		}
 	})
 
-	// Sandbox exec/files API — this is what the SDK talks to
+	// Sandbox exec/files API: this is what the SDK talks to
 	apiHandler := sandboxAPI.Handler()
 	mux.Handle("/v1/", apiHandler)
 
@@ -105,7 +105,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 // deliverConfig connects the guest agent and delivers claim-time env+secrets.
 // Strict when the engine is real and secrets are present: failure is returned
 // so the caller can reap the sandbox. Env-only failures are logged
-// (best-effort), and the mock engine is skipped entirely — no guest exists.
+// (best-effort), and the mock engine is skipped entirely; no guest exists.
 // Secret values are never logged.
 func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string) error {
 	if !s.engine.GetCapacity().KVMAvailable {

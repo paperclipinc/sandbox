@@ -83,9 +83,9 @@ func validateKVM() error {
 
 // Fork creates a new sandbox from a snapshot.
 //
-// Firecracker loads the snapshot memory lazily via mmap — pages are faulted in
+// Firecracker loads the snapshot memory lazily via mmap; pages are faulted in
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
-// This is the hot path — target is <10ms including FC process start.
+// This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
 	start := time.Now()
 
@@ -104,7 +104,7 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 	}
 
 	// Firecracker loads the snapshot mem file via mmap(MAP_PRIVATE) internally.
-	// We don't need to mmap it ourselves — just point Firecracker at the
+	// We don't need to mmap it ourselves; just point Firecracker at the
 	// original snapshot file. Each FC process gets its own CoW mapping.
 
 	// Start a new Firecracker process
@@ -119,7 +119,7 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 		return nil, fmt.Errorf("start firecracker: %w", err)
 	}
 
-	// Load snapshot — Firecracker mmaps the mem file with MAP_PRIVATE
+	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE
 	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {
 		_ = fcClient.Kill()
 		return nil, fmt.Errorf("load snapshot: %w", err)

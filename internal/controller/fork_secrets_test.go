@@ -92,7 +92,7 @@ func TestLiveForkOptInProceedsPastTheGate(t *testing.T) {
 	})
 
 	// The gate must record the audit condition and NOT reject. (The fork then
-	// waits on source readiness, which never comes in this test — that's fine,
+	// waits on source readiness, which never comes in this test; that's fine,
 	// we are testing the gate, not the fork path.)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

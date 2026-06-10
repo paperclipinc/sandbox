@@ -19,7 +19,7 @@ has happened.
 | Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd treats its output as data only |
 | forkd (`cmd/forkd`) | privileged DaemonSet pod with `/dev/kvm` | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd |
-| Snapshot artifacts | files under `/var/lib/agent-run` on each node | — | forkd executes them as memory images |
+| Snapshot artifacts | files under `/var/lib/agent-run` on each node | - | forkd executes them as memory images |
 
 ## 1. Guest → host escape
 
@@ -28,7 +28,7 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Firecracker microVM (minimal device model) | **mitigated** | Each sandbox is a separate Firecracker process with its own KVM VM (`internal/fork/engine.go`). |
-| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **open — priority zero** | forkd execs the `firecracker` binary directly (`internal/firecracker/client.go:StartVM`). No jailer, no per-VM UID, no chroot. A VMM-process compromise lands as forkd's user inside a privileged pod. This must be fixed before any claim of production isolation. |
+| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **open; priority zero** | forkd execs the `firecracker` binary directly (`internal/firecracker/client.go:StartVM`). No jailer, no per-VM UID, no chroot. A VMM-process compromise lands as forkd's user inside a privileged pod. This must be fixed before any claim of production isolation. |
 | Seccomp on the VMM process | **open** | Firecracker ships default seccomp; we do not configure or verify the level, and without the jailer the surrounding process has no confinement. |
 | CVE posture / version pinning | **partial** | CI pins Firecracker v1.15.0; there is no documented update policy or advisory tracking. |
 | Guest agent as attack surface | **partial** | Agent speaks a small JSON protocol over vsock only (`guest/agent/main.go`); host side treats responses as data. A 10MB line-buffer cap exists. No fuzzing of the protocol yet. |
@@ -58,10 +58,10 @@ forkd is the highest-value target: privileged, `/dev/kvm`, hostPath
 
 | Control | Status | Detail |
 |---|---|---|
-| Egress default-deny | **open (currently trivially true)** | Restored VMs have no NIC attached at all — there is no guest networking implemented. Egress is "denied" by absence, not by policy. The README previously implied configurable allowlists; that feature does not exist yet. |
+| Egress default-deny | **open (currently trivially true)** | Restored VMs have no NIC attached at all; there is no guest networking implemented. Egress is "denied" by absence, not by policy. The README previously implied configurable allowlists; that feature does not exist yet. |
 | Host-side enforcement | **open (design fixed)** | When networking lands, egress policy is enforced host-side (nftables or eBPF per tap device), never in-guest. The guest can never influence its own policy. |
 | DNS-based allowlists | **open (design fixed)** | Names like `api.anthropic.com:443` are only meaningful with a resolver we control: forkd runs a per-node resolver, guests get only that resolver, allowlist rules pin resolved IPs with TTL-bounded validity. Without this, attacker-controlled DNS bypasses name-based rules. We commit to the controlled-resolver design; raw IP allowlists are the fallback. |
-| K8s NetworkPolicy | **n/a — be honest** | Sandboxes are not pods. NetworkPolicy does not govern them. Our egress layer is ours and is documented as ours. |
+| K8s NetworkPolicy | **n/a; be honest** | Sandboxes are not pods. NetworkPolicy does not govern them. Our egress layer is ours and is documented as ours. |
 
 ## 5. Snapshot integrity and supply chain
 
@@ -78,7 +78,7 @@ arbitrary code at sandbox privilege.
 
 | Control | Status | Detail |
 |---|---|---|
-| Claim-time injection (not baked into snapshots) | **partial** | The design is right: pools snapshot before secrets exist; the controller resolves Secret refs at claim time (`sandboxclaim_controller.go:resolveSecrets`). Delivery into the guest is implemented over vsock post-restore (`internal/daemon/server.go:deliverConfig`) — never via boot args, never via the FC API socket. Strict on real engines: if secrets cannot be delivered, the fork fails and the VM is reaped (a sandbox that reports Ready without its secrets is a lie). The mock engine skips delivery entirely — no guest exists. Remaining gap: resolved secret values transit the controller→forkd gRPC channel in plaintext (`ForkRequest.Secrets`) — acceptable only because that channel is already documented as unauthenticated/unencrypted (§3, open); the mTLS work (issue #4) closes both. |
+| Claim-time injection (not baked into snapshots) | **partial** | The design is right: pools snapshot before secrets exist; the controller resolves Secret refs at claim time (`sandboxclaim_controller.go:resolveSecrets`). Delivery into the guest is implemented over vsock post-restore (`internal/daemon/server.go:deliverConfig`); never via boot args, never via the FC API socket. Strict on real engines: if secrets cannot be delivered, the fork fails and the VM is reaped (a sandbox that reports Ready without its secrets is a lie). The mock engine skips delivery entirely; no guest exists. Remaining gap: resolved secret values transit the controller→forkd gRPC channel in plaintext (`ForkRequest.Secrets`); acceptable only because that channel is already documented as unauthenticated/unencrypted (§3, open); the mTLS work (issue #4) closes both. |
 | Live-fork secret inheritance | **mitigated (default-deny)** | Forks of secret-holding sandboxes are rejected by the fork controller without explicit `allowSecretInheritance: true`; opt-ins are recorded as an audit condition (`sandboxfork_controller.go`). Per-fork credential reissue remains the end state (open). See `docs/fork-correctness.md` §3. |
 | Controller RBAC for Secrets | **partial** | ClusterRole grants cluster-wide `get,list` on all Secrets. Must be narrowed (label-selected or per-namespace Role aggregation) before multi-tenant use. |
 
@@ -87,7 +87,7 @@ arbitrary code at sandbox privilege.
 What a namespace boundary buys you **today**: RBAC on the CRDs, and nothing
 else. Pools, claims, and forks are namespace-scoped objects, but:
 
-- Snapshots on a node are a flat directory shared by all tenants — no
+- Snapshots on a node are a flat directory shared by all tenants; no
   per-namespace separation, no enforcement that a claim only forks snapshots
   its namespace published. **open**
 - VMs of different namespaces share nodes, host kernel, and forkd. **open**

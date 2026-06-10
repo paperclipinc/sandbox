@@ -27,12 +27,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Already assigned — nothing to do
+	// Already assigned; nothing to do
 	if claim.Status.Phase == v1alpha1.SandboxReady {
 		return r.reconcileTimeout(ctx, &claim)
 	}
 
-	// Already failed — don't retry
+	// Already failed; don't retry
 	if claim.Status.Phase == v1alpha1.SandboxFailed {
 		return ctrl.Result{}, nil
 	}
@@ -93,11 +93,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Call forkd on the selected node — this is the <2ms hot path
+	// Call forkd on the selected node: this is the <2ms hot path
 	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals)
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
-		// that node yet — transient while the pool reconciler catches up.
+		// that node yet; transient while the pool reconciler catches up.
 		if isNotFound(err) {
 			logger.Info("snapshot not yet on node, retrying", "node", node.Name, "error", err.Error())
 			claim.Status.Phase = v1alpha1.SandboxPending

@@ -22,7 +22,7 @@ func main() {
 	}
 	udsPath := os.Args[1]
 
-	// Retry connection with timeout — guest agent may take a few seconds to start
+	// Retry connection with timeout: guest agent may take a few seconds to start
 	var client *vsock.Client
 	var err error
 	for attempt := 0; attempt < 10; attempt++ {

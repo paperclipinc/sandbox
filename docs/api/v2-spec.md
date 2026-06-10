@@ -1,10 +1,10 @@
-# paperclipinc/sandbox — API Specification v2
+# paperclipinc/sandbox: API Specification v2
 
-Supersedes v1. Same engine, same load-bearing rule, re-weighted for the three personas in priority order: **the application developer** (adoption is won here), **the agent itself** (the genuinely new user of 2026), **the platform operator** (governance lives here). The Kubernetes layer remains the implementation substrate and the operator's interface — it is no longer the cover page.
+Supersedes v1. Same engine, same load-bearing rule, re-weighted for the three personas in priority order: **the application developer** (adoption is won here), **the agent itself** (the genuinely new user of 2026), **the platform operator** (governance lives here). The Kubernetes layer remains the implementation substrate and the operator's interface; it is no longer the cover page.
 
-**The one rule, unchanged:** anything that creates, multiplies, or destroys infrastructure materializes as a declarative object through the API server; the imperative runtime surface only talks to live sandboxes. v2 adds one carefully shaped exception-that-isn't: capability-budgeted self-service (§3), where agent-initiated forks are still materialized as objects by the controller — the agent gets agency, the ledger stays complete.
+**The one rule, unchanged:** anything that creates, multiplies, or destroys infrastructure materializes as a declarative object through the API server; the imperative runtime surface only talks to live sandboxes. v2 adds one carefully shaped exception-that-isn't: capability-budgeted self-service (§3), where agent-initiated forks are still materialized as objects by the controller; the agent gets agency, the ledger stays complete.
 
-**Vocabulary rule (new):** Kubernetes jargon never crosses into the developer or agent surfaces. `claim`, `husk`, `pool reconciliation` exist in chapter 5 and nowhere above it. Workspace verbs are deliberately git-shaped — `log`, `diff`, `revert`, `branch` — because every developer arrives with that mental model pre-installed and we are selling "git for computers."
+**Vocabulary rule (new):** Kubernetes jargon never crosses into the developer or agent surfaces. `claim`, `husk`, `pool reconciliation` exist in chapter 5 and nowhere above it. Workspace verbs are deliberately git-shaped (`log`, `diff`, `revert`, `branch`) because every developer arrives with that mental model pre-installed and we are selling "git for computers."
 
 ---
 
@@ -23,12 +23,12 @@ Against a real cluster, the same CLI targets it via kubeconfig. There is no step
 
 ### 1.2 SDK (Python / TypeScript, conformance-tested parity)
 
-The common path is three lines. Fork and lineage are the upgrade path, not a separate paradigm. Every SDK call maps 1:1 to a declarative object operation or a runtime RPC — no hidden magic; debugging the SDK is debugging the system.
+The common path is three lines. Fork and lineage are the upgrade path, not a separate paradigm. Every SDK call maps 1:1 to a declarative object operation or a runtime RPC; no hidden magic; debugging the SDK is debugging the system.
 
 ```python
 from agentrun import AgentRun
 
-c = AgentRun()                                   # local dev, kubeconfig, or in-cluster — autodetected
+c = AgentRun()                                   # local dev, kubeconfig, or in-cluster; autodetected
 
 # ── Common path ────────────────────────────────────────────────
 sb = c.sandbox("python")                         # ~ms from a warm pool
@@ -94,10 +94,10 @@ Agents are first-class API consumers. Three commitments follow.
 
 ### 2.2 In-guest self-service endpoint
 
-Inside every sandbox: `AGENTRUN_SOCKET=/run/agentrun.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals — without any network egress and without an external orchestrator round-trip.
+Inside every sandbox: `AGENTRUN_SOCKET=/run/agentrun.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
 
 ```python
-# from inside the sandbox — e.g. an agent doing best-of-N over its own state
+# from inside the sandbox: e.g. an agent doing best-of-N over its own state
 import agentrun.guest as me
 ckpt = me.checkpoint(label="before-refactor")
 forks = me.fork(3)                       # budget-gated; see §3
@@ -118,7 +118,7 @@ The primary reader of every runtime error is a language model. Every error carri
 }
 ```
 
-A CI lint rejects any error path lacking `remediation`. Docs ship `llms.txt`, the OpenAPI/proto schemas, and an examples corpus formatted for in-context learning — agents are a documentation audience, not an afterthought.
+A CI lint rejects any error path lacking `remediation`. Docs ship `llms.txt`, the OpenAPI/proto schemas, and an examples corpus formatted for in-context learning; agents are a documentation audience, not an afterthought.
 
 ---
 
@@ -135,7 +135,7 @@ budget:
   maxEgressBytes: 1Gi
 ```
 
-Runtime `Fork()`/`Checkpoint()`/`ExtendLifetime()` are gated by it. Mechanically, a self-initiated fork is the controller materializing a real `Sandbox` object (owner-referenced to the parent) — RBAC, quotas, Events, and the audit log see it exactly as if an operator had created it. Tokens are attenuated macaroon-style: a fork's token is strictly narrower than its parent's (budget minus spend, same-or-smaller scopes), and `secretInheritance: reissue` remains the default — each fork gets fresh credentials, never copies of the parent's. Budget exhaustion returns an LLM-legible error naming the orchestrator escalation path.
+Runtime `Fork()`/`Checkpoint()`/`ExtendLifetime()` are gated by it. Mechanically, a self-initiated fork is the controller materializing a real `Sandbox` object (owner-referenced to the parent); RBAC, quotas, Events, and the audit log see it exactly as if an operator had created it. Tokens are attenuated macaroon-style: a fork's token is strictly narrower than its parent's (budget minus spend, same-or-smaller scopes), and `secretInheritance: reissue` remains the default: each fork gets fresh credentials, never copies of the parent's. Budget exhaustion returns an LLM-legible error naming the orchestrator escalation path.
 
 ---
 
@@ -145,7 +145,7 @@ One protocol, three transports: vsock (in-guest), cluster-internal, and browser 
 
 ```proto
 service Sandbox {
-  // Execution — the hot path
+  // Execution: the hot path
   rpc Exec(stream ExecRequest) returns (stream ExecResponse);     // cmd, env, cwd, pty; stdin/out/err chunks; exit code
   // Filesystem
   rpc ReadFile(Path) returns (stream Chunk);
@@ -158,7 +158,7 @@ service Sandbox {
   rpc Processes(Empty) returns (ProcessList);
   rpc Signal(SignalRequest) returns (Empty);
   rpc PortForward(stream Frame) returns (stream Frame);
-  // Budget-gated self-service (§3) — materialized declaratively by the controller
+  // Budget-gated self-service (§3): materialized declaratively by the controller
   rpc Fork(ForkRequest) returns (Operation);                      // → N sibling sandboxes
   rpc Checkpoint(CheckpointRequest) returns (Revision);           // live state → workspace revision
   rpc ExtendLifetime(ExtendRequest) returns (Lease);
@@ -168,13 +168,13 @@ service Sandbox {
 }
 ```
 
-Still absent on purpose: `Delete` of *other* sandboxes, pool mutation, workspace administration — those are creator-scope operations, declarative only. `me.exit()` terminates only the caller.
+Still absent on purpose: `Delete` of *other* sandboxes, pool mutation, workspace administration; those are creator-scope operations, declarative only. `me.exit()` terminates only the caller.
 
 ---
 
 ## 5. The declarative layer (three nouns, `agentrun.dev/v1alpha1`)
 
-The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** (v1's `SandboxTemplate` is inlined into the pool with an optional `templateRef` for reuse — the Deployment-embeds-PodSpec pattern; v1's `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.)
+The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** (v1's `SandboxTemplate` is inlined into the pool with an optional `templateRef` for reuse, the Deployment-embeds-PodSpec pattern; v1's `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.)
 
 ### SandboxPool
 
@@ -261,7 +261,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 - **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `agentrun.dev/pool` only.
 - **Paperclip provider** (`@paperclipinc/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
-- **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>` — `tree` renders the fork/lineage DAG.
+- **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
 - **Eventing**: CloudEvents (`dev.agentrun.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
 
 ---
@@ -275,7 +275,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 ## Appendix: what changed from v1 and why
 
-1. **Presentation inverted** — SDK/CLI first, CRDs as chapter 5. The adoption persona never sees YAML; the operator persona lost nothing.
-2. **Five nouns → three** — template inlined into pool; fork folded into `Sandbox.source.fromSandbox`+`replicas`. Fork and lineage are now visibly one concept.
-3. **Budgeted self-service added** — runtime `Fork`/`Checkpoint`/`ExtendLifetime` behind per-sandbox budgets with attenuated tokens, materialized declaratively. The agent-as-user persona gains agency; the audit ledger stays complete.
+1. **Presentation inverted**: SDK/CLI first, CRDs as chapter 5. The adoption persona never sees YAML; the operator persona lost nothing.
+2. **Five nouns → three**: template inlined into pool; fork folded into `Sandbox.source.fromSandbox`+`replicas`. Fork and lineage are now visibly one concept.
+3. **Budgeted self-service added**: runtime `Fork`/`Checkpoint`/`ExtendLifetime` behind per-sandbox budgets with attenuated tokens, materialized declaratively. The agent-as-user persona gains agency; the audit ledger stays complete.
 4. **Git verbs on workspaces, K8s jargon quarantined, LLM-legible errors made normative, Connect over grpc-gateway, AIP conventions, idempotency keys, local dev mode, llms.txt.**

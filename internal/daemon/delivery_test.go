@@ -4,7 +4,7 @@ package daemon
 //
 // Fallback scoping note: SandboxAPI.RegisterSandbox used to fall back to the
 // fixed unix socket /tmp/sandbox-agent-52.sock on ANY vsock dial failure,
-// which made the "unreachable agent" tests here ambiguous — a stray local
+// which made the "unreachable agent" tests here ambiguous: a stray local
 // agent listening on that socket would have let them accidentally connect.
 // The fallback is now opt-in (SandboxAPI.EnableUnixFallback, used only by the
 // standalone sandbox-server) and additionally only attempted when the vsock

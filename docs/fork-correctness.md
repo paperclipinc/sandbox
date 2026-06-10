@@ -14,7 +14,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 | 1 | Shared RNG state after restore | Reseed CRNG on every fork | `TestForkDistinctRandomness` | **open** |
 | 2 | Stale wall clock after restore | kvm-clock resync + agent clock step | `TestForkClockCorrectness` | **open** |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
-| 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all — see note) |
+| 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
 
 ## 1. RNG and entropy after restore
@@ -59,12 +59,12 @@ Required implementation:
 
 Test: snapshot a VM, wait ≥10s, fork, immediately exec `date +%s%N` and assert
 within 500ms of host time. Also exec a TLS handshake against a cert issued
-*after* the snapshot was taken — it must validate.
+*after* the snapshot was taken; it must validate.
 
 ## 3. Live-fork memory hygiene (secrets)
 
-`SandboxFork` of a running sandbox duplicates everything in guest memory —
-including claim-time secrets — into every fork.
+`SandboxFork` of a running sandbox duplicates everything in guest memory,
+including claim-time secrets, into every fork.
 
 **Chosen policy (default-safe):** live forks of a sandbox that holds claim-time
 secrets are **rejected** unless one of:
@@ -83,7 +83,7 @@ secret-holding sandboxes get a terminal typed `Rejected` condition without
 audit condition. Secret *delivery* is implemented too: the controller resolves
 Secret refs (`internal/controller/sandboxclaim_controller.go:resolveSecrets`)
 and forkd delivers them over vsock post-restore
-(`internal/daemon/server.go:deliverConfig`) — never baked into snapshots,
+(`internal/daemon/server.go:deliverConfig`); never baked into snapshots,
 never in Firecracker boot args or the FC API socket request log. Per-fork
 credential reissue remains open.
 
@@ -95,7 +95,7 @@ present and an audit annotation recorded.
 
 Forked guests must not wake up with the parent's MAC/IP/TCP state.
 
-**Current reality:** restored VMs have *no* network device — no NIC is attached
+**Current reality:** restored VMs have *no* network device: no NIC is attached
 anywhere in `internal/fork/engine.go` or `internal/firecracker/template.go`,
 and exec/files run over vsock. There is therefore no collision today, but also
 no egress at all; the README's egress-allowlist feature is unimplemented.
@@ -120,7 +120,7 @@ inherited socket fd fails within 5s, (c) parent's connection still works.
 ## 5. Memory accounting truthfulness
 
 "~KB per fork" measured at T=0 is the dirty-page count immediately after
-restore. It is not a density planning number — a `pip install` in the fork
+restore. It is not a density planning number; a `pip install` in the fork
 makes pages unique.
 
 Required implementation:
@@ -139,6 +139,6 @@ exported metric grows accordingly and that `GetCapacity` reflects it.
 
 `fork-correctness` (GitHub Actions, KVM-capable runner) runs all tests above on
 every PR touching `internal/fork/`, `internal/firecracker/`, or `guest/`.
-**Status: job not yet created** — it lands with the first test in this list.
+**Status: job not yet created**; it lands with the first test in this list.
 Until every row above is `done`, fork correctness is the top engineering
 priority and blocks feature work (see `ROADMAP.md`).

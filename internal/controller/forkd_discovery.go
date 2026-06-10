@@ -73,7 +73,7 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 		if !ok {
 			continue
 		}
-		// Populate capacity before the registry ever sees the struct —
+		// Populate capacity before the registry ever sees the struct;
 		// registered NodeInfo fields are read under the registry's RLock and
 		// must never be mutated afterwards outside it.
 		d.refreshCapacity(ctx, info)
@@ -82,7 +82,7 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 }
 
 // refreshCapacity fills template/capacity fields via forkd's GetCapacity,
-// dialing the node directly (the node is not registered yet — the registry
+// dialing the node directly (the node is not registered yet; the registry
 // must only ever see fully-populated NodeInfo structs; see AddTemplate's
 // locking contract).
 func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
