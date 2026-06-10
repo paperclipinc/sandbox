@@ -56,11 +56,18 @@ hostPath `/var/lib/agent-run`, on every KVM node.
 
 ## 4. Sandbox → network
 
+See `docs/networking.md` for the full design (tap-per-sandbox, nftables
+dispatch model, per-fork identity). Networking is opt-in: with forkd's
+`--enable-networking` off, restored VMs have no NIC and egress is denied by
+absence. With it on, each fork gets its own tap and a host-side default-deny
+egress ruleset.
+
 | Control | Status | Detail |
 |---|---|---|
-| Egress default-deny | **open (currently trivially true)** | Restored VMs have no NIC attached at all; there is no guest networking implemented. Egress is "denied" by absence, not by policy. The README previously implied configurable allowlists; that feature does not exist yet. |
-| Host-side enforcement | **open (design fixed)** | When networking lands, egress policy is enforced host-side (nftables or eBPF per tap device), never in-guest. The guest can never influence its own policy. |
-| DNS-based allowlists | **open (design fixed)** | Names like `api.anthropic.com:443` are only meaningful with a resolver we control: forkd runs a per-node resolver, guests get only that resolver, allowlist rules pin resolved IPs with TTL-bounded validity. Without this, attacker-controlled DNS bypasses name-based rules. We commit to the controlled-resolver design; raw IP allowlists are the fallback. |
+| Egress default-deny (IP:port) | **partial / mitigated** | Enforced host-side for literal IP:port allowlist entries. Each fork sits on its own tap with its own /30; a shared `inet` nftables table dispatches by inbound interface (the tap) into that sandbox's regular chain, which accepts established/related, the allowlisted `ip daddr/tcp dport` pairs (each pinned to the sandbox's `ip saddr` as anti-spoof), and ends in a terminal drop. The guest cannot influence the host ruleset and cannot spoof another sandbox's source address onto its own tap. Proven in KVM CI: one VM reaches an allowed destination and is blocked from a denied one, plus a two-sandbox `nft` install proving cross-tap isolation (one sandbox's drop never kills another's allowed traffic). |
+| Host-side enforcement | **enforced** | Egress policy is rendered and applied host-side only (`nft` per tap), never in-guest. The guest agent never edits nftables; the guest's only network config is its own eth0 address. |
+| DNS-based allowlists | **open (design fixed)** | Names like `api.anthropic.com:443` are accepted by the CRD and plumbed through to forkd, but forkd logs them as NOT enforced and omits them from the ruleset: they are only meaningful with a resolver we control (forkd runs a per-node resolver, guests get only that resolver, allowlist rules pin resolved IPs with TTL-bounded validity). Until that lands, attacker-controlled DNS would bypass name-based rules, so we do not pretend to enforce them. Tracked as a follow-up (PR2, controlled DNS resolver, #47). Literal IP:port rules are the enforced fallback. |
+| Layering: host netns vs per-VM netns | **host-netns today** | The tap and nftables ruleset live in forkd's (the host's) network namespace; isolation between sandboxes is by per-tap dispatch + per-/30 addressing + saddr anti-spoof, not by a kernel netns boundary per VM. Moving each VM into its own pod netns (husk pods, #18) adds a second, defense-in-depth layer and is where snapshot-fork-under-netns is resolved. Live-fork (`ForkRunning`) of a networked sandbox fails closed today (#18): a live fork would restore the source's baked NIC and collide on tap/MAC/IP. |
 | K8s NetworkPolicy | **n/a; be honest** | Sandboxes are not pods. NetworkPolicy does not govern them. Our egress layer is ours and is documented as ours. |
 
 ## 5. Snapshot integrity and supply chain

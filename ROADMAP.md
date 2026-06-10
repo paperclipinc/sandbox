@@ -186,6 +186,33 @@ a differentiator.
 - ⬜ `prefetch: full | lazy` pool setting (serve forks from partially
   fetched snapshots). OPEN: lazy partial-fetch serving is not yet built.
 
+## 3b. Guest networking and egress
+
+Spec: `docs/networking.md`, threat model §4. Opt-in per node
+(`forkd --enable-networking`); makes the `NetworkPolicy` CRD real for literal
+IP:port destinations. Default-deny, host-side enforced, guest cannot influence
+or spoof.
+
+- ✅ Host-side IP:port egress allowlist: per-sandbox tap + /30 + MAC identity,
+  Firecracker NIC bound to the tap via `network_overrides` per fork, host-side
+  nftables default-deny with a shared-table dispatch model (per-tap jump into a
+  per-sandbox chain ending in drop, `ip saddr` anti-spoof). Cross-tap isolation
+  proven: one sandbox's drop never kills another's allowed traffic. Proven in
+  KVM CI: a single VM reaches the allowed destination and is blocked from the
+  denied one, and a two-sandbox `nft` install validates against real nft. The
+  controller plumbs `template.Spec.networkPolicy` (egress + allow) through the
+  Fork RPC. See docs/networking.md.
+- ⬜ Controlled DNS resolver for name-based allowlists (PR2): names are accepted
+  by the CRD and plumbed to forkd but logged as NOT enforced and omitted from
+  the ruleset; a forkd-controlled per-node resolver that pins resolved IPs with
+  TTL-bounded validity is required before name rules can be enforced. Tracked in
+  #47.
+- ⬜ Snapshot-fork networking under per-VM netns (lands with husk pods #18):
+  live-fork (`ForkRunning`) of a networked sandbox fails closed today because it
+  would restore the source's baked NIC and collide on tap/MAC/IP.
+- ⬜ Per-fork conntrack flush and parent-connection-death semantics beyond
+  fresh-identity; bandwidth/rate limiting; IPv6.
+
 ## 4. Benchmark program + honest comparison
 
 - ⬜ `bench/` harness: claim→first-exec P50/P99, fork→first-exec P50/P99
