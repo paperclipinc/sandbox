@@ -34,6 +34,12 @@ jobs:
           sudo chmod +x /usr/local/bin/firecracker
           firecracker --version
 
+          # The same release archive ships the jailer; install it for the
+          # jailer-boot phase below.
+          sudo mv "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
+          sudo chmod +x /usr/local/bin/jailer
+          jailer --version
+
       - name: Download kernel and rootfs
         run: |
           mkdir -p /tmp/agent-run-test
@@ -189,7 +195,7 @@ jobs:
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
           sudo chmod +x $WORKDIR/mnt/bin/busybox
-          for cmd in sh echo cat ls mkdir rm cp; do
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
             sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
           done
 
@@ -250,3 +256,232 @@ jobs:
           }
 
           kill $FC_PID 2>/dev/null || true
+
+      # Fork-correctness proof: take ONE snapshot after the agent is up, restore
+      # TWO VMs from it, and assert each fork reseeds its RNG (distinct urandom),
+      # holds a correct wall clock, and records the generation it was told.
+      #
+      # forkd is NOT in this loop: the workflow drives Firecracker directly, so
+      # the guest only reseeds because test-agent sends NotifyForked itself.
+      # That is the correct unit-level proof of the GUEST mechanism. forkd
+      # end-to-end notify (connect, generation, strict-on-real-engine) is
+      # covered by go tests in internal/daemon (TestForkNotifiesAgentWithFreshEntropy,
+      # TestForkGenerationIncrementsAcrossForks, TestForkFailsWhenNotifyForkedErrors).
+      - name: Fork-correctness, distinct RNG streams and clock resync across forks
+        timeout-minutes: 8
+        run: |
+          set -e
+          WORKDIR=/tmp/agent-run-test/fork-correctness
+          mkdir -p $WORKDIR
+
+          # Build an ext4 rootfs with the agent as /init plus the busybox tools
+          # the notify phase needs (head, date, base64, tr, cat).
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+
+          sudo chmod 666 /dev/kvm
+
+          # Boot the source VM with vsock and wait for the agent.
+          SOCK=$WORKDIR/source.sock
+          SRC_VSOCK=$WORKDIR/source-vsock.sock
+          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/source-serial.log 2>&1 &
+          SRC_PID=$!
+          sleep 1
+
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"$SRC_VSOCK\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "Source VM booted, waiting for agent..."
+          sleep 8
+
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # Pause and take ONE full snapshot.
+          curl --unix-socket $SOCK -X PATCH 'http://localhost/vm' \
+            -H 'Content-Type: application/json' \
+            -d '{"state": "Paused"}'
+          mkdir -p $WORKDIR/snapshot
+          curl --unix-socket $SOCK -X PUT 'http://localhost/snapshot/create' \
+            -H 'Content-Type: application/json' \
+            -d "{\"snapshot_type\": \"Full\", \"snapshot_path\": \"$WORKDIR/snapshot/vmstate\", \"mem_file_path\": \"$WORKDIR/snapshot/mem\"}"
+          echo "Snapshot created:"
+          ls -lh $WORKDIR/snapshot/
+          kill $SRC_PID 2>/dev/null || true
+          sleep 1
+
+          # restore_fork <n> <generation> -> prints test-agent stdout to $WORKDIR/fork<n>.out
+          restore_fork() {
+            local n=$1 gen=$2
+            local sock=$WORKDIR/fork${n}.sock
+            local vsock=$WORKDIR/fork${n}-vsock.sock
+            /usr/local/bin/firecracker --api-sock $sock > $WORKDIR/fork${n}-serial.log 2>&1 &
+            echo $! > $WORKDIR/fork${n}.pid
+            sleep 1
+            curl --unix-socket $sock -X PUT 'http://localhost/snapshot/load' \
+              -H 'Content-Type: application/json' \
+              -d "{\"snapshot_path\": \"$WORKDIR/snapshot/vmstate\", \"mem_file_path\": \"$WORKDIR/snapshot/mem\", \"enable_diff_snapshots\": false, \"resume_vm\": true}"
+            echo "Fork ${n} restored (generation ${gen}); running notify-mode test-agent..."
+            timeout 60 /tmp/test-agent --mode notify --generation ${gen} "$vsock" \
+              | tee $WORKDIR/fork${n}.out
+          }
+
+          restore_fork 1 1
+          restore_fork 2 2
+
+          kill $(cat $WORKDIR/fork1.pid) $(cat $WORKDIR/fork2.pid) 2>/dev/null || true
+
+          # --- assertions ---
+          RUNNER_NS=$(date +%s%N)
+
+          URANDOM1=$(grep '^URANDOM=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          URANDOM2=$(grep '^URANDOM=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+          WALL1=$(grep '^WALLCLOCK_NS=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          WALL2=$(grep '^WALLCLOCK_NS=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+          GEN1=$(grep '^FORKGEN=' $WORKDIR/fork1.out | head -1 | cut -d= -f2-)
+          GEN2=$(grep '^FORKGEN=' $WORKDIR/fork2.out | head -1 | cut -d= -f2-)
+
+          echo "URANDOM1=$URANDOM1"
+          echo "URANDOM2=$URANDOM2"
+          echo "WALL1=$WALL1 WALL2=$WALL2 RUNNER_NS=$RUNNER_NS"
+          echo "GEN1=$GEN1 GEN2=$GEN2"
+
+          if [ -z "$URANDOM1" ] || [ -z "$URANDOM2" ]; then
+            echo "FAIL: missing URANDOM sample from a fork"
+            exit 1
+          fi
+          if [ "$URANDOM1" = "$URANDOM2" ]; then
+            echo "FAIL: two forks produced IDENTICAL /dev/urandom output: shared-RNG bug"
+            exit 1
+          fi
+          echo "PASS: forks produced distinct RNG streams"
+
+          # Each guest wall clock must be within 2 seconds of the runner clock.
+          for pair in "1:$WALL1" "2:$WALL2"; do
+            n=${pair%%:*}; wall=${pair#*:}
+            if [ -z "$wall" ]; then echo "FAIL: fork $n missing WALLCLOCK_NS"; exit 1; fi
+            diff_ns=$(( wall > RUNNER_NS ? wall - RUNNER_NS : RUNNER_NS - wall ))
+            if [ "$diff_ns" -gt 2000000000 ]; then
+              echo "FAIL: fork $n wall clock off by ${diff_ns}ns (> 2s)"
+              exit 1
+            fi
+            echo "PASS: fork $n wall clock within ${diff_ns}ns of runner"
+          done
+
+          if [ "$GEN1" != "1" ]; then echo "FAIL: fork 1 FORKGEN=$GEN1 want 1"; exit 1; fi
+          if [ "$GEN2" != "2" ]; then echo "FAIL: fork 2 FORKGEN=$GEN2 want 2"; exit 1; fi
+          echo "PASS: fork-generation file matches generation sent to each fork"
+
+          echo "================================"
+          echo "  Fork-correctness checks passed"
+          echo "================================"
+
+      # Jailer-boot proof: launch Firecracker via the jailer (mirroring the
+      # internal/firecracker jailerArgs shape), restore the same snapshot inside
+      # the chroot, and assert the agent answers over the jailed vsock.
+      #
+      # This proves the jailer MECHANICS (chroot, --id, --exec-file, per-VM
+      # uid/gid, API at the jailed socket). It does NOT prove the exact dropped
+      # capability set: the runner is root and still holds every capability, so
+      # a missing cap would not surface here. Dropped-cap proof is tracked
+      # separately. See issue #2.
+      - name: Jailer-boot proof, snapshot restore under the jailer
+        timeout-minutes: 8
+        # TODO(#2): chroot path/vsock-socket semantics under the jailer are not
+        # yet validated end to end on the runner; if a jailer arg/cap detail
+        # makes this fail we do not want to block the load-bearing
+        # fork-correctness phase above. Drop continue-on-error once this is
+        # confirmed green and tighten into a required assertion.
+        continue-on-error: true
+        run: |
+          set -e
+          CHROOT_BASE=/srv/jailer
+          ID=smoke
+          UID_GID=64000
+          sudo mkdir -p $CHROOT_BASE
+          sudo chmod 666 /dev/kvm
+
+          # The jailer chroots to <base>/firecracker/<id>/root and runs as
+          # --uid/--gid; the API socket lives at run/firecracker.socket inside it.
+          ROOT=$CHROOT_BASE/firecracker/$ID/root
+          sudo mkdir -p $ROOT/run
+
+          # Hard-link kernel, rootfs, and snapshot into the chroot (jailer
+          # cannot follow paths outside it). Use the agent rootfs + snapshot
+          # produced by the fork-correctness phase.
+          FC_WORK=/tmp/agent-run-test/fork-correctness
+          sudo cp /tmp/agent-run-test/vmlinux $ROOT/vmlinux
+          sudo cp $FC_WORK/rootfs.ext4 $ROOT/rootfs.ext4
+          sudo mkdir -p $ROOT/snapshot
+          sudo cp $FC_WORK/snapshot/vmstate $ROOT/snapshot/vmstate
+          sudo cp $FC_WORK/snapshot/mem $ROOT/snapshot/mem
+          sudo chown -R ${UID_GID}:${UID_GID} $CHROOT_BASE/firecracker/$ID
+
+          # Launch via the jailer. Arg shape mirrors internal/firecracker.jailerArgs.
+          sudo /usr/local/bin/jailer \
+            --id $ID \
+            --exec-file /usr/local/bin/firecracker \
+            --uid $UID_GID \
+            --gid $UID_GID \
+            --chroot-base-dir $CHROOT_BASE \
+            -- \
+            --api-sock run/firecracker.socket \
+            > /tmp/jailer-serial.log 2>&1 &
+          JAILER_PID=$!
+          sleep 2
+
+          JAILED_SOCK=$ROOT/run/firecracker.socket
+          JAILED_VSOCK=$ROOT/run/agent-vsock.sock
+          echo "Waiting for jailed API socket at $JAILED_SOCK ..."
+          for i in $(seq 1 20); do
+            [ -S "$JAILED_SOCK" ] && break
+            sleep 0.5
+          done
+          sudo ls -la $ROOT/run || true
+
+          # Paths in API requests are relative to the chroot root.
+          sudo curl --unix-socket $JAILED_SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d '{"guest_cid": 3, "uds_path": "run/agent-vsock.sock"}'
+          sudo curl --unix-socket $JAILED_SOCK -X PUT 'http://localhost/snapshot/load' \
+            -H 'Content-Type: application/json' \
+            -d '{"snapshot_path": "snapshot/vmstate", "mem_file_path": "snapshot/mem", "enable_diff_snapshots": false, "resume_vm": true}'
+
+          echo "Jailed VM restored; pinging agent over jailed vsock..."
+          sudo chmod 666 $JAILED_VSOCK 2>/dev/null || true
+          go build -o /tmp/test-agent ./cmd/test-agent/
+          sudo timeout 60 /tmp/test-agent "$JAILED_VSOCK" || {
+            echo "=== FAILURE: jailer serial log ==="
+            sudo cat /tmp/jailer-serial.log || true
+            exit 1
+          }
+
+          sudo kill $JAILER_PID 2>/dev/null || true
+          echo "================================"
+          echo "  Jailer-boot proof passed"
+          echo "================================"
