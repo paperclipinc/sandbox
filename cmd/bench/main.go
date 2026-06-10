@@ -52,7 +52,7 @@ func parseConfig(args []string) (config, error) {
 	var cfg config
 	fs.StringVar(&cfg.mode, "mode", modeForkExec, "benchmark mode: fork-exec|exec-rt")
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
-	fs.IntVar(&cfg.warmup, "warmup", 5, "warmup iterations (discarded)")
+	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
 	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/agent-run", "data directory holding template snapshots")
 	fs.StringVar(&cfg.firecracker, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
@@ -139,7 +139,7 @@ func benchForkExec(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	// snapshot-load costs that should not skew the measured samples.
 	for i := 0; i < cfg.warmup; i++ {
 		id := fmt.Sprintf("bench-warm-%d", i)
-		if err := oneForkExec(engine, cfg.template, id); err != nil {
+		if _, err := oneForkExec(engine, cfg.template, id); err != nil {
 			return benchstat.Result{}, fmt.Errorf("warmup iteration %d: %w", i, err)
 		}
 	}
@@ -147,35 +147,52 @@ func benchForkExec(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	samples := make([]time.Duration, 0, cfg.iterations)
 	for i := 0; i < cfg.iterations; i++ {
 		id := fmt.Sprintf("bench-fe-%d", i)
-		t0 := time.Now()
-		if err := oneForkExec(engine, cfg.template, id); err != nil {
+		elapsed, err := oneForkExec(engine, cfg.template, id)
+		if err != nil {
 			return benchstat.Result{}, fmt.Errorf("iteration %d: %w", i, err)
 		}
-		samples = append(samples, time.Since(t0))
+		samples = append(samples, elapsed)
 	}
 
 	return benchstat.Result{Name: "fork_to_first_exec", Unit: "ms", Summary: benchstat.Summarize(samples)}, nil
 }
 
 // oneForkExec forks one sandbox, execs a trivial command over its vsock, and
-// terminates it. The timer in the caller spans this whole call.
-func oneForkExec(engine *fork.Engine, template, sandboxID string) error {
+// terminates it, returning the measured fork-to-first-exec elapsed time.
+//
+// Measurement boundary (do not regress): the clock starts immediately before
+// Fork and stops the instant the first exec result is in. Teardown (client
+// close and engine.Terminate, which SIGKILLs Firecracker, waits on the
+// process, and removes the sandbox/jailer chroot) runs AFTER the elapsed value
+// is captured and is therefore NOT counted in the returned duration. The
+// directive is fork -> first successful exec, not fork -> teardown.
+func oneForkExec(engine *fork.Engine, template, sandboxID string) (time.Duration, error) {
+	t0 := time.Now()
 	res, err := engine.Fork(template, sandboxID, fork.ForkOpts{})
 	if err != nil {
-		return fmt.Errorf("fork: %w", err)
+		return 0, fmt.Errorf("fork: %w", err)
 	}
-	defer func() { _ = engine.Terminate(sandboxID) }()
+	// From here every path must tear the sandbox down so a failed iteration
+	// does not leak a VM. cleanup is invoked explicitly (never deferred on the
+	// success path) so that it runs only AFTER elapsed is computed.
+	cleanup := func() { _ = engine.Terminate(sandboxID) }
 
 	client, err := connectWithRetry(res.VsockPath)
 	if err != nil {
-		return err
+		cleanup()
+		return 0, fmt.Errorf("connect: %w", err)
 	}
-	defer client.Close()
 
 	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		return fmt.Errorf("exec: %w", err)
+		client.Close()
+		cleanup()
+		return 0, fmt.Errorf("exec: %w", err)
 	}
-	return nil
+
+	elapsed := time.Since(t0) // clock stops here, before any teardown
+	client.Close()
+	cleanup() // teardown is NOT part of elapsed
+	return elapsed, nil
 }
 
 // benchExecRT forks one sandbox, warms it, then measures M trivial exec
@@ -194,9 +211,15 @@ func benchExecRT(engine *fork.Engine, cfg config) (benchstat.Result, error) {
 	}
 	defer client.Close()
 
-	// Warm the connection and the guest exec path with one discarded exec.
+	// Connection establishment: one mandatory discarded exec that pays the
+	// first-exec costs (guest exec path cold start, any lazy connection
+	// setup) which must happen once before the agent can serve execs at all.
+	// This is distinct from and always runs in addition to the --warmup execs
+	// below; it is not counted by --warmup. With --warmup=0 the agent still
+	// gets this single connection-establishing exec, but zero discretionary
+	// warmup iterations on top of it.
 	if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {
-		return benchstat.Result{}, fmt.Errorf("warmup exec: %w", err)
+		return benchstat.Result{}, fmt.Errorf("connection-establishment exec: %w", err)
 	}
 	for i := 0; i < cfg.warmup; i++ {
 		if _, err := client.Exec("/bin/true", "/", nil, 10); err != nil {

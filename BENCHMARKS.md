@@ -19,7 +19,10 @@ Two modes:
   of a fork to the first successful exec result returned through the guest
   agent. Each iteration forks a fresh sandbox from the template snapshot,
   connects to the fork's Firecracker vsock UDS, execs a trivial command, and
-  terminates the sandbox. This is the cold-claim-shaped number: snapshot restore
+  terminates the sandbox. The clock stops the instant the first exec result is
+  in; teardown (SIGKILL of Firecracker, process wait, and removal of the
+  sandbox/jailer chroot) runs after the timer has stopped and is excluded from
+  the measured duration. This is the cold-claim-shaped number: snapshot restore
   plus the time for the guest agent to service the first exec.
 - **`exec-rt`** (`exec_round_trip`): forks one sandbox once, warms the
   connection and the guest exec path, then measures a stream of trivial exec
