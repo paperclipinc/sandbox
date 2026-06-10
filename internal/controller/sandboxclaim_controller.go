@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -25,6 +26,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	var claim v1alpha1.SandboxClaim
 	if err := r.Get(ctx, req.NamespacedName, &claim); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// A claim under deletion: reap its backing VM via the finalizer before the
+	// API object is allowed to disappear.
+	if !claim.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, &claim)
 	}
 
 	// Already assigned; nothing to do
@@ -54,6 +61,15 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Name:      pool.Spec.TemplateRef.Name,
 	}, &template); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Add the terminate finalizer before the claim acquires a backing VM, so
+	// no Ready claim can ever be deleted without forkd reaping its sandbox.
+	// This is a metadata Update, distinct from the status writes below.
+	if controllerutil.AddFinalizer(&claim, FinalizerTerminate) {
+		if err := r.Update(ctx, &claim); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Mark as restoring
@@ -163,6 +179,33 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		"forkTime", fmt.Sprintf("%.2fms", result.ForkTimeMs),
 	)
 
+	return ctrl.Result{}, nil
+}
+
+// reconcileDelete reaps the claim's backing VM via forkd Terminate, then
+// removes the finalizer so the API object can be garbage collected. A claim
+// that never acquired a sandbox (no Node or SandboxID) skips straight to
+// finalizer removal. terminateOnNode treats a NotFound sandbox and a
+// vanished node as already-terminated, so a node that left the registry never
+// hangs deletion.
+func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(claim, FinalizerTerminate) {
+		return ctrl.Result{}, nil
+	}
+
+	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
+		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
+			logger.Error(err, "terminate backing sandbox on delete", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
+			return ctrl.Result{}, err
+		}
+	}
+
+	controllerutil.RemoveFinalizer(claim, FinalizerTerminate)
+	if err := r.Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

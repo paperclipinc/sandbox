@@ -20,6 +20,14 @@ import (
 // MockEngine with the given templates, registers it in the registry, and
 // returns a stop function.
 func StartFakeForkdNode(registry *NodeRegistry, nodeName string, templates ...string) (stop func(), err error) {
+	stop, _, err = startFakeForkdNode(registry, nodeName, nil, nil, templates...)
+	return stop, err
+}
+
+// StartFakeForkdNodeRecording is StartFakeForkdNode that also returns the
+// backing MockEngine, so tests can read engine.TerminatedIDs() to assert a
+// VM was reaped via forkd Terminate.
+func StartFakeForkdNodeRecording(registry *NodeRegistry, nodeName string, templates ...string) (stop func(), engine *fork.MockEngine, err error) {
 	return startFakeForkdNode(registry, nodeName, nil, nil, templates...)
 }
 
@@ -27,20 +35,21 @@ func StartFakeForkdNode(registry *NodeRegistry, nodeName string, templates ...st
 // is terminated by serverTLS and the registered NodeInfo carries clientTLS,
 // so only dials to THIS node use TLS; other registered fakes stay insecure.
 func StartFakeForkdNodeTLS(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, templates ...string) (stop func(), err error) {
-	return startFakeForkdNode(registry, nodeName, serverTLS, clientTLS, templates...)
+	stop, _, err = startFakeForkdNode(registry, nodeName, serverTLS, clientTLS, templates...)
+	return stop, err
 }
 
-func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, templates ...string) (stop func(), err error) {
-	engine := fork.NewMockEngine()
+func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, templates ...string) (stop func(), engine *fork.MockEngine, err error) {
+	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
 		if err := engine.CreateTemplate(tmpl, tmpl, 0); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	dir, err := os.MkdirTemp("", "fake-forkd-*")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sandboxAPI := daemon.NewSandboxAPI(dir)
 	srv := daemon.NewServer(engine, sandboxAPI)
@@ -48,7 +57,7 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		os.RemoveAll(dir)
-		return nil, err
+		return nil, nil, err
 	}
 	var opts []grpc.ServerOption
 	if serverTLS != nil {
@@ -76,5 +85,5 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 		httpSrv.Close()
 		os.RemoveAll(dir)
 		registry.Unregister(nodeName)
-	}, nil
+	}, engine, nil
 }

@@ -18,6 +18,9 @@ type MockEngine struct {
 	ForkDelay time.Duration
 	// PausedSources records source sandbox IDs that were "paused" during ForkRunning.
 	PausedSources []string
+	// terminated records every sandbox ID passed to Terminate, in call order,
+	// so tests can assert a VM was reaped even after it leaves the live map.
+	terminated []string
 	// VsockDir overrides the root directory reported in ForkResult.VsockPath
 	// (defaults to /tmp/agent-run-mock). Tests point it at a temp dir so a
 	// fake agent can listen on the exact path the engine reports.
@@ -100,11 +103,22 @@ func (e *MockEngine) Terminate(sandboxID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	e.terminated = append(e.terminated, sandboxID)
 	if _, ok := e.sandboxes[sandboxID]; !ok {
 		return fmt.Errorf("sandbox %s not found", sandboxID)
 	}
 	delete(e.sandboxes, sandboxID)
 	return nil
+}
+
+// TerminatedIDs returns the sandbox IDs passed to Terminate, in call order.
+// Tests use it to assert a VM was reaped.
+func (e *MockEngine) TerminatedIDs() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]string, len(e.terminated))
+	copy(out, e.terminated)
+	return out
 }
 
 // ListSandboxes returns a record for every sandbox this mock engine
