@@ -88,11 +88,11 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		fork.Status.Forks = append(fork.Status.Forks, v1alpha1.ForkInfo{
-			Name:       forkID,
-			SandboxID:  result.SandboxID,
-			Endpoint:   result.Endpoint,
-			Node:       node.Name,
-			Phase:      v1alpha1.SandboxReady,
+			Name:           forkID,
+			SandboxID:      result.SandboxID,
+			Endpoint:       result.Endpoint,
+			Node:           node.Name,
+			Phase:          v1alpha1.SandboxReady,
 			ForkTimeMicros: int64(result.ForkTimeMs * 1000),
 		})
 		fork.Status.ReadyForks++
@@ -146,10 +146,10 @@ func (r *SandboxForkReconciler) prepareVolumes(ctx context.Context, templateVols
 }
 
 type forkRunningResult struct {
-	SandboxID      string
-	Endpoint       string
-	ForkTimeMs     float64
-	CheckpointMs   float64
+	SandboxID    string
+	Endpoint     string
+	ForkTimeMs   float64
+	CheckpointMs float64
 }
 
 func (r *SandboxForkReconciler) SetupWithManager(mgr ctrl.Manager) error {

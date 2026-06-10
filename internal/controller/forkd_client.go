@@ -23,7 +23,7 @@ func isNotFound(err error) bool {
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
 // The returned endpoint is the node's HTTP sandbox API — what clients (SDKs)
 // actually talk to.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env map[string]string) (*forkResult, error) {
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string) (*forkResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -32,6 +32,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		SnapshotId: snapshotID,
 		SandboxId:  sandboxID,
 		Env:        toEnvVars(env),
+		Secrets:    toSecretVars(secrets),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("forkd fork on %s: %w", node.Name, err)
@@ -78,6 +79,14 @@ func toEnvVars(m map[string]string) []*forkdpb.EnvVar {
 	vars := make([]*forkdpb.EnvVar, 0, len(m))
 	for k, v := range m {
 		vars = append(vars, &forkdpb.EnvVar{Key: k, Value: v})
+	}
+	return vars
+}
+
+func toSecretVars(m map[string]string) []*forkdpb.SecretVar {
+	vars := make([]*forkdpb.SecretVar, 0, len(m))
+	for k, v := range m {
+		vars = append(vars, &forkdpb.SecretVar{Key: k, Value: v})
 	}
 	return vars
 }

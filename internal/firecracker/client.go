@@ -153,10 +153,10 @@ func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
 
 func (c *Client) LoadSnapshot(memPath, snapshotPath string, resumeVM bool) error {
 	return c.put("/snapshot/load", SnapshotLoad{
-		SnapshotPath:  snapshotPath,
-		MemFilePath:   memPath,
+		SnapshotPath:        snapshotPath,
+		MemFilePath:         memPath,
 		EnableDiffSnapshots: false,
-		ResumeVM:      resumeVM,
+		ResumeVM:            resumeVM,
 	})
 }
 

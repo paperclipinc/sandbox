@@ -49,7 +49,7 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 		SnapshotID:   snapshotID,
 		Endpoint:     endpoint,
 		CreatedAt:    time.Now(),
-		MemoryUnique: 265 * 1024,      // ~265KB per fork
+		MemoryUnique: 265 * 1024,        // ~265KB per fork
 		MemoryShared: 256 * 1024 * 1024, // ~256MB shared base
 	}
 

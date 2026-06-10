@@ -16,7 +16,11 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
   measured-or-target
 - ✅ controller ↔ forkd gRPC (claim/fork actually produce sandboxes;
   was `not implemented` stubs)
-- ✅ SandboxPool snapshot accounting and creation (was a no-op)
+- ✅ SandboxPool snapshot accounting and creation (was a no-op) — works
+  against the mock engine; the real engine needs an image→rootfs build
+  pipeline (template.Spec.Image is currently passed as a rootfs file path)
+- ⬜ Image→rootfs build pipeline so pool templates can be built from OCI
+  images on real nodes (guest/rootfs/build.sh is offline tooling today)
 - ✅ forkd node discovery + capacity heartbeats (was a TODO)
 - ✅ Truthful claim endpoints (point at forkd's sandbox API, not a
   fabricated address)

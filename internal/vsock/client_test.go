@@ -45,9 +45,9 @@ func mockAgent(t *testing.T, sockPath string) (net.Listener, func()) {
 						resp = Response{OK: true, Ping: &PingResponse{Uptime: time.Since(startTime).Seconds()}}
 					case TypeExec:
 						resp = Response{OK: true, Exec: &ExecResponse{
-							ExitCode: 0,
-							Stdout:   fmt.Sprintf("executed: %s\n", req.Exec.Command),
-							Stderr:   "",
+							ExitCode:   0,
+							Stdout:     fmt.Sprintf("executed: %s\n", req.Exec.Command),
+							Stderr:     "",
 							ExecTimeMs: 1.0,
 						}}
 					case TypeReadFile:

@@ -6,23 +6,23 @@ package vsock
 type RequestType string
 
 const (
-	TypeExec     RequestType = "exec"
-	TypeReadFile RequestType = "read_file"
+	TypeExec      RequestType = "exec"
+	TypeReadFile  RequestType = "read_file"
 	TypeWriteFile RequestType = "write_file"
-	TypeListDir  RequestType = "list_dir"
-	TypeMkdir    RequestType = "mkdir"
-	TypeRemove   RequestType = "remove"
-	TypePing     RequestType = "ping"
+	TypeListDir   RequestType = "list_dir"
+	TypeMkdir     RequestType = "mkdir"
+	TypeRemove    RequestType = "remove"
+	TypePing      RequestType = "ping"
 )
 
 type Request struct {
-	Type       RequestType       `json:"type"`
-	Exec       *ExecRequest      `json:"exec,omitempty"`
-	ReadFile   *ReadFileRequest  `json:"read_file,omitempty"`
-	WriteFile  *WriteFileRequest `json:"write_file,omitempty"`
-	ListDir    *ListDirRequest   `json:"list_dir,omitempty"`
-	Mkdir      *MkdirRequest     `json:"mkdir,omitempty"`
-	Remove     *RemoveRequest    `json:"remove,omitempty"`
+	Type      RequestType       `json:"type"`
+	Exec      *ExecRequest      `json:"exec,omitempty"`
+	ReadFile  *ReadFileRequest  `json:"read_file,omitempty"`
+	WriteFile *WriteFileRequest `json:"write_file,omitempty"`
+	ListDir   *ListDirRequest   `json:"list_dir,omitempty"`
+	Mkdir     *MkdirRequest     `json:"mkdir,omitempty"`
+	Remove    *RemoveRequest    `json:"remove,omitempty"`
 }
 
 type ExecRequest struct {

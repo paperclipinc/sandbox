@@ -41,7 +41,7 @@ spec:
             - --data-dir=/var/lib/agent-run
             - --firecracker=/usr/local/bin/firecracker
             - --kernel=/var/lib/agent-run/vmlinux
-            - --metrics=:9091
+            - --http=:9091
           ports:
             - name: grpc
               containerPort: 9090

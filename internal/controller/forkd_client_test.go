@@ -48,7 +48,7 @@ func TestForkOnNode(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"})
+	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"})
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestForkRunningOnNode(t *testing.T) {
 	}
 
 	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil); err != nil {
+	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -96,7 +96,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil); err == nil {
+	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
 		t.Fatalf("expected NotFound through the wrap, got: %v", err)
