@@ -99,6 +99,18 @@ func (e *MockEngine) CreateTemplate(id string, rootfsPath string, initWaitSecs i
 	return nil
 }
 
+// InjectSandbox seeds a live sandbox directly into the engine with a chosen
+// created-at, bypassing Fork. Tests use it to plant an orphan VM (no backing
+// claim) with a controlled uptime so the GC orphan sweep can be exercised.
+func (e *MockEngine) InjectSandbox(id string, createdAt time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sandboxes[id] = &Sandbox{
+		ID:        id,
+		CreatedAt: createdAt,
+	}
+}
+
 func (e *MockEngine) Terminate(sandboxID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
