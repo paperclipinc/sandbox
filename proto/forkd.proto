@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package forkd;
 
-option go_package = "github.com/paperclipinc/sandbox/proto/forkd";
+option go_package = "github.com/paperclipinc/sandbox/proto/forkd;forkdpb";
 
 service ForkDaemon {
   // Template management

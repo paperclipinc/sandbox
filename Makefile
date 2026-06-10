@@ -31,7 +31,10 @@ manifests:
 	controller-gen crd paths="./api/..." output:crd:artifacts:config=deploy/crds
 
 proto:
-	protoc --go_out=. --go-grpc_out=. proto/forkd.proto
+	protoc \
+	  --go_out=. --go_opt=module=github.com/paperclipinc/sandbox \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/sandbox \
+	  proto/forkd.proto
 
 docker-build:
 	docker build -f Dockerfile.controller -t $(IMG_CONTROLLER) .
