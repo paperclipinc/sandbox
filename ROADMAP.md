@@ -6,6 +6,68 @@ or a README describing a system that does not exist, is worth nothing.
 
 Status legend: ✅ done · 🔨 in progress · ⬜ not started
 
+## Strategic workstreams (standing directives)
+
+Four workstreams extend this roadmap (full prompts live with the project
+owner; summaries here so sequencing is explicit). All inherit the core
+operating principles, and **none ships to production tenants before the
+fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
+
+- **W1 — Husk pods (pod-native execution).** Every sandbox VM moves inside a
+  pod's cgroup/netns: pools pre-schedule minimal "husk" pods running a dormant
+  VMM stub; claim = activate (mmap snapshot + KVM restore inside the pod),
+  /dev/kvm via device plugin instead of `privileged: true`. Gains real
+  scheduler visibility, ResourceQuota/LimitRange/NetworkPolicy/PSA-restricted
+  conformance (each acceptance criterion gets a test), and improves the
+  forkd blast radius in the threat model. Load-bearing claim to verify
+  first: CoW page-cache sharing across pod memcg boundaries
+  (Pss/Rss + cgroup-v2 accounting test). Deliverable: `docs/husk-pods.md` +
+  device plugin + stub + migrated controllers + before/after benchmarks.
+  Raw-forkd mode stays behind a flag.
+- **W2 — agents.x-k8s.io conformance facade.** `cmd/facade` implements the
+  SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
+  their e2e suite into CI, document justified exceptions in
+  `docs/facade-conformance.md`, never silently diverge. Depends on W1 (their
+  API implies pod semantics). Includes the naming-collision ADR
+  (our SandboxTemplate/SandboxClaim vs theirs — rename to
+  ForkTemplate/ForkClaim/ForkPool is the preferred candidate; decide before
+  1.0).
+- **W3 — Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
+  implementing the upstream sandbox-provider contract against our claims
+  (adapter installs baked at pool build; lease → claim TTL; callback-bridge
+  egress as claim-time allowlist; claim-time secrets), paperclip-operator
+  `backend: microvm`, shared operator core extracted as a library, OpenClaw
+  sandbox driver. Hard-gated on §1+§2 (hostile inputs + real credentials in
+  forked VMs). Deferred non-goal, tracked: whole-instance microVM hosting
+  ("scale-to-snapshot") — waits on durable per-VM volumes, stable inbound
+  endpoints across suspend/resume, balloon reclaim, multi-process guests,
+  live-snapshot secrets.
+- **W4 — Workspace & state.** A `Workspace` CRD: durable, versioned,
+  forkable agent state independent of any sandbox (PVC:Pod analogy);
+  hydrate/dehydrate via the SAME content-addressed transfer layer as
+  snapshot distribution (§3 — one pipeline, two artifact types); revision
+  DAG lineage (`fromClaim:`/`fromWorkspaceRevision:`); outputs extraction +
+  git rendezvous for fork-and-merge (git is the merge layer — we never do
+  filesystem merge); single-writer-per-revision doctrine; memory-snapshot
+  pairing is principal-bound per the secrets policy. Plus: revision change
+  feed for external indexers (no embedded vector DB), per-node toolchain
+  cache via Share policy, flagship reversible sleep-consolidation demo.
+  Depends on §3; may land as alpha behind a flag with eager-fetch fallback.
+
+**Compliance & observability addendum (amends W1/W4):** permitted claim
+language is limited to what a CI job proves (CNCF-conformant clusters, PSA
+`restricted` with exactly one documented /dev/kvm exception, standard
+quota/policy/eviction semantics, vendored conformance suite) — never "fully
+Kubernetes conformant". Residuals ship as ADRs in `docs/adr/` (kvm device
+exception; the guest boundary; Workspace-not-CSI; forkd control channel
+mirrored into Kubernetes Events with a bounded-delay CI test). Observability
+acceptance: Hubble-visible per-sandbox flows, OpenCost attribution, a guest
+telemetry bridge + `kubectl sandbox` plugin (`top`/`ps`/`logs`/`exec`), and
+one trace ID from orchestrator request through exec to workspace revision.
+Family maturity bar before 1.0: Grafana dashboards, PrometheusRule alerts
+with runbooks, `docs/conditions.md` reason-code catalogue, shipped with the
+Helm chart.
+
 ## 0. Make the claimed system real (in progress)
 
 The README previously described an end-to-end system; parts of it were stubs.
