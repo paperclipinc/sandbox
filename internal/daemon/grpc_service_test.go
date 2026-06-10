@@ -110,6 +110,61 @@ func TestGRPCForkUnknownSnapshot(t *testing.T) {
 	}
 }
 
+// TestGRPCRejectsMalformedIDs covers C1: every handler whose id reaches a
+// filesystem path must reject traversal-capable ids with InvalidArgument
+// before the engine (and any host filesystem operation) sees them.
+func TestGRPCRejectsMalformedIDs(t *testing.T) {
+	client, engine := newTestClient(t)
+	ctx := context.Background()
+	bad := "../escape"
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"Fork sandbox id", func() error {
+			_, err := client.Fork(ctx, &forkdpb.ForkRequest{SnapshotId: "py", SandboxId: bad})
+			return err
+		}},
+		{"Fork snapshot id", func() error {
+			_, err := client.Fork(ctx, &forkdpb.ForkRequest{SnapshotId: bad, SandboxId: "sb-1"})
+			return err
+		}},
+		{"ForkRunning source id", func() error {
+			_, err := client.ForkRunning(ctx, &forkdpb.ForkRunningRequest{SourceSandboxId: bad, NewSandboxId: "sb-2"})
+			return err
+		}},
+		{"ForkRunning new id", func() error {
+			_, err := client.ForkRunning(ctx, &forkdpb.ForkRunningRequest{SourceSandboxId: "sb-1", NewSandboxId: bad})
+			return err
+		}},
+		{"Terminate sandbox id", func() error {
+			_, err := client.Terminate(ctx, &forkdpb.TerminateRequest{SandboxId: bad})
+			return err
+		}},
+		{"CreateTemplate template id", func() error {
+			_, err := client.CreateTemplate(ctx, &forkdpb.CreateTemplateRequest{TemplateId: bad, Image: "python:3.12-slim"})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("code = %v (err %v), want InvalidArgument", status.Code(err), err)
+			}
+		})
+	}
+
+	// Nothing may have reached the engine.
+	if got := engine.GetCapacity().ActiveSandboxes; got != 0 {
+		t.Fatalf("active sandboxes = %d, want 0; a malformed id reached the engine", got)
+	}
+	if got := len(engine.GetCapacity().TemplateIDs); got != 0 {
+		t.Fatalf("templates = %d, want 0; a malformed template id reached the engine", got)
+	}
+}
+
 func TestGRPCUnimplementedRPCsSayWhere(t *testing.T) {
 	client, _ := newTestClient(t)
 	_, err := client.Exec(context.Background(), &forkdpb.ExecRequest{SandboxId: "sb", Command: "true"})

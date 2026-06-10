@@ -19,6 +19,9 @@ type grpcService struct {
 }
 
 func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*forkdpb.ForkResponse, error) {
+	if err := validateIDs(req.SnapshotId, req.SandboxId); err != nil {
+		return nil, err
+	}
 	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.ApiToken)
 	if err != nil {
 		return nil, grpcError(err)
@@ -33,6 +36,9 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 }
 
 func (g *grpcService) ForkRunning(ctx context.Context, req *forkdpb.ForkRunningRequest) (*forkdpb.ForkRunningResponse, error) {
+	if err := validateIDs(req.SourceSandboxId, req.NewSandboxId); err != nil {
+		return nil, err
+	}
 	result, err := g.srv.ForkRunning(ctx, req.SourceSandboxId, req.NewSandboxId, req.PauseSource, req.ApiToken)
 	if err != nil {
 		return nil, grpcError(err)
@@ -45,6 +51,9 @@ func (g *grpcService) ForkRunning(ctx context.Context, req *forkdpb.ForkRunningR
 }
 
 func (g *grpcService) Terminate(ctx context.Context, req *forkdpb.TerminateRequest) (*forkdpb.TerminateResponse, error) {
+	if err := validateIDs(req.SandboxId); err != nil {
+		return nil, err
+	}
 	if err := g.srv.Terminate(ctx, req.SandboxId); err != nil {
 		return nil, grpcError(err)
 	}
@@ -66,6 +75,9 @@ func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityReq
 }
 
 func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTemplateRequest) (*forkdpb.CreateTemplateResponse, error) {
+	if err := validateIDs(req.TemplateId); err != nil {
+		return nil, err
+	}
 	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, 0); err != nil {
 		return nil, grpcError(err)
 	}
@@ -90,6 +102,19 @@ func secretMap(vars []*forkdpb.SecretVar) map[string]string {
 		m[v.Key] = v.Value
 	}
 	return m
+}
+
+// validateIDs runs validateSandboxID over every caller-supplied id of a
+// request and maps the first failure to InvalidArgument. Ids flow into
+// host filesystem paths (workspaces, snapshots, jailer chroots), so they
+// are rejected here before any engine code runs (C1).
+func validateIDs(ids ...string) error {
+	for _, id := range ids {
+		if err := validateSandboxID(id); err != nil {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	return nil
 }
 
 // grpcError maps engine errors to gRPC status codes.

@@ -6,25 +6,41 @@ package vsock
 type RequestType string
 
 const (
-	TypeExec      RequestType = "exec"
-	TypeReadFile  RequestType = "read_file"
-	TypeWriteFile RequestType = "write_file"
-	TypeListDir   RequestType = "list_dir"
-	TypeMkdir     RequestType = "mkdir"
-	TypeRemove    RequestType = "remove"
-	TypePing      RequestType = "ping"
-	TypeConfigure RequestType = "configure"
+	TypeExec         RequestType = "exec"
+	TypeReadFile     RequestType = "read_file"
+	TypeWriteFile    RequestType = "write_file"
+	TypeListDir      RequestType = "list_dir"
+	TypeMkdir        RequestType = "mkdir"
+	TypeRemove       RequestType = "remove"
+	TypePing         RequestType = "ping"
+	TypeConfigure    RequestType = "configure"
+	TypeNotifyForked RequestType = "notify_forked"
 )
 
 type Request struct {
-	Type      RequestType       `json:"type"`
-	Exec      *ExecRequest      `json:"exec,omitempty"`
-	ReadFile  *ReadFileRequest  `json:"read_file,omitempty"`
-	WriteFile *WriteFileRequest `json:"write_file,omitempty"`
-	ListDir   *ListDirRequest   `json:"list_dir,omitempty"`
-	Mkdir     *MkdirRequest     `json:"mkdir,omitempty"`
-	Remove    *RemoveRequest    `json:"remove,omitempty"`
-	Configure *ConfigureRequest `json:"configure,omitempty"`
+	Type         RequestType          `json:"type"`
+	Exec         *ExecRequest         `json:"exec,omitempty"`
+	ReadFile     *ReadFileRequest     `json:"read_file,omitempty"`
+	WriteFile    *WriteFileRequest    `json:"write_file,omitempty"`
+	ListDir      *ListDirRequest      `json:"list_dir,omitempty"`
+	Mkdir        *MkdirRequest        `json:"mkdir,omitempty"`
+	Remove       *RemoveRequest       `json:"remove,omitempty"`
+	Configure    *ConfigureRequest    `json:"configure,omitempty"`
+	NotifyForked *NotifyForkedRequest `json:"notify_forked,omitempty"`
+}
+
+// NotifyForkedRequest tells the guest a restore just happened so it can repair
+// fork-shared state: reseed the kernel CRNG with fresh host entropy, step the
+// wall clock back to host time, and signal userspace runtimes to reseed their
+// own PRNGs. The host sends fresh values on every fork.
+//
+// Entropy and HostWallClockNanos are sensitive: Entropy is raw CRNG seed
+// material and the clock can leak host timing. Neither value is ever logged by
+// host or guest; only counts and applied-step magnitudes are logged.
+type NotifyForkedRequest struct {
+	Generation         uint64 `json:"generation"`
+	HostWallClockNanos int64  `json:"host_wall_clock_nanos"`
+	Entropy            []byte `json:"entropy"`
 }
 
 // ConfigureRequest delivers claim-time environment and secrets to the guest
@@ -65,12 +81,25 @@ type RemoveRequest struct {
 }
 
 type Response struct {
-	OK       bool              `json:"ok"`
-	Error    string            `json:"error,omitempty"`
-	Exec     *ExecResponse     `json:"exec,omitempty"`
-	ReadFile *ReadFileResponse `json:"read_file,omitempty"`
-	ListDir  *ListDirResponse  `json:"list_dir,omitempty"`
-	Ping     *PingResponse     `json:"ping,omitempty"`
+	OK           bool                  `json:"ok"`
+	Error        string                `json:"error,omitempty"`
+	Exec         *ExecResponse         `json:"exec,omitempty"`
+	ReadFile     *ReadFileResponse     `json:"read_file,omitempty"`
+	ListDir      *ListDirResponse      `json:"list_dir,omitempty"`
+	Ping         *PingResponse         `json:"ping,omitempty"`
+	NotifyForked *NotifyForkedResponse `json:"notify_forked,omitempty"`
+}
+
+// NotifyForkedResponse reports what the guest did in response to a fork
+// notification, for host-side observability. AppliedClockStepNanos is the
+// signed adjustment applied to CLOCK_REALTIME (0 when drift was within
+// tolerance), ReseededRNG is true when at least one entropy-injection path
+// succeeded, and SignaledProcesses counts userspace processes that received
+// the reseed signal.
+type NotifyForkedResponse struct {
+	AppliedClockStepNanos int64 `json:"applied_clock_step_nanos"`
+	ReseededRNG           bool  `json:"reseeded_rng"`
+	SignaledProcesses     int   `json:"signaled_processes"`
 }
 
 type ExecResponse struct {

@@ -18,6 +18,7 @@ type Engine struct {
 	dataDir        string
 	templateMgr    *firecracker.TemplateManager
 	firecrackerBin string
+	jailer         firecracker.JailerConfig
 	sandboxes      map[string]*Sandbox
 	nextPort       int32
 }
@@ -45,6 +46,10 @@ type Sandbox struct {
 	fcClient     *firecracker.Client
 	agentClient  *vsock.Client
 	VsockPath    string
+	// rootfsPath is the host path of the drive backing file embedded in
+	// the snapshot this sandbox was restored from; live-forks inherit it
+	// so the jailer chroot of every descendant can link it in.
+	rootfsPath string
 }
 
 type ForkResult struct {
@@ -56,15 +61,30 @@ type ForkResult struct {
 	VsockPath    string
 }
 
-func NewEngine(dataDir, firecrackerBin, kernelPath string) (*Engine, error) {
+// NewEngine builds the real KVM-backed engine. A zero jailer config
+// launches Firecracker directly (development only; flagged in the threat
+// model); with JailerBin set every VM runs through the jailer with a
+// dedicated uid/gid from the configured range and a per-VM chroot.
+func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.JailerConfig) (*Engine, error) {
 	if err := validateKVM(); err != nil {
 		return nil, fmt.Errorf("KVM not available: %w", err)
+	}
+
+	if jailer.Enabled() {
+		jailer.DataDir = dataDir
+		if jailer.UIDRange[0] == 0 || jailer.UIDRange[0] > jailer.UIDRange[1] {
+			return nil, fmt.Errorf("jailer uid range %d-%d invalid: low must be nonzero and not above high", jailer.UIDRange[0], jailer.UIDRange[1])
+		}
+		if jailer.Allocator == nil {
+			jailer.Allocator = firecracker.NewUIDAllocator(jailer.UIDRange[0], jailer.UIDRange[1])
+		}
 	}
 
 	return &Engine{
 		dataDir:        dataDir,
 		firecrackerBin: firecrackerBin,
-		templateMgr:    firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir),
+		jailer:         jailer,
+		templateMgr:    firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer),
 		sandboxes:      make(map[string]*Sandbox),
 		nextPort:       10000,
 	}, nil
@@ -87,6 +107,19 @@ func validateKVM() error {
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
 // This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
+	// The drive path embedded in the snapshot points at the template's
+	// rootfs; in jailer mode that file must be linked into the new VM's
+	// chroot at the same path for the restore to resolve it.
+	rootfsPath := filepath.Join(e.dataDir, "templates", snapshotID, "rootfs.ext4")
+	if _, err := os.Stat(rootfsPath); err != nil {
+		rootfsPath = ""
+	}
+	return e.fork(snapshotID, sandboxID, rootfsPath, opts)
+}
+
+// fork is Fork with the backing rootfs path made explicit so ForkRunning
+// can thread the original template rootfs through live-fork checkpoints.
+func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (*ForkResult, error) {
 	start := time.Now()
 
 	snapshotDir := filepath.Join(e.dataDir, "templates", snapshotID, "snapshot")
@@ -107,17 +140,35 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 	// We don't need to mmap it ourselves; just point Firecracker at the
 	// original snapshot file. Each FC process gets its own CoW mapping.
 
+	// In jailer mode the snapshot files and the backing rootfs are
+	// hard-linked into the per-VM chroot before launch; the API paths
+	// below then resolve inside it (mirror layout, see chrootPath).
+	chrootFiles := []string{memFile, vmStateFile}
+	if rootfsPath != "" {
+		chrootFiles = append(chrootFiles, rootfsPath)
+	}
+
 	// Start a new Firecracker process
-	vsockPath := filepath.Join(sandboxDir, "vsock.sock")
 	fcClient, err := firecracker.StartVM(firecracker.VMConfig{
 		ID:             sandboxID,
 		FirecrackerBin: e.firecrackerBin,
 		WorkDir:        sandboxDir,
 		SocketPath:     filepath.Join(sandboxDir, "firecracker.sock"),
+		Jailer:         e.jailer,
+		ChrootFiles:    chrootFiles,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start firecracker: %w", err)
 	}
+	// The template snapshot bakes a RELATIVE vsock uds_path
+	// (firecracker.VsockRelPath); every restored Firecracker process
+	// rebinds that exact string against its own working directory, so two
+	// forks of one snapshot never collide on a single host socket. In raw
+	// direct-exec mode the working directory is this sandbox's WorkDir
+	// (sandboxDir, set as cmd.Dir in StartVM); under the jailer it is the
+	// per-VM chroot root. VsockHostPath resolves the baked relative path
+	// to the absolute host location for whichever mode is active.
+	vsockPath := fcClient.VsockHostPath(firecracker.VsockRelPath)
 
 	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE
 	if err := fcClient.LoadSnapshot(memFile, vmStateFile, true); err != nil {
@@ -142,6 +193,7 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 		CreatedAt:  time.Now(),
 		fcClient:   fcClient,
 		VsockPath:  vsockPath,
+		rootfsPath: rootfsPath,
 	}
 
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
@@ -215,7 +267,10 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 		return nil, fmt.Errorf("symlink checkpoint vmstate: %w", err)
 	}
 
-	return e.Fork(sourceSandboxID+"-live", newSandboxID, ForkOpts{})
+	// Thread the original template rootfs through: the checkpoint's
+	// embedded drive path still points at it, and the new VM's chroot
+	// needs it linked in.
+	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{})
 }
 
 // Terminate kills a sandbox and releases its resources.

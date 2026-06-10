@@ -172,6 +172,12 @@ func handleRequest(req *vsock.Request) vsock.Response {
 		}
 		return handleConfigure(req.Configure)
 
+	case vsock.TypeNotifyForked:
+		if req.NotifyForked == nil {
+			return vsock.Response{OK: false, Error: "notify_forked request is nil"}
+		}
+		return handleNotifyForked(req.NotifyForked)
+
 	default:
 		return vsock.Response{OK: false, Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}
@@ -365,8 +371,8 @@ func (c *vsockConn) Close() error {
 func (c *vsockConn) LocalAddr() net.Addr                { return nil }
 func (c *vsockConn) RemoteAddr() net.Addr               { return nil }
 func (c *vsockConn) SetDeadline(t time.Time) error      { return nil }
-func (c *vsockConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *vsockConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (c *vsockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *vsockConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func (l *vsockListener) Close() error {
 	return unix.Close(l.fd)

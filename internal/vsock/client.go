@@ -125,6 +125,26 @@ func (c *Client) Configure(env, secrets map[string]string) error {
 	return err
 }
 
+// NotifyForked tells the guest agent a restore just happened so it can reseed
+// the kernel CRNG, step the wall clock, and signal userspace runtimes.
+// HostWallClockNanos is stamped at send time so the guest measures drift
+// against the moment of delivery. Entropy is sensitive seed material and is
+// never logged.
+func (c *Client) NotifyForked(generation uint64, entropy []byte) (*NotifyForkedResponse, error) {
+	resp, err := c.send(&Request{
+		Type: TypeNotifyForked,
+		NotifyForked: &NotifyForkedRequest{
+			Generation:         generation,
+			HostWallClockNanos: time.Now().UnixNano(),
+			Entropy:            entropy,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.NotifyForked, nil
+}
+
 func (c *Client) ReadFile(path string) ([]byte, error) {
 	resp, err := c.send(&Request{
 		Type:     TypeReadFile,

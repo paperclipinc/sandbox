@@ -64,7 +64,11 @@ func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 	}
 }
 
-func TestForkEnvOnlyIsBestEffortWhenAgentUnreachable(t *testing.T) {
+// Env delivery is still best-effort, but the agent connection and NotifyForked
+// are not: a real-engine fork whose guest is unreachable cannot reseed its RNG,
+// so it fails closed and is reaped even when only env (no secrets) was
+// requested.
+func TestForkFailsWhenAgentUnreachableEvenEnvOnly(t *testing.T) {
 	engine := &kvmReportingEngine{MockEngine: fork.NewMockEngine()}
 	engine.ForkDelay = 0
 	if err := engine.CreateTemplate("py", "py", 0); err != nil {
@@ -72,13 +76,13 @@ func TestForkEnvOnlyIsBestEffortWhenAgentUnreachable(t *testing.T) {
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
-	result, err := srv.Fork(context.Background(), "py", "sb-env",
+	_, err := srv.Fork(context.Background(), "py", "sb-env",
 		map[string]string{"SESSION": "abc"}, nil, "test-token")
-	if err != nil {
-		t.Fatalf("env-only fork should succeed best-effort: %v", err)
+	if err == nil {
+		t.Fatal("real-engine fork with unreachable guest must fail (cannot reseed RNG)")
 	}
-	if result.SandboxID != "sb-env" {
-		t.Fatalf("got %q", result.SandboxID)
+	if len(engine.terminated) != 1 || engine.terminated[0] != "sb-env" {
+		t.Fatalf("sandbox not reaped: %v", engine.terminated)
 	}
 }
 
@@ -97,8 +101,14 @@ func TestForkMockEngineSkipsDelivery(t *testing.T) {
 }
 
 // startFakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS
-// preamble, then the JSON agent protocol, recording configure payloads.
+// preamble, then the JSON agent protocol, recording configure and
+// notify_forked payloads. If notifyErr is true, the agent errors every
+// notify_forked request so callers can exercise the fail-closed path.
 func startFakeVsockAgent(t *testing.T, sockPath string) *recordedConfig {
+	return startFakeVsockAgentErr(t, sockPath, false)
+}
+
+func startFakeVsockAgentErr(t *testing.T, sockPath string, notifyErr bool) *recordedConfig {
 	t.Helper()
 	rec := &recordedConfig{}
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
@@ -136,6 +146,18 @@ func startFakeVsockAgent(t *testing.T, sockPath string) *recordedConfig {
 						rec.got = req.Configure
 						rec.mu.Unlock()
 					}
+					if req.Type == vsock.TypeNotifyForked {
+						rec.mu.Lock()
+						rec.notifies = append(rec.notifies, req.NotifyForked)
+						rec.mu.Unlock()
+						if notifyErr {
+							resp, _ := json.Marshal(vsock.Response{OK: false, Error: "reseed failed"})
+							if _, err := c.Write(append(resp, '\n')); err != nil {
+								return
+							}
+							continue
+						}
+					}
 					resp, _ := json.Marshal(vsock.Response{OK: true})
 					if _, err := c.Write(append(resp, '\n')); err != nil {
 						return
@@ -148,8 +170,9 @@ func startFakeVsockAgent(t *testing.T, sockPath string) *recordedConfig {
 }
 
 type recordedConfig struct {
-	mu  sync.Mutex
-	got *vsock.ConfigureRequest
+	mu       sync.Mutex
+	got      *vsock.ConfigureRequest
+	notifies []*vsock.NotifyForkedRequest
 }
 
 func TestForkDeliversConfigureToAgent(t *testing.T) {
@@ -181,5 +204,156 @@ func TestForkDeliversConfigureToAgent(t *testing.T) {
 	defer rec.mu.Unlock()
 	if rec.got == nil || rec.got.Env["SESSION"] != "abc" || rec.got.Secrets["API_KEY"] != "v" {
 		t.Fatalf("agent saw %+v", rec.got)
+	}
+}
+
+// shortVsockDir returns a /tmp-rooted dir; unix socket paths must fit in
+// sun_path (~104 bytes on macOS), which t.TempDir() can exceed.
+func shortVsockDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "fcv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func kvmEngineWithTemplate(t *testing.T, dir string) *kvmReportingEngine {
+	t.Helper()
+	mock := fork.NewMockEngine()
+	mock.ForkDelay = 0
+	mock.VsockDir = dir
+	engine := &kvmReportingEngine{MockEngine: mock}
+	if err := engine.CreateTemplate("py", "py", 0); err != nil {
+		t.Fatal(err)
+	}
+	return engine
+}
+
+func isAllZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestForkNotifiesAgentWithFreshEntropy(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-ok", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.Fork(context.Background(), "py", "sb-ok", nil, nil, "test-token"); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.notifies) != 1 {
+		t.Fatalf("expected exactly one notify_forked, got %d", len(rec.notifies))
+	}
+	n := rec.notifies[0]
+	if len(n.Entropy) != 32 {
+		t.Errorf("entropy length = %d, want 32", len(n.Entropy))
+	}
+	if isAllZero(n.Entropy) {
+		t.Error("entropy is all zero")
+	}
+}
+
+func TestForkGenerationIncrementsAcrossForks(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	rec1 := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-1", "vsock.sock"))
+	rec2 := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-2", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.Fork(context.Background(), "py", "sb-1", nil, nil, "t"); err != nil {
+		t.Fatalf("fork 1: %v", err)
+	}
+	if _, err := srv.Fork(context.Background(), "py", "sb-2", nil, nil, "t"); err != nil {
+		t.Fatalf("fork 2: %v", err)
+	}
+
+	rec1.mu.Lock()
+	rec2.mu.Lock()
+	defer rec1.mu.Unlock()
+	defer rec2.mu.Unlock()
+	if len(rec1.notifies) != 1 || len(rec2.notifies) != 1 {
+		t.Fatalf("notifies: sb-1=%d sb-2=%d", len(rec1.notifies), len(rec2.notifies))
+	}
+	if rec1.notifies[0].Generation == rec2.notifies[0].Generation {
+		t.Errorf("generations not distinct: both %d", rec1.notifies[0].Generation)
+	}
+	if rec2.notifies[0].Generation <= rec1.notifies[0].Generation {
+		t.Errorf("generation did not increment: %d then %d",
+			rec1.notifies[0].Generation, rec2.notifies[0].Generation)
+	}
+}
+
+func TestForkFailsWhenNotifyForkedErrors(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	startFakeVsockAgentErr(t, filepath.Join(dir, "sandboxes", "sb-bad", "vsock.sock"), true)
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	_, err := srv.Fork(context.Background(), "py", "sb-bad", nil, nil, "test-token")
+	if err == nil {
+		t.Fatal("fork must fail when the guest cannot reseed RNG state")
+	}
+	if len(engine.terminated) != 1 || engine.terminated[0] != "sb-bad" {
+		t.Fatalf("sandbox not reaped after failed notify: %v", engine.terminated)
+	}
+	if got := engine.GetCapacity().ActiveSandboxes; got != 0 {
+		t.Fatalf("active = %d, want 0", got)
+	}
+}
+
+func TestForkMockEngineSendsNoNotify(t *testing.T) {
+	dir := shortVsockDir(t)
+	mock := fork.NewMockEngine() // KVMAvailable=false
+	mock.ForkDelay = 0
+	mock.VsockDir = dir
+	if err := mock.CreateTemplate("py", "py", 0); err != nil {
+		t.Fatal(err)
+	}
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-mock", "vsock.sock"))
+
+	srv := NewServer(mock, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.Fork(context.Background(), "py", "sb-mock", nil, nil, "t"); err != nil {
+		t.Fatalf("mock fork: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.notifies) != 0 {
+		t.Fatalf("mock engine must not notify guests, got %d", len(rec.notifies))
+	}
+}
+
+func TestForkRunningNotifiesAgent(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	// Seed a source sandbox to fork from.
+	if _, err := engine.Fork("py", "sb-src", fork.ForkOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-live", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	if _, err := srv.ForkRunning(context.Background(), "sb-src", "sb-live", false, "t"); err != nil {
+		t.Fatalf("fork running: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.notifies) != 1 {
+		t.Fatalf("live fork must notify guest, got %d", len(rec.notifies))
+	}
+	if len(rec.notifies[0].Entropy) != 32 {
+		t.Errorf("entropy length = %d, want 32", len(rec.notifies[0].Entropy))
 	}
 }

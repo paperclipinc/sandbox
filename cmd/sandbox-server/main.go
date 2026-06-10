@@ -88,7 +88,9 @@ func main() {
 	s.sandboxAPI.AllowTokenless()
 
 	if !mockMode {
-		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir)
+		// Standalone sandbox-server keeps the direct-exec dev path; the
+		// jailer launch path is wired through forkd.
+		s.templateMgr = firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, firecracker.JailerConfig{})
 	}
 
 	mux := http.NewServeMux()

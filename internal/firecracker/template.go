@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// VsockRelPath is the vsock uds_path configured before snapshot and thus
+// baked into every template snapshot. It is deliberately RELATIVE so that
+// each restored Firecracker process binds it against its own working
+// directory (raw mode) or chroot root (jailer mode); see SetVsock and the
+// CreateTemplate comment for the per-cwd isolation invariant.
+const VsockRelPath = "vsock.sock"
+
 // TemplateManager handles the lifecycle of snapshot templates.
 // A template is: boot a VM → run init commands → pause → snapshot → kill.
 // The snapshot is then used by the fork engine for CoW forking.
@@ -14,13 +21,17 @@ type TemplateManager struct {
 	firecrackerBin string
 	kernelPath     string
 	dataDir        string
+	jailer         JailerConfig
 }
 
-func NewTemplateManager(firecrackerBin, kernelPath, dataDir string) *TemplateManager {
+// NewTemplateManager builds a template manager. A zero jailer config
+// keeps the direct-exec launch path.
+func NewTemplateManager(firecrackerBin, kernelPath, dataDir string, jailer JailerConfig) *TemplateManager {
 	return &TemplateManager{
 		firecrackerBin: firecrackerBin,
 		kernelPath:     kernelPath,
 		dataDir:        dataDir,
+		jailer:         jailer,
 	}
 }
 
@@ -56,6 +67,13 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 	cfg.FirecrackerBin = tm.firecrackerBin
 	cfg.WorkDir = workDir
 	cfg.ID = id
+	cfg.Jailer = tm.jailer
+	// Kernel and rootfs are hard-linked into the chroot in jailer mode so
+	// the API paths below resolve inside it.
+	cfg.ChrootFiles = []string{tm.kernelPath}
+	if cfg.RootfsPath != "" {
+		cfg.ChrootFiles = append(cfg.ChrootFiles, templateRootfs)
+	}
 
 	// Start the VM
 	client, err := StartVM(cfg)
@@ -77,9 +95,17 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initWaitSecon
 		return nil, fmt.Errorf("add rootfs drive: %w", err)
 	}
 
-	// Set up vsock for guest communication
-	vsockPath := filepath.Join(workDir, "vsock.sock")
-	if err := client.SetVsock(3, vsockPath); err != nil {
+	// Set up vsock for guest communication.
+	//
+	// The uds_path MUST be relative ("vsock.sock"): Firecracker bakes the
+	// exact uds_path string into the snapshot and rebinds it verbatim on
+	// every restore. A relative path is resolved against each restored
+	// Firecracker process's working directory, so identical baked path +
+	// distinct per-VM cwd = distinct host socket, and forks never collide
+	// on one UDS. Under the jailer the chroot already isolates each VM;
+	// in raw direct-exec mode (which we keep) this relative path plus the
+	// per-VM WorkDir set as cmd.Dir in StartVM is what keeps forks apart.
+	if err := client.SetVsock(3, VsockRelPath); err != nil {
 		return nil, fmt.Errorf("set vsock: %w", err)
 	}
 

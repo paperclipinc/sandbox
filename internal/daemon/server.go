@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
@@ -40,6 +42,10 @@ func init() {
 type Server struct {
 	engine     ForkEngine
 	sandboxAPI *SandboxAPI
+	// forkGeneration is a monotonic per-forkd counter handed to the guest on
+	// every fork. Uniqueness within this process is what matters (so a guest
+	// can tell two restores apart); global ordering does not.
+	forkGeneration atomic.Uint64
 }
 
 func NewServer(engine ForkEngine, sandboxAPI *SandboxAPI) *Server {
@@ -107,34 +113,56 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	return result, nil
 }
 
-// deliverConfig connects the guest agent and delivers claim-time env+secrets.
-// Strict when the engine is real and secrets are present: failure is returned
-// so the caller can reap the sandbox. Env-only failures are logged
-// (best-effort), and the mock engine is skipped entirely; no guest exists.
-// Secret values are never logged.
+// deliverConfig is the post-restore guest handshake: connect the agent, repair
+// fork-shared state via NotifyForked, then deliver claim-time env+secrets.
+//
+// The mock engine is skipped entirely; no guest exists.
+//
+// On a real engine the agent connection and NotifyForked are ALWAYS strict:
+// failure returns an error so the caller reaps the sandbox. A fork whose guest
+// did not reseed its RNG shares CRNG state with its siblings, which is
+// incorrect (not merely degraded), so it must never report Ready.
+//
+// Config delivery keeps its prior policy: strict only when secrets are present
+// (a sandbox Ready without its secrets is a lie); env-only failures are
+// best-effort. Secret values and entropy are never logged.
 func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string) error {
 	if !s.engine.GetCapacity().KVMAvailable {
 		return nil // mock engine: no guest to deliver to
 	}
 
-	strict := len(secrets) > 0
-
 	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
-		if strict {
-			return fmt.Errorf("guest agent not connected: %w", err)
-		}
-		log.Printf("forkd: sandbox %s: guest agent not connected: %v", sandboxID, err)
-		return nil
+		return fmt.Errorf("guest agent not connected: %w", err)
+	}
+
+	if err := s.notifyForked(sandboxID); err != nil {
+		return err
 	}
 
 	if len(env) == 0 && len(secrets) == 0 {
 		return nil
 	}
 	if err := s.sandboxAPI.Configure(sandboxID, env, secrets); err != nil {
-		if strict {
+		if len(secrets) > 0 {
 			return fmt.Errorf("configure guest: %w", err)
 		}
 		log.Printf("forkd: sandbox %s: env delivery failed (best-effort): %v", sandboxID, err)
+	}
+	return nil
+}
+
+// notifyForked sends the fork notification (fresh generation + 32 bytes of
+// crypto/rand entropy) to a connected guest. The agent must already be
+// registered. Entropy is never logged. Errors are returned so the caller can
+// reap the sandbox: a guest that did not reseed shares RNG state.
+func (s *Server) notifyForked(sandboxID string) error {
+	entropy := make([]byte, 32)
+	if _, err := rand.Read(entropy); err != nil {
+		return fmt.Errorf("generate fork entropy: %w", err)
+	}
+	gen := s.forkGeneration.Add(1)
+	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy); err != nil {
+		return fmt.Errorf("notify guest of fork: %w", err)
 	}
 	return nil
 }
@@ -144,6 +172,11 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // ForkRunning deliberately does NOT deliver new config: forks inherit the
 // source VM's memory, including any previously delivered env+secrets.
 // Fresh-credential reissue for live forks is issue #7's end state.
+//
+// It MUST still send NotifyForked: a live-fork child boots from the parent's
+// exact memory image, so it shares the parent's CRNG and userspace PRNG state.
+// That is precisely the fork-correctness hazard, so the same fail-closed
+// policy as restore-from-snapshot applies on a real engine.
 //
 // apiToken is the new sandbox's own bearer token (the source's token does
 // NOT open the fork). Empty means no token is registered and HTTP calls to
@@ -157,18 +190,30 @@ func (s *Server) ForkRunning(ctx context.Context, sourceSandboxID, newSandboxID 
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	s.registerAgent(result.SandboxID, result.VsockPath)
+	if err := s.notifyForkedRunning(result.SandboxID, result.VsockPath); err != nil {
+		// A live fork that did not reseed shares its parent's RNG state; reap it.
+		_ = s.engine.Terminate(result.SandboxID)
+		activeSandboxes.Dec()
+		s.sandboxAPI.UnregisterSandbox(result.SandboxID)
+		return nil, fmt.Errorf("sandbox %s: fork notification failed: %w", result.SandboxID, err)
+	}
+
 	s.sandboxAPI.RegisterToken(result.SandboxID, apiToken)
 	return result, nil
 }
 
-// registerAgent connects the sandbox API to the guest agent. Failure is
-// logged, not fatal: the sandbox is running, but exec/files will 404 until
-// an agent connection is established (mock mode has no agent at all).
-func (s *Server) registerAgent(sandboxID, vsockPath string) {
-	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
-		log.Printf("forkd: sandbox %s: guest agent not connected: %v", sandboxID, err)
+// notifyForkedRunning connects the agent and sends NotifyForked for a live
+// fork, without delivering config (live forks inherit the parent's env). On
+// the mock engine there is no guest, so it is a no-op. Strict on a real
+// engine: see ForkRunning.
+func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
+	if !s.engine.GetCapacity().KVMAvailable {
+		return nil // mock engine: no guest to notify
 	}
+	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
+		return fmt.Errorf("guest agent not connected: %w", err)
+	}
+	return s.notifyForked(sandboxID)
 }
 
 // Terminate handles a sandbox termination request.

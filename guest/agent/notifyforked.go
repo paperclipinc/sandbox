@@ -1,0 +1,176 @@
+//go:build linux
+
+package main
+
+import (
+	"encoding/binary"
+	"fmt"
+	"os"
+	"strconv"
+	"unsafe"
+
+	"github.com/paperclipinc/sandbox/internal/vsock"
+	"golang.org/x/sys/unix"
+)
+
+// clockStepThresholdNanos is the drift past which the guest steps
+// CLOCK_REALTIME. A restored guest's wall clock is frozen at snapshot time, so
+// after a fork the drift is typically large; small drifts within this window
+// are left alone to avoid fighting any in-guest NTP discipline.
+const clockStepThresholdNanos = 500 * 1000 * 1000 // 500ms
+
+// handleNotifyForked repairs fork-shared state after a restore:
+//  1. reseed the kernel CRNG with the host-supplied entropy,
+//  2. step CLOCK_REALTIME toward host wall time when drift is large,
+//  3. record the fork generation at /run/sandbox/fork-generation,
+//  4. signal userspace processes (SIGUSR2) to reseed their own PRNGs.
+//
+// Entropy bytes and the absolute clock value are never logged; only counts and
+// the applied step magnitude are.
+func handleNotifyForked(req *vsock.NotifyForkedRequest) vsock.Response {
+	reseeded := reseedCRNG(req.Entropy)
+
+	step := stepClock(req.HostWallClockNanos)
+
+	writeForkGeneration(req.Generation)
+
+	signaled := signalUserspace()
+
+	fmt.Printf("sandbox-agent: notify_forked generation=%d entropy_bytes=%d reseeded=%v clock_step_ns=%d signaled=%d\n",
+		req.Generation, len(req.Entropy), reseeded, step, signaled)
+
+	return vsock.Response{
+		OK: true,
+		NotifyForked: &vsock.NotifyForkedResponse{
+			AppliedClockStepNanos: step,
+			ReseededRNG:           reseeded,
+			SignaledProcesses:     signaled,
+		},
+	}
+}
+
+// rndAddEntropy mirrors the kernel's `struct rand_pool_info`:
+//
+//	struct rand_pool_info {
+//	    int entropy_count;  // entropy credited, in bits
+//	    int buf_size;       // length of buf in bytes
+//	    __u32 buf[0];       // the entropy itself
+//	};
+//
+// We build it as a packed little-endian byte slice and pass a pointer to the
+// RNDADDENTROPY ioctl. unix.RNDADDENTROPY is an architecture-specific constant
+// (0x40085203 on amd64/arm64); we use the package constant rather than a
+// hardcoded request number so cross-arch builds stay correct.
+func reseedCRNG(entropy []byte) bool {
+	if len(entropy) == 0 {
+		return false
+	}
+
+	// header: entropy_count (bits) + buf_size (bytes), both int32, then bytes.
+	buf := make([]byte, 8+len(entropy))
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(entropy)*8))
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(entropy)))
+	copy(buf[8:], entropy)
+
+	f, err := os.OpenFile("/dev/urandom", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: open /dev/urandom: %v\n", err)
+		return false
+	}
+	defer f.Close()
+
+	_, _, errno := unix.Syscall(
+		unix.SYS_IOCTL,
+		f.Fd(),
+		uintptr(unix.RNDADDENTROPY),
+		uintptr(unsafe.Pointer(&buf[0])),
+	)
+	if errno == 0 {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "sandbox-agent: RNDADDENTROPY failed (errno %d), falling back to write\n", int(errno))
+
+	// Fallback: writing to /dev/urandom mixes the bytes into the pool without
+	// crediting entropy. Worse than the ioctl, but still perturbs CRNG state.
+	if _, err := f.Write(entropy); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: write /dev/urandom: %v\n", err)
+		return false
+	}
+	return true
+}
+
+// stepClock reads CLOCK_REALTIME, compares it to the host wall clock delivered
+// in the notification, and steps the clock when drift exceeds the threshold.
+// Returns the signed adjustment applied in nanoseconds (0 when within
+// tolerance or on error). The absolute clock value is never logged.
+func stepClock(hostWallClockNanos int64) int64 {
+	if hostWallClockNanos == 0 {
+		return 0
+	}
+
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &ts); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: clock_gettime: %v\n", err)
+		return 0
+	}
+	guestNanos := ts.Nano()
+	drift := hostWallClockNanos - guestNanos
+	if drift < 0 {
+		if -drift <= clockStepThresholdNanos {
+			return 0
+		}
+	} else if drift <= clockStepThresholdNanos {
+		return 0
+	}
+
+	target := unix.NsecToTimespec(hostWallClockNanos)
+	if err := unix.ClockSettime(unix.CLOCK_REALTIME, &target); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: clock_settime: %v\n", err)
+		return 0
+	}
+	return drift
+}
+
+// writeForkGeneration records the fork generation at a fixed path so
+// inotify-watching runtimes can detect a fork without a signal. Best effort.
+func writeForkGeneration(generation uint64) {
+	if err := os.MkdirAll("/run/sandbox", 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: mkdir /run/sandbox: %v\n", err)
+		return
+	}
+	data := []byte(strconv.FormatUint(generation, 10))
+	if err := os.WriteFile("/run/sandbox/fork-generation", data, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: write fork-generation: %v\n", err)
+	}
+}
+
+// signalUserspace sends SIGUSR2 to every userspace process except PID 1 (this
+// init) and the agent itself, prompting language runtimes and TLS libraries to
+// reseed their PRNGs. Best effort: failures per pid are ignored and the count
+// of successful signals is returned.
+func signalUserspace() int {
+	self := os.Getpid()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: read /proc: %v\n", err)
+		return 0
+	}
+
+	signaled := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue // not a numeric pid entry
+		}
+		if pid == 1 || pid == self {
+			continue
+		}
+		if err := unix.Kill(pid, unix.SIGUSR2); err == nil {
+			signaled++
+		}
+	}
+	return signaled
+}

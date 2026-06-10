@@ -10,6 +10,13 @@ type VMConfig struct {
 	VcpuCount      int
 	MemSizeMib     int
 	BootArgs       string
+	// Jailer configures launching through the jailer binary. The zero
+	// value keeps the direct-exec behavior.
+	Jailer JailerConfig
+	// ChrootFiles lists host files (kernel, rootfs, snapshot mem and
+	// vmstate) that prepareChroot hard-links into the VM's chroot before
+	// launch. Ignored when the jailer is disabled.
+	ChrootFiles []string
 }
 
 func DefaultVMConfig() VMConfig {
