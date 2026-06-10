@@ -253,6 +253,13 @@ type SandboxForkSpec struct {
 	// Whether to pause the source sandbox during checkpoint.
 	// Reduces checkpoint time but causes a brief interruption.
 	PauseSource bool `json:"pauseSource,omitempty"`
+
+	// AllowSecretInheritance permits forking a sandbox whose claim holds
+	// secrets. A live fork duplicates guest memory — including any delivered
+	// secret values — into every fork. Default is to reject such forks; see
+	// docs/fork-correctness.md §3. The long-term default is per-fork
+	// credential reissue.
+	AllowSecretInheritance bool `json:"allowSecretInheritance,omitempty"`
 }
 
 type ForkInfo struct {
