@@ -60,6 +60,10 @@ func (g *grpcService) Terminate(ctx context.Context, req *forkdpb.TerminateReque
 	return &forkdpb.TerminateResponse{}, nil
 }
 
+func (g *grpcService) ListSandboxes(ctx context.Context, _ *forkdpb.ListSandboxesRequest) (*forkdpb.ListSandboxesResponse, error) {
+	return &forkdpb.ListSandboxesResponse{Sandboxes: g.srv.ListSandboxes()}, nil
+}
+
 func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityRequest) (*forkdpb.GetCapacityResponse, error) {
 	c := g.srv.engine.GetCapacity()
 	return &forkdpb.GetCapacityResponse{

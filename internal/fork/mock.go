@@ -107,6 +107,19 @@ func (e *MockEngine) Terminate(sandboxID string) error {
 	return nil
 }
 
+// ListSandboxes returns a record for every sandbox this mock engine
+// currently holds. Order is unspecified.
+func (e *MockEngine) ListSandboxes() []SandboxRecord {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	records := make([]SandboxRecord, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		records = append(records, SandboxRecord{ID: s.ID, CreatedAt: s.CreatedAt})
+	}
+	return records
+}
+
 func (e *MockEngine) GetCapacity() Capacity {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

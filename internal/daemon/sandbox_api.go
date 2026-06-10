@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -22,6 +23,13 @@ type SandboxAPI struct {
 	agents   map[string]*vsock.Client // sandbox ID → agent connection
 	tokens   map[string]string        // sandbox ID → bearer token; values never logged
 	vsockDir string                   // directory containing vsock UDS files
+	// lastActivity records the time of the most recent exec or file call per
+	// sandbox, guarded by mu. Absent until the first touch; used by the GC
+	// reconciler via ListSandboxes to drive idle reaping.
+	lastActivity map[string]time.Time
+	// now is the clock used to stamp lastActivity. Defaults to time.Now;
+	// tests override it for determinism.
+	now func() time.Time
 	// unixFallback allows RegisterSandbox to fall back to the agent's fixed
 	// local unix socket. Opt-in: see EnableUnixFallback.
 	unixFallback bool
@@ -32,10 +40,29 @@ type SandboxAPI struct {
 
 func NewSandboxAPI(vsockDir string) *SandboxAPI {
 	return &SandboxAPI{
-		agents:   make(map[string]*vsock.Client),
-		tokens:   make(map[string]string),
-		vsockDir: vsockDir,
+		agents:       make(map[string]*vsock.Client),
+		tokens:       make(map[string]string),
+		vsockDir:     vsockDir,
+		lastActivity: make(map[string]time.Time),
+		now:          time.Now,
 	}
+}
+
+// touch stamps the current time as the sandbox's last activity. Called at the
+// top of every exec and file handler.
+func (api *SandboxAPI) touch(sandboxID string) {
+	api.mu.Lock()
+	api.lastActivity[sandboxID] = api.now()
+	api.mu.Unlock()
+}
+
+// LastActivity returns the time of the most recent exec or file call on the
+// sandbox. The bool is false when the sandbox has never been accessed.
+func (api *SandboxAPI) LastActivity(sandboxID string) (time.Time, bool) {
+	api.mu.RLock()
+	t, ok := api.lastActivity[sandboxID]
+	api.mu.RUnlock()
+	return t, ok
 }
 
 // AllowTokenless permits requests targeting sandboxes that have no
@@ -111,6 +138,7 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 		delete(api.agents, sandboxID)
 	}
 	delete(api.tokens, sandboxID)
+	delete(api.lastActivity, sandboxID)
 	api.mu.Unlock()
 }
 
@@ -236,6 +264,7 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {
@@ -275,6 +304,7 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {
@@ -297,6 +327,7 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {
@@ -323,6 +354,7 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {
@@ -345,6 +377,7 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {
@@ -366,6 +399,7 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid json", 400)
 		return
 	}
+	api.touch(req.Sandbox)
 
 	agent, err := api.getAgent(req.Sandbox)
 	if err != nil {

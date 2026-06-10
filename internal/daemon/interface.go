@@ -9,5 +9,6 @@ type ForkEngine interface {
 	ForkRunning(sourceSandboxID, newSandboxID string, pauseSource bool) (*fork.ForkResult, error)
 	Terminate(sandboxID string) error
 	GetCapacity() fork.Capacity
+	ListSandboxes() []fork.SandboxRecord
 	CreateTemplate(id string, rootfsPath string, initWaitSecs int) error
 }

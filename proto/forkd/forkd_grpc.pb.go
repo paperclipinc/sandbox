@@ -29,6 +29,7 @@ const (
 	ForkDaemon_Exec_FullMethodName           = "/forkd.ForkDaemon/Exec"
 	ForkDaemon_ExecStream_FullMethodName     = "/forkd.ForkDaemon/ExecStream"
 	ForkDaemon_Terminate_FullMethodName      = "/forkd.ForkDaemon/Terminate"
+	ForkDaemon_ListSandboxes_FullMethodName  = "/forkd.ForkDaemon/ListSandboxes"
 	ForkDaemon_ReadFile_FullMethodName       = "/forkd.ForkDaemon/ReadFile"
 	ForkDaemon_WriteFile_FullMethodName      = "/forkd.ForkDaemon/WriteFile"
 	ForkDaemon_ListDir_FullMethodName        = "/forkd.ForkDaemon/ListDir"
@@ -53,6 +54,7 @@ type ForkDaemonClient interface {
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (*ExecResponse, error)
 	ExecStream(ctx context.Context, in *ExecStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecStreamResponse], error)
 	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
+	ListSandboxes(ctx context.Context, in *ListSandboxesRequest, opts ...grpc.CallOption) (*ListSandboxesResponse, error)
 	// File operations
 	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error)
 	WriteFile(ctx context.Context, in *WriteFileRequest, opts ...grpc.CallOption) (*WriteFileResponse, error)
@@ -178,6 +180,16 @@ func (c *forkDaemonClient) Terminate(ctx context.Context, in *TerminateRequest, 
 	return out, nil
 }
 
+func (c *forkDaemonClient) ListSandboxes(ctx context.Context, in *ListSandboxesRequest, opts ...grpc.CallOption) (*ListSandboxesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSandboxesResponse)
+	err := c.cc.Invoke(ctx, ForkDaemon_ListSandboxes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forkDaemonClient) ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReadFileResponse)
@@ -236,6 +248,7 @@ type ForkDaemonServer interface {
 	Exec(context.Context, *ExecRequest) (*ExecResponse, error)
 	ExecStream(*ExecStreamRequest, grpc.ServerStreamingServer[ExecStreamResponse]) error
 	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
+	ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error)
 	// File operations
 	ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error)
 	WriteFile(context.Context, *WriteFileRequest) (*WriteFileResponse, error)
@@ -281,6 +294,9 @@ func (UnimplementedForkDaemonServer) ExecStream(*ExecStreamRequest, grpc.ServerS
 }
 func (UnimplementedForkDaemonServer) Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Terminate not implemented")
+}
+func (UnimplementedForkDaemonServer) ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSandboxes not implemented")
 }
 func (UnimplementedForkDaemonServer) ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadFile not implemented")
@@ -488,6 +504,24 @@ func _ForkDaemon_Terminate_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ForkDaemon_ListSandboxes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSandboxesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForkDaemonServer).ListSandboxes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ForkDaemon_ListSandboxes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForkDaemonServer).ListSandboxes(ctx, req.(*ListSandboxesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ForkDaemon_ReadFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReadFileRequest)
 	if err := dec(in); err != nil {
@@ -602,6 +636,10 @@ var ForkDaemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Terminate",
 			Handler:    _ForkDaemon_Terminate_Handler,
+		},
+		{
+			MethodName: "ListSandboxes",
+			Handler:    _ForkDaemon_ListSandboxes_Handler,
 		},
 		{
 			MethodName: "ReadFile",
