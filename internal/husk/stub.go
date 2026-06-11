@@ -179,6 +179,15 @@ type Options struct {
 	// ReadyTimeout bounds the guest-readiness wait during Activate. Zero uses
 	// DefaultReadyTimeout.
 	ReadyTimeout time.Duration
+	// OnActivated is invoked exactly once, after a SUCCESSFUL Activate, with the
+	// activated guest agent's host vsock UDS path and the per-sandbox bearer
+	// token delivered in the ActivateRequest. The husk pod uses it to register
+	// the activated VM with a daemon.SandboxAPI and serve the token-gated sandbox
+	// HTTP API (exec/files) on the sandbox port, so the endpoint the claim
+	// advertises is actually reachable. The token is a SECRET; the hook must
+	// never log it. Nil disables the hook (the control-socket CI driver and unit
+	// tests that do not need the sandbox API leave it nil).
+	OnActivated func(vsockPath, token string) error
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -192,6 +201,7 @@ type Stub struct {
 	start        starter
 	ready        guestReady
 	notify       notifier
+	onActivated  func(vsockPath, token string) error
 	cfg          firecracker.VMConfig
 	readyTimeout time.Duration
 
@@ -208,6 +218,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		start:        opts.Start,
 		ready:        opts.Ready,
 		notify:       opts.Notify,
+		onActivated:  opts.OnActivated,
 		cfg:          cfg,
 		readyTimeout: opts.ReadyTimeout,
 		state:        StateNew,
@@ -312,6 +323,21 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		// error carries no entropy or secret values.
 		werr := fmt.Errorf("husk: fork-correctness handshake failed: %w", err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Wire the activated VM into the in-pod sandbox HTTP API (exec/files) before
+	// reporting success, so the endpoint the claim advertises is reachable the
+	// moment the claim goes Ready. The hook registers the sandbox + its bearer
+	// token with a daemon.SandboxAPI and serves it on the sandbox port. FAIL
+	// CLOSED: if the sandbox API cannot be served, the VM is not actually usable
+	// by a tenant, so do NOT mark active or report OK. The token is a secret and
+	// is never logged here. The hook is nil for the control-socket CI driver and
+	// unit paths that do not serve the sandbox API.
+	if s.onActivated != nil {
+		if err := s.onActivated(vsockPath, req.Token); err != nil {
+			werr := fmt.Errorf("husk: serve sandbox API for activated VM: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
 	}
 
 	latency := time.Since(start)

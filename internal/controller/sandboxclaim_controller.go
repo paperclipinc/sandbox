@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -438,12 +439,39 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		activate = ActivateHuskPod
 	}
 
+	// Claim the dormant pod BEFORE activating it: stamp the agentrun.dev/claim
+	// label under an OPTIMISTIC LOCK. This is the mutual-exclusion commit. Two
+	// concurrent claims may both select the same dormant pod, but the
+	// resourceVersion-guarded patch lets exactly one win; the loser gets a 409
+	// Conflict and must NOT activate this pod (a second tenant on the same VM).
+	// Winning the label patch is the gate to Activate, so a pod is activated by
+	// exactly one claim. On conflict we requeue so the next reconcile picks a
+	// different dormant pod.
+	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
+		if apierrors.IsConflict(err) {
+			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+			claim.Status.Phase = v1alpha1.SandboxPending
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(r.now()),
+				Reason:             "HuskPodRaced",
+				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
+			})
+			_ = r.Status().Update(ctx, claim)
+			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		}
+		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
+		return ctrl.Result{}, err
+	}
+
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
 	req := husk.ActivateRequest{
 		SnapshotDir: HuskSnapshotDir,
 		Env:         env,
 		Secrets:     secretVals,
 		Network:     huskNotifyNetwork(template),
+		Token:       apiToken,
 	}
 	res, err := activate(ctx, addr, r.HuskTLS, req)
 	if err != nil || !res.OK {
@@ -470,15 +498,9 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 
 	endpoint := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(sandboxPort))
 
-	// Mark the pod claimed (label patch) so no other claim activates it. Do this
-	// before the Ready write: a Ready claim on an unclaimed pod could be raced by
-	// a second claim onto the same VM.
-	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
-		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
-		return ctrl.Result{}, err
-	}
-
-	// Hand the token to the claim's consumer via an owned Secret BEFORE the Ready
+	// The pod was already claimed (optimistic-lock label patch) BEFORE activation,
+	// so this VM belongs to exactly this claim. Hand the token to the claim's
+	// consumer via an owned Secret BEFORE the Ready
 	// write (same ordering as the forkd path).
 	if err := ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, endpoint); err != nil {
 		logger.Error(err, "token secret write failed")

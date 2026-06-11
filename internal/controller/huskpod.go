@@ -192,6 +192,11 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		"--kernel", huskKernelMountPath,
 		"--workdir", huskWorkdir,
 		"--control-listen", fmt.Sprintf(":%d", HuskControlPort),
+		// Serve the in-pod sandbox HTTP API (exec/files) on the declared sandbox
+		// container port after activation, gated by the per-sandbox bearer token
+		// delivered over the control channel. The claim's Status.Endpoint is
+		// podIP:huskSandboxPort, so the stub must serve there.
+		"--sandbox-listen", fmt.Sprintf(":%d", huskSandboxPort),
 		"--tls-cert", filepath.Join(huskTLSMountPath, "tls.crt"),
 		"--tls-key", filepath.Join(huskTLSMountPath, "tls.key"),
 		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
@@ -433,8 +438,12 @@ func huskPodReady(p *corev1.Pod) bool {
 // a PodIP and is not yet claimed (no agentrun.dev/claim label). It is the warm
 // slot the claim path activates. Returns nil (no error) when none is available,
 // so the caller pends the claim. Selection is deterministic (lowest name) so
-// concurrent reconciles converge on the same victim; the claim-label patch in
-// markHuskPodClaimed is the conflict-safe commit.
+// concurrent reconciles converge on the same victim; the optimistic-lock
+// claim-label patch in markHuskPodClaimed is the real commit: two concurrent
+// claims that both select the SAME pod both attempt the patch, but the patch
+// carries the pod's resourceVersion so exactly one wins and the loser gets a 409
+// Conflict and requeues to pick a different dormant pod. A pod is therefore
+// claimed (and activated) by exactly one claim.
 func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -467,10 +476,18 @@ func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool 
 }
 
 // markHuskPodClaimed stamps the agentrun.dev/claim label on a husk pod so it is
-// not selected again. It uses a merge patch (not an Update) so it does not
-// conflict with concurrent status writes (kubelet) on the same pod.
+// not selected again. It uses an OPTIMISTIC-LOCK merge patch: the patch carries
+// the pod's resourceVersion, so the API server rejects it with a 409 Conflict if
+// the pod was modified (for instance, claimed by a racing reconcile) since this
+// reconcile read it. This is the mutual-exclusion guarantee: two concurrent
+// claims that both selected the same dormant pod both attempt this patch, but
+// only one wins; the other gets apierrors.IsConflict and must NOT activate this
+// pod (the caller requeues to pick a different dormant pod). The label-only
+// patch still merges cleanly with concurrent kubelet status writes (status is a
+// separate subresource), so the optimistic lock fires only on a genuine
+// metadata race, which is exactly the double-assignment it must prevent.
 func (r *SandboxClaimReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claimName string) error {
-	patch := client.MergeFrom(pod.DeepCopy())
+	patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
 	}

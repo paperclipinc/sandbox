@@ -145,6 +145,11 @@ func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 	if !strings.Contains(args, "--control-listen") {
 		t.Errorf("args missing --control-listen: %v", ctr.Args)
 	}
+	// The in-pod sandbox HTTP API is served on the sandbox port so the endpoint
+	// the claim advertises (podIP:9091) is reachable and token-gated.
+	if !strings.Contains(args, "--sandbox-listen :9091") {
+		t.Errorf("args missing --sandbox-listen :9091: %v", ctr.Args)
+	}
 	for _, flag := range []string{"--tls-cert", "--tls-key", "--tls-ca"} {
 		if !strings.Contains(args, flag) {
 			t.Errorf("args missing %s: %v", flag, ctr.Args)

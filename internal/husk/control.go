@@ -35,6 +35,12 @@ import (
 // ride the local control socket only; the real claim-time secret source is the
 // controller, delivered to the husk pod's stub by the future controller-
 // migration PR.
+//
+// Token is the per-sandbox bearer token the controller mints for this claim. The
+// stub registers it as the gate on the in-pod sandbox HTTP API (exec/files) it
+// serves after a successful activate, so only a caller presenting this token can
+// reach the activated VM. It is a SECRET: it rides the mTLS control channel and
+// is NEVER logged.
 type ActivateRequest struct {
 	SnapshotDir      string                        `json:"snapshot_dir"`
 	NetworkOverrides []firecracker.NetworkOverride `json:"network_overrides,omitempty"`
@@ -42,6 +48,7 @@ type ActivateRequest struct {
 	Secrets          map[string]string             `json:"secrets,omitempty"`
 	Network          *vsock.NotifyForkedNetwork    `json:"network,omitempty"`
 	Volumes          []vsock.VolumeMountEntry      `json:"volumes,omitempty"`
+	Token            string                        `json:"token,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded

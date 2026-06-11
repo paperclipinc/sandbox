@@ -65,6 +65,12 @@ func (f *fakeActivator) sawTLS() bool {
 	return f.tlsSeen
 }
 
+func (f *fakeActivator) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.reqs)
+}
+
 // makeDormantHuskPod creates a husk pod and forces it Running+Ready with a
 // PodIP, simulating a warm dormant slot (envtest has no kubelet, so the test
 // drives the status directly).
@@ -230,6 +236,124 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 	// Secret value never logged.
 	if strings.Contains(string(logBuf.Bytes()[logStart:]), "super-secret-value-XYZ") {
 		t.Error("secret value leaked into the controller log")
+	}
+}
+
+// TestHuskClaimSingleDormantPodNoDoubleAssign proves the isolation guarantee:
+// with exactly ONE dormant husk pod and TWO claims racing for it, the
+// optimistic-lock claim-before-activate path lets exactly ONE claim win the pod
+// (activate it) and the other never activates the same pod. Concretely:
+//   - the fake activator (the only dormant pod, so any activate targets it) is
+//     called exactly once: only the winner reaches Activate;
+//   - the pod's agentrun.dev/claim label names exactly one of the two claims;
+//   - that named claim is Ready and the other is NOT Ready (Pending/requeued).
+//
+// Without the optimistic lock (a plain MergeFrom carries no resourceVersion),
+// both claims could claim+activate the SAME pod, putting two tenants on one VM.
+func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
+	// One pool + template, one dormant pod, two claims on that pool.
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-race-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-race-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "husk-race-tmpl"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	pod := makeDormantHuskPod(t, "husk-race-pool", "10.9.9.9")
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: true, VsockPath: "/run/husk/vm/vsock", LatencyMs: 1.0}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	newClaim := func(name string) *v1alpha1.SandboxClaim {
+		c := &v1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels:    map[string]string{controller.HuskTestClaimLabel: "true"},
+			},
+			Spec: v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "husk-race-pool"}},
+		}
+		if err := k8sClient.Create(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = k8sClient.Delete(ctx, c) })
+		return c
+	}
+	c1 := newClaim("husk-race-claim-1")
+	c2 := newClaim("husk-race-claim-2")
+
+	// Wait until both claims have settled: one Ready, the other not Ready.
+	deadline := time.Now().Add(20 * time.Second)
+	var ready, other *v1alpha1.SandboxClaim
+	for time.Now().Before(deadline) {
+		var g1, g2 v1alpha1.SandboxClaim
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: c1.Name, Namespace: "default"}, &g1); err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: c2.Name, Namespace: "default"}, &g2); err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		r1 := g1.Status.Phase == v1alpha1.SandboxReady
+		r2 := g2.Status.Phase == v1alpha1.SandboxReady
+		// Exactly one Ready and the other pending (not Ready).
+		if r1 != r2 && g1.Status.Phase != "" && g2.Status.Phase != "" {
+			if r1 {
+				ready, other = &g1, &g2
+			} else {
+				ready, other = &g2, &g1
+			}
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if ready == nil {
+		t.Fatal("the two racing claims never settled to exactly one Ready and one not-Ready")
+	}
+	if other.Status.Phase == v1alpha1.SandboxReady {
+		t.Fatalf("both claims went Ready on a single dormant pod (double assignment): %s and %s", ready.Name, other.Name)
+	}
+
+	// Give the loser a moment; it must never flip to Ready on this same pod.
+	time.Sleep(500 * time.Millisecond)
+	var loser v1alpha1.SandboxClaim
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: other.Name, Namespace: "default"}, &loser); err != nil {
+		t.Fatal(err)
+	}
+	if loser.Status.Phase == v1alpha1.SandboxReady {
+		t.Fatalf("the losing claim %s eventually went Ready on the already-claimed pod (double assignment)", other.Name)
+	}
+
+	// The pod's claim label names EXACTLY the winner.
+	var claimedPod corev1.Pod
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: "default"}, &claimedPod); err != nil {
+		t.Fatal(err)
+	}
+	if got := claimedPod.Labels["agentrun.dev/claim"]; got != ready.Name {
+		t.Fatalf("pod claim label = %q, want the winning claim %q", got, ready.Name)
+	}
+
+	// The activator (only one dormant pod exists) was called exactly once: only
+	// the winner reached Activate.
+	if n := act.callCount(); n != 1 {
+		t.Fatalf("activator called %d times, want exactly 1 (the single dormant pod must be activated by exactly one claim)", n)
 	}
 }
 
