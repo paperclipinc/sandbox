@@ -100,11 +100,12 @@ func newGateEngine(t *testing.T, dataDir string, allowUnverified bool) *Engine {
 	t.Helper()
 	store := newTestStore(t, dataDir)
 	return &Engine{
-		dataDir:          dataDir,
-		casStore:         store,
-		allowUnverified:  allowUnverified,
-		unverifiedWarned: make(map[string]struct{}),
-		templateDigests:  make(map[string]cas.Digest),
+		dataDir:            dataDir,
+		casStore:           store,
+		allowUnverified:    allowUnverified,
+		unverifiedWarned:   make(map[string]struct{}),
+		incompatibleWarned: make(map[string]struct{}),
+		templateDigests:    make(map[string]cas.Digest),
 	}
 }
 
