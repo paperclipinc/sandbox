@@ -13,10 +13,11 @@
 //   - Read-only Share (optional): if a read-only Share volume is in the template,
 //     assert the guest CANNOT write to it.
 //
-// It seeds the Snapshot source host-side (mount the seed ext4, write the file,
-// unmount) AFTER the template is built, so the per-fork reflink copies the
-// seeded image. This binary is linux + KVM only; it is the gate for the volume
-// CI phase.
+// It seeds the Snapshot source host-side AFTER the template is built by
+// rebuilding the template backing with mkfs.ext4 -d, writing the seed file
+// into a temporary directory first. This requires no mount, no loop device,
+// and no root. Each fork's reflink copy then sees the seeded image. This
+// binary is linux + KVM only; it is the gate for the volume CI phase.
 //
 // Every assertion gates: any failure exits nonzero so the CI step fails. A
 // busybox/image pull flake (when building from an OCI image) is surfaced as
@@ -33,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,7 +43,6 @@ import (
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
-	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -126,10 +127,12 @@ func run(o opts) error {
 
 	// Seed the Snapshot source image host-side, AFTER the build, so each fork's
 	// reflink copy sees /seeded.txt. The seed path is deterministic; recompute it
-	// via a backend rooted at the same data dir.
+	// via a backend rooted at the same data dir. The size must match the Snapshot
+	// volume spec so the drive geometry is preserved for forks.
 	be := volume.New(o.dataDir)
 	snapSeed := be.TemplateVolumePath(templateID, snapName)
-	seedHash, err := seedVolumeImage(snapSeed, seedFile, []byte(o.seedContent))
+	snapSizeMB := specs[1].SizeMB // specs[1] is the Snapshot volume (snapName, 64 MB)
+	seedHash, err := seedVolumeImage(snapSeed, seedFile, []byte(o.seedContent), snapSizeMB)
 	if err != nil {
 		return fmt.Errorf("seed snapshot source: %w", err)
 	}
@@ -238,28 +241,37 @@ func run(o opts) error {
 	return nil
 }
 
-// seedVolumeImage mounts the ext4 image at imagePath, writes content to relPath
-// inside it, unmounts, and returns the image's sha256 AFTER seeding (the
-// reference the CoW check compares against). It is linux only and needs the
-// privilege to loop-mount (CI runs it as root).
-func seedVolumeImage(imagePath, relPath string, content []byte) (string, error) {
-	mnt, err := os.MkdirTemp("", "vol-seed-*")
+// seedVolumeImage rebuilds the ext4 image at imagePath with content written to
+// relPath, using mkfs.ext4 -d to populate the image from a temporary directory.
+// This requires no mount, no loop device, and no elevated privileges, mirroring
+// how ociroot/ext4.go builds rootfs images. sizeMB must match the volume size
+// so the reflink copy and PATCH drive rebind see a correctly sized backing.
+// Returns the image's sha256 AFTER seeding (the reference the CoW check
+// compares against).
+func seedVolumeImage(imagePath, relPath string, content []byte, sizeMB int) (string, error) {
+	tmp, err := os.MkdirTemp("", "vol-seed-*")
 	if err != nil {
-		return "", fmt.Errorf("mkdir mount point: %w", err)
+		return "", fmt.Errorf("mkdir seed dir: %w", err)
 	}
-	defer os.RemoveAll(mnt)
+	defer os.RemoveAll(tmp)
 
-	if err := unix.Mount(imagePath, mnt, "ext4", 0, ""); err != nil {
-		return "", fmt.Errorf("mount %s: %w", imagePath, err)
+	// Write the seed file into the temp dir so mkfs.ext4 -d picks it up.
+	seedRelPath := strings.TrimPrefix(relPath, "/")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(tmp, seedRelPath)), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir seed file parent: %w", err)
 	}
-	writeErr := os.WriteFile(filepath.Join(mnt, strings.TrimPrefix(relPath, "/")), content, 0o644)
-	// Always unmount, even if the write failed, so the image is consistent.
-	umountErr := unix.Unmount(mnt, 0)
-	if writeErr != nil {
-		return "", fmt.Errorf("write %s: %w", relPath, writeErr)
+	if err := os.WriteFile(filepath.Join(tmp, seedRelPath), content, 0o644); err != nil {
+		return "", fmt.Errorf("write seed file: %w", err)
 	}
-	if umountErr != nil {
-		return "", fmt.Errorf("unmount %s: %w", mnt, umountErr)
+
+	// Rebuild the backing image in-place: mkfs.ext4 -d populates the image
+	// from tmp without mounting anything. -F forces overwrite of the existing
+	// file. The size must match the original so the baked drive geometry is
+	// preserved and forks can mount without errors.
+	size := fmt.Sprintf("%dM", sizeMB)
+	cmd := exec.Command("mkfs.ext4", "-F", "-q", "-d", tmp, imagePath, size) //nolint:gosec // argv built from validated spec and temp paths
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("mkfs.ext4 -d %s %s %s: %w: %s", tmp, imagePath, size, err, string(out))
 	}
 	return fileSHA256(imagePath)
 }
