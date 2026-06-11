@@ -1,0 +1,26 @@
+# Default dev pool in the `default` namespace: `agentrun sandbox create` creates
+# claims there and the claim reconciler looks up the pool in the claim's
+# namespace. The controller (in agent-run) discovers the mock forkd, builds this
+# template's snapshot over insecure gRPC, and claims fork via the mock engine and
+# reach Ready. No CSI/snapshot volumes, so it reconciles on the no-KVM node.
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: dev-default
+  namespace: default
+spec:
+  image: python:3.12-slim
+  resources:
+    cpu: "1"
+    memory: "512Mi"
+---
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxPool
+metadata:
+  name: dev-default
+  namespace: default
+spec:
+  templateRef:
+    name: dev-default
+  replicas: 1
+  snapshotAfter: Ready

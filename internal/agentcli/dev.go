@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 )
 
@@ -17,34 +16,30 @@ const defaultClusterName = "agentrun-dev"
 // from the repo root.
 const kindConfigPath = "hack/kind-config.yaml"
 
-// devPoolYAML is the minimal SandboxTemplate + SandboxPool DevUp applies so a
-// fresh dev cluster has a pool to claim from. It uses the mock-friendly defaults
-// (no snapshot/CSI volumes) so it reconciles without a KVM node.
-const devPoolYAML = `apiVersion: agentrun.dev/v1alpha1
-kind: SandboxTemplate
-metadata:
-  name: dev-default
-spec:
-  image: python:3.12-slim
-  resources:
-    cpu: "1"
-    memory: "512Mi"
----
-apiVersion: agentrun.dev/v1alpha1
-kind: SandboxPool
-metadata:
-  name: dev-default
-spec:
-  templateRef:
-    name: dev-default
-  replicas: 1
-  snapshotAfter: Ready
-`
+// crdsPath is the directory of CRD manifests DevUp applies before the dev
+// overlay. The overlay cannot reference these out-of-tree files under the
+// kustomize load restrictor, so they are applied separately. Repo-relative.
+const crdsPath = "deploy/crds/"
+
+// devOverlayPath is the kustomize overlay DevUp applies after the CRDs. It runs a
+// mock-mode controller (--mock --disable-pki-bootstrap), a mock-mode forkd
+// DaemonSet (--mock, no KVM device, no kvm nodeSelector, no TLS), and a default
+// pool, so a kind cluster forks via the mock engine and claims reach Ready
+// without KVM. Repo-relative; run agentrun dev from the repo root.
+const devOverlayPath = "deploy/dev/"
+
+// devPoolName is the SandboxPool the dev overlay creates; agentrun sandbox
+// create --pool dev-default claims from it. Exported so docs and CI agree.
+const devPoolName = "dev-default"
 
 // DevOptions configures the local dev cluster orchestration.
 type DevOptions struct {
 	// ClusterName overrides the kind cluster name. Empty uses defaultClusterName.
 	ClusterName string
+	// SkipClusterCreate makes DevUp target an already-running cluster (the
+	// current kubectl context) instead of running `kind create cluster`. CI uses
+	// this to apply the dev control plane onto a cluster it stood up itself.
+	SkipClusterCreate bool
 }
 
 // CommandRunner runs an external command argv. DevUp/DevDown take a runner so
@@ -59,64 +54,54 @@ func (o DevOptions) clusterName() string {
 	return defaultClusterName
 }
 
-// DevUp brings a local kind dev cluster up and installs the control plane:
+// DevUp brings a local kind dev cluster up and installs a MOCK control plane:
 //
-//  1. kind create cluster (tolerating an already-existing cluster of the same name)
-//  2. kubectl apply -f deploy/crds/
-//  3. kubectl apply -f deploy/controller/
-//  4. kubectl apply -f - with a minimal default pool
+//  1. kind create cluster (tolerating an already-existing cluster; skipped when
+//     opts.SkipClusterCreate targets an existing cluster, e.g. in CI)
+//  2. kubectl apply -f deploy/crds/ (the CRDs)
+//  3. kubectl apply -k deploy/dev/ (mock controller + mock forkd + default pool)
 //
-// Each external command runs through runner so the sequence is testable. DevUp
-// prints progress and a clear note to out that local dev uses the mock engine
-// and that real exec needs a KVM node. The control plane brought up here is the
-// stock controller manifest; for a fully local mock-mode controller (no KVM,
-// the --mock flag on cmd/controller) the controller deployment args need that
-// flag added, which is a manifest tweak left to the operator. DevUp applies what
-// brings the CRDs and controller up honestly and notes the mock requirement.
+// Each external command runs through runner so the sequence is testable. The dev
+// overlay runs the controller with --mock --disable-pki-bootstrap and forkd with
+// --mock and no TLS, on the plain kind node (no KVM device, no kvm nodeSelector).
+// The controller discovers the mock forkd, builds the pool snapshot over insecure
+// gRPC, and claims fork via the mock engine and reach Ready without KVM. DevUp
+// prints progress and a clear note that local dev uses the mock engine, so real
+// in-VM exec needs a KVM node and the production manifests.
 func DevUp(ctx context.Context, opts DevOptions, runner CommandRunner, out io.Writer) error {
 	name := opts.clusterName()
 
-	fmt.Fprintf(out, "Creating kind cluster %q...\n", name)
-	if err := runner(ctx, []string{"kind", "create", "cluster", "--name", name, "--config", kindConfigPath}); err != nil {
-		// A cluster that already exists is not a failure: dev up is meant to be
-		// re-runnable. kind reports this on stderr; the message contains
-		// "already exist".
-		if !isAlreadyExists(err) {
-			return fmt.Errorf("create kind cluster %q: %w", name, err)
+	if opts.SkipClusterCreate {
+		fmt.Fprintf(out, "Targeting the existing cluster (kind cluster %q assumed up); skipping kind create.\n", name)
+	} else {
+		fmt.Fprintf(out, "Creating kind cluster %q...\n", name)
+		if err := runner(ctx, []string{"kind", "create", "cluster", "--name", name, "--config", kindConfigPath}); err != nil {
+			// A cluster that already exists is not a failure: dev up is meant to be
+			// re-runnable. kind reports this on stderr; the message contains
+			// "already exist".
+			if !isAlreadyExists(err) {
+				return fmt.Errorf("create kind cluster %q: %w", name, err)
+			}
+			fmt.Fprintf(out, "kind cluster %q already exists, continuing.\n", name)
 		}
-		fmt.Fprintf(out, "kind cluster %q already exists, continuing.\n", name)
 	}
 
 	fmt.Fprintln(out, "Applying CRDs...")
-	if err := runner(ctx, []string{"kubectl", "apply", "-f", "deploy/crds/"}); err != nil {
-		return fmt.Errorf("apply CRDs: %w", err)
+	if err := runner(ctx, []string{"kubectl", "apply", "-f", crdsPath}); err != nil {
+		return fmt.Errorf("apply CRDs %s: %w", crdsPath, err)
 	}
 
-	fmt.Fprintln(out, "Applying controller...")
-	if err := runner(ctx, []string{"kubectl", "apply", "-f", "deploy/controller/"}); err != nil {
-		return fmt.Errorf("apply controller: %w", err)
-	}
-
-	fmt.Fprintln(out, "Applying default pool...")
-	// The runner takes argv only (no stdin), so write the inline pool YAML to a
-	// temp file and apply that, then clean up. This keeps the orchestration
-	// fully testable while still applying a minimal mock-friendly pool rather
-	// than the CSI-backed examples/python-pool.yaml that a no-KVM cluster would
-	// not reconcile.
-	poolFile, cleanup, err := writeTempYAML(devPoolYAML)
-	if err != nil {
-		return fmt.Errorf("write default pool manifest: %w", err)
-	}
-	defer cleanup()
-	if err := runner(ctx, []string{"kubectl", "apply", "-f", poolFile}); err != nil {
-		return fmt.Errorf("apply default pool: %w", err)
+	fmt.Fprintln(out, "Applying the dev mock control plane (mock controller, mock forkd, default pool)...")
+	if err := runner(ctx, []string{"kubectl", "apply", "-k", devOverlayPath}); err != nil {
+		return fmt.Errorf("apply dev overlay %s: %w", devOverlayPath, err)
 	}
 
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Local dev cluster is up.")
-	fmt.Fprintln(out, "Note: local dev uses the mock fork engine (no KVM). Sandboxes")
-	fmt.Fprintln(out, "reconcile to Ready, but real in-VM exec needs a KVM node and the")
-	fmt.Fprintln(out, "controller running in --mock mode is the no-KVM path.")
+	fmt.Fprintln(out, "Local dev cluster is up with a mock control plane.")
+	fmt.Fprintf(out, "Create a sandbox: agentrun sandbox create --pool %s\n", devPoolName)
+	fmt.Fprintln(out, "Note: local dev uses the mock fork engine (no KVM). Claims reconcile")
+	fmt.Fprintln(out, "to Ready, but real in-VM exec needs a KVM node and the production")
+	fmt.Fprintln(out, "manifests (deploy/controller/ + deploy/daemon/). See docs/cli.md.")
 	return nil
 }
 
@@ -129,25 +114,6 @@ func DevDown(ctx context.Context, opts DevOptions, runner CommandRunner, out io.
 		return fmt.Errorf("delete kind cluster %q: %w", name, err)
 	}
 	return nil
-}
-
-// writeTempYAML writes content to a temp file with a recognizable name and
-// returns its path plus a cleanup function that removes it.
-func writeTempYAML(content string) (path string, cleanup func(), err error) {
-	f, err := os.CreateTemp("", "agentrun-dev-pool-*.yaml")
-	if err != nil {
-		return "", func() {}, err
-	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", func() {}, err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", func() {}, err
-	}
-	return f.Name(), func() { _ = os.Remove(f.Name()) }, nil
 }
 
 // isAlreadyExists reports whether err is kind's "cluster already exists" signal.

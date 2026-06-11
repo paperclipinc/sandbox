@@ -151,7 +151,16 @@ func runDev(ctx context.Context, args []string) int {
 	}
 	switch args[0] {
 	case "up":
-		if err := agentcli.DevUp(ctx, agentcli.DevOptions{}, runner, os.Stdout); err != nil {
+		// --skip-cluster-create targets an already-running cluster (the current
+		// kubectl context) instead of running `kind create`; CI uses it to apply
+		// the dev control plane onto a cluster it stood up itself.
+		opts := agentcli.DevOptions{}
+		for _, a := range args[1:] {
+			if a == "--skip-cluster-create" {
+				opts.SkipClusterCreate = true
+			}
+		}
+		if err := agentcli.DevUp(ctx, opts, runner, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "dev up:", err)
 			return 1
 		}

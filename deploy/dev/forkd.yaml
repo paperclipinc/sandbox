@@ -1,0 +1,72 @@
+# Dev forkd: mock fork engine on kind, no KVM, no jailer, no TLS.
+# --mock selects internal/fork/mock.go (KVMAvailable=false). No /dev/kvm mount
+# and no agentrun.dev/kvm nodeSelector, so it schedules on the plain kind node.
+# No --tls-* flags, so the gRPC listener is insecure; the controller dials it
+# insecure because PKI bootstrap is disabled. The controller discovers this pod
+# by the app.kubernetes.io/component: forkd label.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agent-run-forkd
+  namespace: agent-run
+  labels:
+    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/component: forkd
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-run
+      app.kubernetes.io/component: forkd
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-run
+        app.kubernetes.io/component: forkd
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: forkd
+          image: agent-run-forkd:ci
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:9090
+            - --http=:9091
+            - --data-dir=/var/lib/agent-run
+            - --mock
+          ports:
+            - name: grpc
+              containerPort: 9090
+            - name: metrics
+              containerPort: 9091
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/agent-run
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}

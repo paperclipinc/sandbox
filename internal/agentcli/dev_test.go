@@ -39,8 +39,8 @@ func TestDevUpSequence(t *testing.T) {
 		t.Fatalf("DevUp: %v", err)
 	}
 	got := joinedCalls(rr.calls)
-	if len(got) < 4 {
-		t.Fatalf("want at least 4 commands, got %d: %v", len(got), got)
+	if len(got) < 2 {
+		t.Fatalf("want at least 2 commands, got %d: %v", len(got), got)
 	}
 	// First command must create the kind cluster with the configured name and
 	// the kind config file.
@@ -53,24 +53,38 @@ func TestDevUpSequence(t *testing.T) {
 	if !strings.Contains(got[0], "hack/kind-config.yaml") {
 		t.Fatalf("kind create missing config: %q", got[0])
 	}
-	// CRDs and controller are applied.
+	// CRDs are applied, then the dev mock control plane as a kustomize overlay
+	// (mock controller, mock forkd, default pool all live under deploy/dev/).
 	all := strings.Join(got, "\n")
-	if !strings.Contains(all, "kubectl apply -f deploy/crds/") {
-		t.Fatalf("want CRDs applied, got:\n%s", all)
+	if !strings.Contains(all, "kubectl apply -f "+crdsPath) {
+		t.Fatalf("want CRDs applied via kubectl apply -f %s, got:\n%s", crdsPath, all)
 	}
-	if !strings.Contains(all, "deploy/controller/") {
-		t.Fatalf("want controller applied, got:\n%s", all)
-	}
-	// A pool is applied (the inline mock-friendly pool written to a temp file).
-	poolApplied := strings.Contains(all, "agentrun-dev-pool") ||
-		strings.Contains(all, "python-pool.yaml") ||
-		(strings.Contains(all, "kubectl apply") && strings.Contains(all, "SandboxPool"))
-	if !poolApplied {
-		t.Fatalf("want a default pool applied, got:\n%s", all)
+	if !strings.Contains(all, "kubectl apply -k "+devOverlayPath) {
+		t.Fatalf("want the dev overlay applied via kubectl apply -k %s, got:\n%s", devOverlayPath, all)
 	}
 	// A clear mock-engine note is printed.
 	if !strings.Contains(strings.ToLower(out.String()), "mock") {
 		t.Fatalf("DevUp output = %q, want a mock-engine note", out.String())
+	}
+}
+
+func TestDevUpSkipClusterCreate(t *testing.T) {
+	rr := &recordingRunner{}
+	var out strings.Builder
+	err := DevUp(context.Background(), DevOptions{SkipClusterCreate: true}, rr.run, &out)
+	if err != nil {
+		t.Fatalf("DevUp: %v", err)
+	}
+	got := joinedCalls(rr.calls)
+	// With SkipClusterCreate, no kind create runs; only the overlay is applied.
+	for _, c := range got {
+		if strings.HasPrefix(c, "kind create cluster") {
+			t.Fatalf("SkipClusterCreate should not run kind create, got: %q", c)
+		}
+	}
+	all := strings.Join(got, "\n")
+	if !strings.Contains(all, "kubectl apply -k "+devOverlayPath) {
+		t.Fatalf("want the dev overlay applied even when skipping cluster create, got:\n%s", all)
 	}
 }
 
@@ -81,19 +95,19 @@ func TestDevUpToleratesExistingCluster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DevUp should tolerate an existing cluster, got: %v", err)
 	}
-	// It must continue past the create to apply the CRDs.
+	// It must continue past the create to apply the dev overlay.
 	all := strings.Join(joinedCalls(rr.calls), "\n")
-	if !strings.Contains(all, "kubectl apply -f deploy/crds/") {
-		t.Fatalf("want it to continue to apply CRDs after existing cluster, got:\n%s", all)
+	if !strings.Contains(all, "kubectl apply -k "+devOverlayPath) {
+		t.Fatalf("want it to continue to apply the dev overlay after existing cluster, got:\n%s", all)
 	}
 }
 
 func TestDevUpFailsOnApplyError(t *testing.T) {
-	rr := &recordingRunner{failOn: "deploy/crds/", failErr: errors.New("apply boom")}
+	rr := &recordingRunner{failOn: "apply -k " + devOverlayPath, failErr: errors.New("apply boom")}
 	var out strings.Builder
 	err := DevUp(context.Background(), DevOptions{}, rr.run, &out)
 	if err == nil {
-		t.Fatalf("DevUp should fail when applying CRDs fails")
+		t.Fatalf("DevUp should fail when applying the dev overlay fails")
 	}
 }
 
