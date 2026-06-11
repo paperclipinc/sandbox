@@ -1,0 +1,51 @@
+# agentrun CLI Implementation Plan (issue #26)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Close issue #26. Ship the `agentrun` CLI: `agentrun run <cmd>` (one-shot create-exec-terminate), `agentrun sandbox create|ls|exec|fork|terminate`, and `agentrun dev up|down` (one-command local cluster: kind plus the controller plus a default pool). The CLI is the developer-facing capstone of the adoption surface (SDK, MCP, CLI all over the same operations), and `dev up` delivers the time-to-first-exec promise: a contributor with no cluster gets a working control plane in one command. Verified in CI: the command tree and dispatch are unit-tested against a fake backend, and `dev up` is exercised on kind (cluster plus controller plus pool come up, `agentrun sandbox ls` talks to the control plane, `dev down` tears it down).
+
+**Honesty constraint:** on kind there is no KVM, so the engine is the mock (claims reach Ready but exec does not run a real VM). The CLI's exec/fork against a real VM is proven by the existing KVM CI of the underlying API; the CLI layer (parsing, dispatch, the cluster claim path, dev orchestration) is what this PR proves. `agentrun dev up` prints a clear note that local dev uses the mock engine and real exec needs a KVM node. No command claims a latency or capability the harness did not exercise.
+
+**Architecture:** A new `internal/agentcli` package defines the command tree (using the stdlib flag package with subcommand dispatch, or cobra only if it is already an indirect dependency and go-1.24-clean) dispatching to a `Backend` interface (Create, Exec, ReadFile, WriteFile, Fork, Terminate, ListSandboxes) reused/aligned with the MCP `SandboxBackend`. A cluster backend creates a `SandboxClaim`, waits for Ready, reads the claim-owned bearer-token Secret, and execs via the forkd HTTP sandbox API (mirroring the Python SDK). `agentrun dev up` orchestrates kind plus `kubectl apply` of CRDs/controller plus a default pool, in mock mode. `cmd/agentrun` wires the real backend and the kubeconfig.
+
+**Context for the implementer:**
+- The operations the CLI wraps exist: the Python SDK `sdk/python/agent_run/sandbox.py` shows the cluster claim path (create SandboxClaim, poll status to Ready, read `<claim>-sandbox-token` Secret, exec via `http://<endpoint>/v1/exec` with the bearer token). The MCP `internal/mcp/backend.go` SandboxBackend + `httpbackend.go` show the HTTP shapes against sandbox-server; reuse/align the interface.
+- `kubectl sandbox ls` exists (`cmd/kubectl-sandbox`, `internal/cli/sandboxtable`); reuse the sandboxtable formatters for `agentrun sandbox ls`.
+- Local dev assets: `hack/kind-setup.sh`, `hack/e2e-test.sh`, `deploy/crds/`, `deploy/controller/`, `examples/python-pool.yaml`. `cmd/controller --mock` runs without KVM. The kind CI job in `.github/workflows/ci.yaml` shows the kind setup pattern.
+- k8s client: mirror `cmd/controller`/`cmd/kubectl-sandbox` (runtime scheme + v1alpha1.AddToScheme + controller-runtime client from kubeconfig).
+- Conventions: CLAUDE.md authoritative. No em/en dashes. TDD. Explicit-path git add. Conventional commits, `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Lint darwin + GOOS=linux. Do not regress go 1.24. Never log tokens.
+
+---
+
+### Task 1: `internal/agentcli` command tree + Backend, unit-tested with a fake
+
+**Files:** Create `internal/agentcli/cli.go`, `internal/agentcli/backend.go`, `internal/agentcli/commands.go`, and `_test.go`.
+
+- [ ] CLI framework decision: prefer the stdlib `flag` package with a subcommand dispatcher (dependency-free), UNLESS `github.com/spf13/cobra` is already an indirect dependency (check `go list -m github.com/spf13/cobra` and `github.com/spf13/pflag`) and using it adds no new direct-dep risk on go 1.24. State the decision. The stdlib approach is the safe default.
+- [ ] `backend.go`: `type Backend interface { Create(ctx, pool string) (sandboxID string, err error); Exec(ctx, sandboxID, command string, timeoutSec int) (ExecResult, error); ReadFile/WriteFile; Fork(ctx, sandboxID string, n int) ([]string, error); Terminate(ctx, sandboxID string) error; List(ctx, namespace string) ([]SandboxInfo, error) }` (align with mcp.SandboxBackend where possible; SandboxInfo = name/pool/phase/node/endpoint/age fields for ls). A `FakeBackend` recording calls and returning canned results.
+- [ ] `commands.go` / `cli.go`: the command tree. `agentrun run <cmd> [--pool P] [--timeout N]` = Create(pool) then Exec then Terminate, printing stdout/stderr/exit code. `agentrun sandbox create [--pool P]` prints the id; `sandbox ls [-n ns] [-A]` prints a table (reuse internal/cli/sandboxtable if it lists claims, or format SandboxInfo); `sandbox exec <id> <cmd>`; `sandbox fork <id> [--replicas N]`; `sandbox terminate <id>`. `agentrun dev up|down` dispatched to Task 2. A top-level `Run(ctx, args []string, backend Backend, out, errw io.Writer) int` returning an exit code so it is fully testable. Errors are clear and actionable (the LLM-legible spirit, but human-facing here).
+- [ ] Tests: `Run` with a FakeBackend and captured output: `run` creates+execs+terminates (assert the backend recorded all three and the output contains stdout); `sandbox create` prints the id; `sandbox ls` formats the fake list; `sandbox exec/fork/terminate` dispatch; unknown subcommand and missing args print usage and return a nonzero exit. No cluster.
+- [ ] Commit `feat: agentrun CLI command tree and Backend interface`.
+
+### Task 2: `agentrun dev up|down` + cluster Backend
+
+**Files:** `internal/agentcli/dev.go` + test, `internal/agentcli/clusterbackend.go` + test, `cmd/agentrun/main.go`.
+
+- [ ] `dev.go`: `DevUp(ctx, opts)` orchestrates (shell out to `kind`/`kubectl`, which CI and devs have): create a kind cluster (a fixed name, reuse hack/kind-config.yaml shape), `kubectl apply -f deploy/crds/ -f deploy/controller/`, run the controller in `--mock` mode (or apply a mock-mode controller manifest), and apply a default pool (a minimal SandboxPool/Template). `DevDown` deletes the kind cluster. Inject the command runner (a `runner func(ctx, argv []string) error`) so the orchestration sequence is unit-testable without a real kind. Print a clear note: local dev uses the mock engine; real exec needs a KVM node. Idempotent where reasonable (dev up twice does not fail hard).
+- [ ] `clusterbackend.go`: a `Backend` over the k8s cluster: Create = create a SandboxClaim from the pool, poll to Ready (bounded), return the claim name as the sandbox id; Exec/ReadFile/WriteFile = read the `<claim>-sandbox-token` Secret and POST to the claim endpoint with the bearer token (mirror the Python SDK and mcp.HTTPBackend shapes); Fork = create a SandboxFork; Terminate = delete the claim; List = list SandboxClaims (reuse the sandboxtable mapping). Never log the token. Unit-test the HTTP exec part against an httptest server (bearer header sent, body shape) and the claim translation with a fake k8s client (controller-runtime fake client) for Create/List/Terminate.
+- [ ] `cmd/agentrun/main.go`: wire kubeconfig + the cluster backend; flags (`--namespace`, `--pool`); `agentrun dev` uses the dev orchestration (no backend needed). Log to stderr; never the token.
+- [ ] TDD: DevUp with a recording runner asserts the kind-create / kubectl-apply / pool-apply sequence and DevDown the delete; the cluster backend Create/List/Terminate against a fake k8s client; the exec HTTP against httptest.
+- [ ] Commit `feat: agentrun dev up/down and cluster backend`.
+
+### Task 3: kind CI smoke + docs + PR
+
+**Files:** `.github/workflows/ci.yaml` (extend the kind-e2e job), `docs/cli.md` (new), `README.md` (quick-start uses agentrun), `ROADMAP.md`, full verification.
+
+- [ ] kind CI: in the existing kind-e2e job (which already stands up a kind cluster), build `cmd/agentrun`, run `agentrun dev up` against the kind cluster (or assert the orchestration applies the CRDs/controller/pool if the job already has a cluster, adapt so dev up uses the existing cluster or creates its own), then `agentrun sandbox ls` (asserts the CLI talks to the control plane and lists, even if empty -> "No sandboxes found"), create a claim via `agentrun sandbox create` and assert it reaches Ready (mock engine), then `agentrun dev down` (or cleanup). Gate on the CLI commands succeeding. Keep it honest: do NOT assert a real exec on kind (mock engine); assert claim Ready + ls + control-plane dispatch. Document the mock limitation in the step.
+- [ ] `docs/cli.md` (new): the command reference (run, sandbox *, dev up/down), the two backends (cluster via kubeconfig; the dev mock-mode local cluster), how `agentrun dev up` works and the mock-engine note, examples. What is PROVEN (command dispatch, cluster claim path, dev orchestration, ls, in CI) vs the mock-engine exec limitation on kind (real exec proven by the KVM CI of the API).
+- [ ] README: update the Quick start so the local-dev path uses `agentrun dev up` + `agentrun run` (with the mock-engine note), pointing at docs/cli.md. Keep scoped; no unverified claims.
+- [ ] ROADMAP section 7 (ergonomics): flip the agentrun CLI + one-command local dev line to done (run/sandbox/dev verbs, kind smoke), noting workspace verbs (ws) deferred to Workspace #21.
+- [ ] Full verification (build darwin + GOOS=linux, vet, lint both, all Go suites with envtest, Python suite, gofmt zero, dash grep zero, go 1.24 preserved, YAML parse, `go build ./cmd/agentrun`).
+- [ ] Push `feat/agentrun-cli`, PR `agentrun CLI: run, sandbox, and one-command local dev` body Closes #26 (run/sandbox/dev proven; ws verbs deferred to #21), watch CI, dismiss guarded CodeQL alerts with justification if any, merge when green.
+
+**Out of scope (follow-ups):** `agentrun ws log|diff|revert|branch` (workspace verbs pending Workspace #21); `agentrun pool create|refresh` beyond what dev up needs; streaming exec / PTY (`exec_stream`) pending the Connect protocol #23; the `curl | sh` installer and a `get.agentrun.dev` (release/distribution, ties into release machinery #37); shell completions; the code-interpreter-compatible API shim.

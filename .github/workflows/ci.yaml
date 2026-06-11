@@ -70,10 +70,39 @@ jobs:
           docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
           kind load docker-image agent-run-controller:ci --name agent-run-ci
           kind load docker-image agent-run-forkd:ci --name agent-run-ci
-      - name: Install CRDs
+      - name: Build agentrun CLI
+        run: go build -o /usr/local/bin/agentrun ./cmd/agentrun/
+      - name: agentrun dev up (mock control plane on the existing kind cluster)
+        # The dev overlay (deploy/dev/) runs a MOCK control plane: forkd --mock
+        # (no KVM, no /dev/kvm, no kvm nodeSelector) and the controller with
+        # --mock --disable-pki-bootstrap so it dials forkd over insecure gRPC.
+        # --skip-cluster-create targets the kind cluster this job already stood
+        # up. The dev manifests reference the agent-run-controller:ci /
+        # agent-run-forkd:ci images loaded above with imagePullPolicy:
+        # IfNotPresent.
+        run: agentrun dev up --skip-cluster-create
+      - name: Wait for the mock control plane to be Ready
         run: |
-          make manifests 2>/dev/null || true
-          kubectl apply -f deploy/crds/ 2>/dev/null || echo "CRDs not generated yet"
-      - name: Apply examples
+          kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
+          kubectl -n agent-run rollout status daemonset/agent-run-forkd --timeout=180s
+      - name: agentrun sandbox ls (control-plane dispatch lists claims)
+        run: agentrun sandbox ls
+      - name: agentrun sandbox create reaches Ready on the mock engine
+        # The controller discovers the mock forkd, builds the dev-default pool
+        # snapshot over insecure gRPC, and the claim forks via the mock engine
+        # and reaches Ready. The mock engine has NO guest VM, so this asserts the
+        # claim/fork path (claim -> Ready) and control-plane dispatch only; real
+        # in-VM exec is NOT exercised here (proven by the KVM CI of the API).
         run: |
-          kubectl apply -f examples/python-pool.yaml 2>/dev/null || echo "Skipped (CRDs needed)"
+          set -euo pipefail
+          # Give the pool reconciler time to build the snapshot on the discovered
+          # mock forkd before claiming.
+          kubectl -n default wait --for=jsonpath='{.status.readySnapshots}'=1 \
+            sandboxpool/dev-default --timeout=120s
+          ID=$(agentrun sandbox create --pool dev-default)
+          echo "created sandbox: $ID"
+          agentrun sandbox ls | grep -q "$ID"
+          agentrun sandbox terminate "$ID"
+      - name: agentrun dev down (cleanup)
+        if: always()
+        run: kubectl delete -k deploy/dev/ --ignore-not-found=true || true

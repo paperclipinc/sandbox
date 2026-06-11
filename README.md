@@ -104,18 +104,32 @@ Sandboxes are not pods. Pod-scoped Kubernetes mechanisms do not govern sandbox V
 
 ### Local development (no KVM required)
 
-```bash
-go run ./cmd/sandbox-server --mock --addr :8080
+One command brings up a local kind cluster running a mock control plane, then the
+`agentrun` CLI drives the full claim path:
 
-cd sdk/python && pip install -e .
-python -c "
-from agent_run.direct import SandboxServer
-s = SandboxServer('http://localhost:8080')
-s.create_template('python')
-sb = s.fork('python')
-print(sb.exec('echo hello').stdout)
-"
+```bash
+go build -o agentrun ./cmd/agentrun/
+
+# build + load the dev images the overlay references, then bring up the cluster
+docker build -f Dockerfile.controller -t agent-run-controller:ci .
+docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+kind create cluster --name agentrun-dev --config hack/kind-config.yaml
+kind load docker-image agent-run-controller:ci --name agentrun-dev
+kind load docker-image agent-run-forkd:ci --name agentrun-dev
+
+./agentrun dev up --skip-cluster-create
+./agentrun sandbox create --pool dev-default   # reaches Ready on the mock engine
+./agentrun sandbox ls
+./agentrun run echo hello --pool dev-default
+./agentrun dev down
 ```
+
+The local dev cluster uses the mock fork engine (no KVM): claims reconcile to
+`Ready` and control-plane dispatch works, but a real in-VM `exec` needs a node
+with `/dev/kvm`. See [docs/cli.md](docs/cli.md) for the full command reference,
+the backends, and what is proven. For the no-cluster REST loop, run
+`go run ./cmd/sandbox-server --mock --addr :8080` and use the Python SDK
+(`sdk/python`).
 
 ### On a cluster
 

@@ -276,6 +276,15 @@ verified. In rough order of leverage:
   zero SDK integration. A conformance test drives the server as a real MCP
   client in standard CI; see docs/mcp.md. Open: workspace tools (#21) and
   capability-budget advertisement (#24).
+- ✅ **agentrun CLI + one-command local dev**: `agentrun run` and `agentrun
+  sandbox create|ls|exec|fork|terminate` drive the `SandboxClaim` path over
+  kubeconfig with token-scoped exec; `agentrun dev up|down` brings up a kind
+  cluster running a mock control plane (controller `--mock
+  --disable-pki-bootstrap`, forkd `--mock`, no KVM) from `deploy/dev/`. PROVEN in
+  the kind CI smoke: `dev up` + `sandbox create` reaches Ready + `ls` + `terminate`
+  on the mock engine; real in-VM exec is proven by the KVM CI of the API. See
+  docs/cli.md. OPEN: workspace verbs (`agentrun ws ...`) deferred to Workspace
+  (#21).
 - ⬜ Streaming exec (stdout/stderr), stdin, **PTY mode**, file transfer,
   port forwarding, the daily-driver agent-harness needs
 - ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex
@@ -286,8 +295,9 @@ verified. In rough order of leverage:
 - ⬜ TypeScript SDK (currently does not exist; README labels it planned)
   + shared Python/TS conformance suite; README samples executed in CI
 - ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
-- ⬜ `make dev` one-command local story (kind + mock engine today; document
-  KVM-passthrough path)
+- ✅ One-command local story: `agentrun dev up` (kind + mock control plane from
+  deploy/dev/), proven in the kind CI smoke. OPEN: document the KVM-passthrough
+  path for real local exec.
 - ⬜ Helm chart (README previously implied one exists; it does not yet)
 
 ## 8. Observability
