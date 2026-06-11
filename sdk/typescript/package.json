@@ -1,0 +1,35 @@
+{
+  "name": "@agentrun/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the agent-run sandbox runtime: direct sandbox-server mode and Kubernetes cluster mode.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "tsc --noEmit && npm run check:examples",
+    "check:examples": "tsc --project tsconfig.examples.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.5",
+    "typescript": "5.7.3",
+    "vitest": "3.2.6"
+  },
+  "license": "Apache-2.0"
+}

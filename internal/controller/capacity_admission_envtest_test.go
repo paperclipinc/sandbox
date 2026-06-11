@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const gib = int64(1024 * 1024 * 1024)
@@ -149,22 +151,17 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 	}
 
 	// Backdate the pending-since stamp well past the default 5m bound so the
-	// next reconcile sees the bounded wait exceeded and fails the claim. Retry
-	// on the conflict a concurrent requeue may cause.
-	backdate := func() error {
-		cur := getClaim(t, "cap2")
-		cur.Annotations[capacityPendingSinceKey] = time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-		return k8sClient.Update(ctx, &cur)
-	}
-	var updateErr error
-	for i := 0; i < 5; i++ {
-		if updateErr = backdate(); updateErr == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if updateErr != nil {
-		t.Fatalf("backdate pending annotation: %v", updateErr)
+	// next reconcile sees the bounded wait exceeded and fails the claim. A merge
+	// patch carries no resourceVersion precondition, so a concurrent reconcile
+	// requeue cannot cause an optimistic-lock conflict (a full Update would).
+	patch := client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:%q}}}`,
+		capacityPendingSinceKey,
+		time.Now().Add(-10*time.Minute).Format(time.RFC3339),
+	)))
+	target := &v1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "cap2-claim", Namespace: "default"}}
+	if err := k8sClient.Patch(ctx, target, patch); err != nil {
+		t.Fatalf("backdate pending annotation: %v", err)
 	}
 
 	failed := waitForPhase(t, "cap2", v1alpha1.SandboxFailed, 15*time.Second)

@@ -385,8 +385,15 @@ verified. In rough order of leverage:
 - ✅ `kubectl sandbox` plugin: ls (SandboxClaims) and ps (SandboxForks) are
   done (pure table formatter unit-tested in CI; live listing over kubeconfig).
   OPEN: top/tree/exec/cp/logs/port-forward for operators.
-- ⬜ TypeScript SDK (currently does not exist; README labels it planned)
-  + shared Python/TS conformance suite; README samples executed in CI
+- ✅ TypeScript SDK (`@agentrun/sdk`): `Sandbox` exec/fork/terminate/files over
+  the forkd HTTP API with bearer auth; `SandboxServer` direct mode;
+  `AgentRun` cluster mode over a mockable `K8sApi` interface;
+  `@kubernetes/client-node` lazy-loaded so direct mode stays light; token
+  never logged, redacted from errors; 31 conformance tests drive the client
+  against a mock server reproducing the same wire shapes the Python SDK/MCP/CLI
+  use; `typescript-sdk` CI job builds, tests, type-checks, and packs the
+  package; real in-VM exec proven by the KVM CI of the underlying API; npm
+  publish is a release follow-up. Parity table in sdk/typescript/README.md.
 - ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
 - ✅ One-command local story: `agentrun dev up` (kind + mock control plane from
   deploy/dev/), proven in the kind CI smoke. OPEN: document the KVM-passthrough
