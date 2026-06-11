@@ -62,6 +62,14 @@ func TestNftDeleteSandboxChainArgs(t *testing.T) {
 	}
 }
 
+func TestNftDeleteSandboxAllowSetArgs(t *testing.T) {
+	got := NftDeleteSandboxAllowSetArgs("sbtap0")
+	want := []string{"nft", "delete", "set", "inet", SharedTableName(), SandboxAllowSetName("sbtap0")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NftDeleteSandboxAllowSetArgs = %v, want %v", got, want)
+	}
+}
+
 func TestMasqueradeAddArgs(t *testing.T) {
 	got := MasqueradeAddArgs("10.200.0.0/16", "eth0")
 	want := []string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.200.0.0/16", "-o", "eth0", "-j", "MASQUERADE"}

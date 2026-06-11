@@ -131,15 +131,16 @@ func TestTeardownCommandOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
-	// link del, dispatch element del, sandbox chain del. The shared table is
-	// NOT deleted: other sandboxes may still use it.
-	if len(rr.calls) != 3 {
-		t.Fatalf("expected 3 commands, got %d: %+v", len(rr.calls), rr.calls)
+	// link del, dispatch element del, sandbox chain del, dynamic allow set del.
+	// The shared table is NOT deleted: other sandboxes may still use it.
+	if len(rr.calls) != 4 {
+		t.Fatalf("expected 4 commands, got %d: %+v", len(rr.calls), rr.calls)
 	}
 	wantArgv := [][]string{
 		netconf.LinkDelArgs(id.TapName),
 		netconf.NftDeleteDispatchElementArgs(id.TapName),
 		netconf.NftDeleteSandboxChainArgs(id.TapName),
+		netconf.NftDeleteSandboxAllowSetArgs(id.TapName),
 	}
 	for i, w := range wantArgv {
 		if !reflect.DeepEqual(rr.calls[i].argv, w) {
@@ -163,7 +164,7 @@ func TestTeardownBestEffort(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from link del")
 	}
-	if len(rr.calls) != 3 {
+	if len(rr.calls) != 4 {
 		t.Errorf("expected all teardown commands to run, got %d", len(rr.calls))
 	}
 }
@@ -176,9 +177,10 @@ func TestTeardownWithMasquerade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
-	// masquerade del, link del, dispatch element del, sandbox chain del.
-	if len(rr.calls) != 4 {
-		t.Fatalf("expected 4 commands, got %d", len(rr.calls))
+	// masquerade del, link del, dispatch element del, sandbox chain del,
+	// dynamic allow set del.
+	if len(rr.calls) != 5 {
+		t.Fatalf("expected 5 commands, got %d", len(rr.calls))
 	}
 	if !reflect.DeepEqual(rr.calls[0].argv, netconf.MasqueradeDelArgs("10.200.0.0/16", "eth0")) {
 		t.Errorf("first teardown call = %v, want masquerade del", rr.calls[0].argv)

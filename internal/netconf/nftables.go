@@ -187,6 +187,18 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 			table, chain, saddr, resolverIP.String())
 	}
 
+	// Dynamic allow set: the DNS proxy pins (resolved ip . port) elements with a
+	// timeout here as it answers allowlisted name queries. Declare the set, then
+	// accept traffic whose (daddr . dport) is currently present in it. The set
+	// is declared before its accept rule so the rule's reference resolves, and
+	// the accept is placed after the static IP:port allows and the
+	// DNS-to-resolver rules but before the final verdict, so a pinned name is
+	// reachable only while its element lives and only on its allowed port. Like
+	// every other accept it is saddr-pinned to stop source spoofing on this tap.
+	set := SandboxAllowSetName(tap)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service ; flags timeout ; }\n", table, set)
+	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr . tcp dport @%s accept\n", table, chain, saddr, set)
+
 	// Final verdict for this sandbox's packets: drop under EgressDeny, accept
 	// under EgressAllow. Terminal within this regular chain for this packet
 	// only, so it cannot affect other taps' chains.
