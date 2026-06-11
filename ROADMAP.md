@@ -107,8 +107,12 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
 - ✅ Truthful claim endpoints (point at forkd's sandbox API, not a
   fabricated address)
 - ✅ Python SDK k8s mode speaks the actual forkd API
-- ⬜ Volume fork policies actually attach volumes to VMs (handlers are
-  currently no-ops; `Snapshot` needs a real btrfs/reflink backend)
+- ✅ Volume fork policies attach volumes to VMs for `Fresh` (new empty ext4)
+  and `Snapshot` (reflink CoW): node-side `internal/volume` backend, placeholder
+  drives baked at snapshot + PATCH-rebind per fork, guest mounts at the mount
+  path, KVM-CI-proven (Fresh round-trip + Snapshot CoW independence on a btrfs
+  loopback). `Share` (read-only shared attach) and `Clone` (full copy) are
+  partial; external volume sources (S3/GCS/PVC/Git) and CSI clone remain open.
 - ✅ Secrets delivered into the guest over vsock (strict on real engines;
   wire encryption pending #4)
 

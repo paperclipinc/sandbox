@@ -14,6 +14,8 @@ on:
       - 'cmd/cas-verify/**'
       - 'cmd/net-smoke/**'
       - 'cmd/tmpl-smoke/**'
+      - 'cmd/vol-smoke/**'
+      - 'internal/volume/**'
       - 'internal/ociroot/**'
       - 'internal/vsock/**'
   pull_request:
@@ -561,6 +563,85 @@ jobs:
 
           echo "================================"
           echo "  Fork-correctness checks passed"
+          echo "================================"
+
+      # Volume proof: per-fork block-device VOLUMES on a REFLINK-CAPABLE
+      # filesystem. The engine roots its volume backings under its data dir, so
+      # this phase puts that data dir on a btrfs loopback file (btrfs supports
+      # reflink, so cp --reflink=always gives instant CoW). It builds a template
+      # with TWO volumes (a Fresh volume and a Snapshot volume seeded host-side
+      # with /seeded.txt), forks TWO sandboxes, and asserts via the guest agent:
+      #   1. Fresh round-trip: fork1 writes a file to its Fresh volume and reads
+      #      it back, proving the volume is mounted writable.
+      #   2. Snapshot CoW independence: both forks see the seeded file; fork1
+      #      writes a fork-unique file to its Snapshot volume; fork2 does NOT see
+      #      it AND the host seed image is byte-for-byte unchanged, proving the
+      #      reflink copies diverge (true copy-on-write, no shared backing).
+      #   3. Read-only Share: a write to the read-only Share volume is refused.
+      # cmd/vol-smoke drives fork.NewEngine with --enable-volumes so the engine's
+      # volume attach + guest mount path is the thing under test. This phase
+      # GATES: any assertion failure fails the job. The rootfs is hand-built (no
+      # registry pull), so there is no pull flake to distinguish here.
+      - name: Per-fork volumes, Fresh round-trip and Snapshot CoW independence on btrfs
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          # --- reflink-capable loopback filesystem for the engine data dir ---
+          # btrfs supports reflink (cp --reflink=always), which is what the
+          # Snapshot policy needs for instant CoW. A ~2G loop file is plenty for
+          # the small volumes here.
+          sudo apt-get install -y btrfs-progs
+          VOL_ROOT=/mnt/vol-btrfs
+          BTRFS_IMG=/tmp/agent-run-test/btrfs.img
+          dd if=/dev/zero of=$BTRFS_IMG bs=1M count=2048 status=none
+          mkfs.btrfs -q $BTRFS_IMG
+          sudo mkdir -p $VOL_ROOT
+          sudo mount -o loop $BTRFS_IMG $VOL_ROOT
+          sudo chmod 777 $VOL_ROOT
+          echo "Engine data dir on btrfs (reflink-capable):"
+          mount | grep "$VOL_ROOT"
+
+          # --- build a busybox + agent rootfs for the template ---
+          WORKDIR=/tmp/agent-run-test/vol-build
+          mkdir -p $WORKDIR
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run,mnt}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          # echo/cat/sync are the volume assertions; mkdir/ls/rm round out the set.
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr sync mount; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/vol-smoke ./cmd/vol-smoke/
+
+          # The engine data dir lives ON the btrfs mount so the volume backings
+          # (and their reflink copies) are reflink-capable.
+          sudo /tmp/vol-smoke \
+            --image $WORKDIR/rootfs.ext4 \
+            --data-dir $VOL_ROOT/vol-data \
+            --firecracker /usr/local/bin/firecracker \
+            --kernel /tmp/agent-run-test/vmlinux \
+            --agent-bin /tmp/agent-run-test/agent \
+            --fresh-mount /mnt/fresh \
+            --snap-mount /mnt/snap \
+            --share-mount /mnt/share \
+            --seed-content seed-value
+
+          sudo umount $VOL_ROOT || true
+          echo "================================"
+          echo "  Per-fork volumes proven (Fresh round-trip + Snapshot CoW independence)"
           echo "================================"
 
       # Benchmark phase: run the reproducible cmd/bench harness against the real

@@ -48,7 +48,7 @@ Two ways to run it:
 
 **Forkable**
 - Fork any running sandbox into N independent copies (`SandboxFork`)
-- Per-volume fork policies: `Fresh`, `Share`, `Clone`, `Snapshot` (API defined; backends in progress, [#11](https://github.com/paperclipinc/sandbox/issues/11))
+- Per-volume fork policies ([#11](https://github.com/paperclipinc/sandbox/issues/11)): `Fresh` (new empty ext4) and `Snapshot` (reflink copy-on-write) are implemented end to end and CI-proven on a reflink-capable filesystem (Fresh round-trips a write; Snapshot forks are CoW-independent); `Share` attaches the seed read-only to every fork; `Clone` is a full copy. External volume sources (S3/GCS/PVC/Git) are not yet materialized. See [docs/volumes.md](docs/volumes.md)
 - Each fork gets its own KVM-isolated microVM
 - Live forks of secret-holding sandboxes are rejected unless explicitly opted in; forks never silently inherit credentials
 
