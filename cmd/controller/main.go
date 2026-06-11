@@ -26,6 +26,18 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
+// resolveRunMode picks the single active controller run path from the flags.
+// husk pods is the pod-native default; --enable-raw-forkd selects the
+// fork-per-claim fallback, and --mock forces it too (the dev mock overlay has no
+// KVM, so a husk pod's dormant VMM cannot run). It returns the resolved
+// EnableHuskPods (husk on) and a rawForkd marker for logging. Exactly one path
+// is active: huskPods == !rawForkd.
+func resolveRunMode(enableHuskPods, enableRawForkd, mockMode bool) (huskPods, rawForkd bool) {
+	rawForkd = enableRawForkd || mockMode
+	huskPods = enableHuskPods && !rawForkd
+	return huskPods, rawForkd
+}
+
 func main() {
 	var metricsAddr string
 	var probeAddr string
@@ -34,6 +46,7 @@ func main() {
 	var otlpEndpoint string
 	var maxPendingDuration time.Duration
 	var enableHuskPods bool
+	var enableRawForkd bool
 	var huskStubImage string
 	var huskControlPort int
 	var huskDataDir string
@@ -43,7 +56,8 @@ func main() {
 	flag.BoolVar(&mockMode, "mock", false, "Use mock fork engine (no KVM required, for local dev with kind)")
 	flag.BoolVar(&disablePKIBootstrap, "disable-pki-bootstrap", false, "Skip creating the control plane CA and TLS Secrets; forkd dialing is then UNAUTHENTICATED unless the cluster brings its own certs")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
-	flag.BoolVar(&enableHuskPods, "enable-husk-pods", false, "Maintain a warm pool of pre-scheduled husk pods per SandboxPool instead of building node-local snapshots (issue #18, slice 1). Default false: the raw-forkd snapshot path is used.")
+	flag.BoolVar(&enableHuskPods, "enable-husk-pods", true, "Pod-native default (issue #18): each SandboxPool builds the template snapshot AND maintains a warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes; claims activate a dormant husk pod in place. This is the default; pass --enable-raw-forkd to fall back to the fork-per-claim path. Ignored when --enable-raw-forkd or --mock is set (both force raw-forkd).")
+	flag.BoolVar(&enableRawForkd, "enable-raw-forkd", false, "Fallback run path: build the snapshot and fork per claim on a holder node (no husk pods). Off by default (the husk pod-native path runs). --mock implies this. husk-pods needs real KVM nodes; raw-forkd is the path the mock/dev overlay uses.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "agent-run-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/agent-run", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
@@ -60,8 +74,20 @@ func main() {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
+	// Resolve the single active run path. husk pods is the pod-native default;
+	// --enable-raw-forkd selects the fork-per-claim fallback. --mock forces
+	// raw-forkd: the dev mock overlay cannot really run a husk pod's dormant VMM
+	// (it has no KVM), so mock implies the raw-forkd path the dev overlay uses.
+	// forkd-the-builder runs regardless in both modes (it builds the snapshots).
+	enableHuskPods, rawForkd := resolveRunMode(enableHuskPods, enableRawForkd, mockMode)
+	if rawForkd {
+		logger.Info("run path: raw-forkd (fork per claim); husk pods disabled", "reason-mock", mockMode, "reason-flag", enableRawForkd)
+	} else {
+		logger.Info("run path: husk pods (pod-native default); the pool builds the snapshot and maintains a warm husk pod pool. husk-pods requires real KVM nodes")
+	}
+
 	if mockMode {
-		logger.Info("--mock on the controller is a no-op: mock mode now lives in forkd (run `forkd --mock`); the controller discovers mock forkd instances via pod discovery")
+		logger.Info("--mock: the controller discovers mock forkd instances via pod discovery and forces the raw-forkd run path (no husk pods, which need real KVM nodes)")
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

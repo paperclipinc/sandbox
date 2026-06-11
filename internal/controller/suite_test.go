@@ -128,9 +128,17 @@ func TestMain(m *testing.M) {
 	nodeRegistry := controller.NewNodeRegistry()
 	testRegistry = nodeRegistry
 
+	// The suite's manager-level pool reconciler runs the raw-forkd path
+	// explicitly (EnableHuskPods false). The husk-mode pool reconcile (build the
+	// snapshot + create husk pods) is covered by a directly driven reconciler in
+	// husk_pool_build_test.go, so the manager does not create husk pods for every
+	// pool every other test makes. With the default now husk-on in
+	// cmd/controller, each test is explicit about its mode so both paths stay
+	// covered.
 	_ = (&controller.SandboxPoolReconciler{
-		Client:       mgr.GetClient(),
-		NodeRegistry: nodeRegistry,
+		Client:         mgr.GetClient(),
+		NodeRegistry:   nodeRegistry,
+		EnableHuskPods: false,
 	}).SetupWithManager(mgr)
 
 	rawClaim := &controller.SandboxClaimReconciler{

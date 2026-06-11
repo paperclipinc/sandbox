@@ -114,7 +114,20 @@ type HuskPodOptions struct {
 	// separate from the leaf so the CA private key never reaches the husk pod,
 	// mirroring the forkd DaemonSet's /etc/forkd/ca split. Empty means no CA mount.
 	CASecretName string
+	// SnapshotNodes is the set of node hostnames the pool has materialized the
+	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
+	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
+	// read-only snapshot hostPath always resolves. PLACEMENT COUPLING: the pool
+	// reconcile builds the snapshot on these same nodes before creating husk pods.
+	// When empty the pod falls back to the kvm nodeSelector alone (the
+	// build-on-all-kvm-nodes coupling: the snapshot is on every kvm node).
+	SnapshotNodes []string
 }
+
+// hostnameNodeLabel is the well-known node label carrying the node's hostname.
+// A husk pod's nodeAffinity matches it against the snapshot-holding nodes so the
+// pod lands only where the template snapshot exists.
+const hostnameNodeLabel = "kubernetes.io/hostname"
 
 // defaultDataDir is the forkd data directory default; the snapshot hostPath is
 // rooted here when HuskPodOptions.DataDir is empty (matches cmd/forkd's
@@ -261,6 +274,32 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		mounts = append(mounts, corev1.VolumeMount{Name: "kernel", MountPath: huskKernelMountPath, ReadOnly: true})
 	}
 
+	// Placement: the dormant VMM needs /dev/kvm (the kvm nodeSelector) AND the
+	// read-only snapshot hostPath must resolve, so the pod must land where the
+	// pool materialized the template snapshot. When the pool passes the
+	// snapshot-holding node hostnames (NodesWithTemplate), a required nodeAffinity
+	// pins the pod to exactly those nodes; without it, the pod falls back to the
+	// kvm nodeSelector alone (the snapshot is then assumed present on every kvm
+	// node, the documented build-on-all-kvm-nodes coupling).
+	var affinity *corev1.Affinity
+	if len(opts.SnapshotNodes) > 0 {
+		nodes := append([]string(nil), opts.SnapshotNodes...)
+		sort.Strings(nodes)
+		affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      hostnameNodeLabel,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   nodes,
+						}},
+					}},
+				},
+			},
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
@@ -275,8 +314,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// until terminated. Restart on crash so the warm slot recovers.
 			RestartPolicy: corev1.RestartPolicyAlways,
 			// Pin to a KVM node: the dormant VMM needs /dev/kvm AND the pod must
-			// land where the template snapshot hostPath exists.
+			// land where the template snapshot hostPath exists. The nodeAffinity
+			// above narrows further to the snapshot-holding nodes when known.
 			NodeSelector: map[string]string{huskKVMNodeLabel: "true"},
+			Affinity:     affinity,
 			Volumes:      volumes,
 			Containers: []corev1.Container{
 				{
@@ -389,6 +430,10 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			DataDir:         r.DataDir,
 			TLSSecretName:   r.HuskTLSSecretName,
 			CASecretName:    r.HuskCASecretName,
+			// Pin husk pods to the nodes the pool built the snapshot on, so the
+			// read-only snapshot hostPath resolves. Empty (no registry, or no node
+			// holds it yet) falls back to the kvm nodeSelector alone.
+			SnapshotNodes: r.snapshotNodeNames(pool.Spec.TemplateRef.Name),
 		}
 		for i := int32(0); i < deficit; i++ {
 			pod := r.buildHuskPod(pool, template, opts)
