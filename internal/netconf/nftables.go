@@ -45,6 +45,17 @@ func SandboxChainName(tap string) string {
 	return "sb_" + tap
 }
 
+// SandboxAllowSetName returns the per-sandbox dynamic allow set name for a tap.
+// The set holds (ipv4_addr . inet_service) elements with a timeout flag and is
+// populated at runtime by the DNS proxy as it resolves allowlisted names. The
+// per-sandbox chain accepts traffic whose (daddr . dport) is present in this
+// set, so a resolved name's address is reachable only until its TTL expires.
+// It is named the same way as SandboxChainName so a tap's chain and set share a
+// stable, collision-free identity.
+func SandboxAllowSetName(tap string) string {
+	return "sb_" + tap + "_dyn"
+}
+
 // ParseAllowEntry parses a single allowlist entry of the form host:port. When
 // host is a literal IPv4 address it returns the HostPort and isName=false.
 // When host is a DNS name it returns isName=true (these cannot be enforced in
