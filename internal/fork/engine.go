@@ -1104,6 +1104,20 @@ func (e *Engine) Terminate(sandboxID string) error {
 
 // ListSandboxes returns a record for every sandbox this engine currently
 // holds. Order is unspecified.
+// SandboxPID returns the Firecracker process PID for a live sandbox and whether
+// it was found. It is a read-only accessor used by measurement tooling
+// (cmd/husk-probe) that must place the VM process in a cgroup and read its
+// /proc entries; it does not expose any control over the process.
+func (e *Engine) SandboxPID(sandboxID string) (int, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	s, ok := e.sandboxes[sandboxID]
+	if !ok {
+		return 0, false
+	}
+	return s.Pid, true
+}
+
 func (e *Engine) ListSandboxes() []SandboxRecord {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
