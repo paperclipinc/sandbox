@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
@@ -45,13 +46,48 @@ const (
 	// scheduled only onto a node with /dev/kvm; this replaces privileged: true.
 	defaultKVMResourceName = "agentrun.dev/kvm"
 
-	// huskControlSocket is the in-pod path the dormant stub listens on for
-	// activate requests. The activation transport is slice 2; for slice 1 the
-	// stub just Prepares the dormant VMM and serves this socket.
-	huskControlSocket = "/run/husk/control.sock"
 	// huskWorkdir is the per-VM working directory the stub uses.
 	huskWorkdir = "/run/husk/vm"
+
+	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
+	// Selection skips any pod carrying it: one claim activates one husk pod.
+	huskClaimLabel = "agentrun.dev/claim"
+
+	// huskKVMNodeLabel is the node label the KVM device plugin / node bootstrap
+	// sets on a node that has /dev/kvm (deploy/talos). A husk pod is pinned to
+	// such a node so the dormant VMM can open KVM AND so it lands where the
+	// template snapshot is materialized (the pool's build/distribution machinery
+	// places the snapshot on these nodes; see the placement note below).
+	huskKVMNodeLabel = "agentrun.dev/kvm"
+
+	// HuskControlPort is the fixed TCP port the husk stub serves the mTLS network
+	// control on (--control-listen). The controller dials podIP:HuskControlPort
+	// to activate. Exported so cmd/controller can pass the same port to the claim
+	// reconciler.
+	HuskControlPort = 9443
+
+	// huskSandboxPort is the in-pod port the activated VM's sandbox HTTP API is
+	// reachable on (exec/files). The claim's Status.Endpoint is podIP:this, the
+	// same shape forkd's HTTPEndpoint uses (forkd_discovery defaults 9091).
+	huskSandboxPort = 9091
+
+	// In-pod paths the stub's TLS, snapshot, and kernel mounts land on. The
+	// snapshot mount is the directory the ActivateRequest.SnapshotDir points at:
+	// the stub reads SnapshotDir/mem and SnapshotDir/vmstate (husk/control.go),
+	// which is the forkd snapshot subdir <dataDir>/templates/<id>/snapshot. The
+	// leaf cert/key and the CA are SEPARATE Secrets (the CA private key must never
+	// reach the husk pod), mirroring the forkd DaemonSet's /etc/forkd/tls +
+	// /etc/forkd/ca split.
+	huskTLSMountPath      = "/etc/husk/tls"
+	huskCAMountPath       = "/etc/husk/ca"
+	huskSnapshotMountPath = "/var/lib/agent-run/snapshot"
+	huskKernelMountPath   = "/var/lib/agent-run/kernel/vmlinux"
 )
+
+// HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
+// .SnapshotDir: the mounted forkd snapshot subdir holding mem and vmstate. The
+// claim reconciler threads this into the activate request.
+const HuskSnapshotDir = huskSnapshotMountPath
 
 // HuskPodOptions configures the husk pod spec the controller emits.
 type HuskPodOptions struct {
@@ -60,7 +96,30 @@ type HuskPodOptions struct {
 	// KVMResourceName is the extended resource the husk pod requests for KVM
 	// access. Empty defaults to agentrun.dev/kvm.
 	KVMResourceName string
+	// SnapshotID names the template snapshot the husk pod activates. It is the
+	// template id; the node-local snapshot lives at
+	// <DataDir>/templates/<SnapshotID>/snapshot. Empty means no snapshot mount is
+	// added (the pod cannot activate; only meaningful with the activation slice).
+	SnapshotID string
+	// DataDir is the forkd data directory on the node (default /var/lib/agent-run).
+	// The snapshot hostPath is rooted here. Empty defaults to the forkd default.
+	DataDir string
+	// TLSSecretName is the Secret holding the husk stub's mTLS server leaf
+	// (tls.crt, tls.key), mounted read-only so the stub can serve the mTLS network
+	// control. This mirrors how forkd gets its leaf from a mounted PKI Secret
+	// (agent-run-forkd-tls). Empty means no TLS mount is added.
+	TLSSecretName string
+	// CASecretName is the Secret holding the control plane CA (ca.crt only),
+	// mounted read-only so the stub can verify the controller client cert. Kept
+	// separate from the leaf so the CA private key never reaches the husk pod,
+	// mirroring the forkd DaemonSet's /etc/forkd/ca split. Empty means no CA mount.
+	CASecretName string
 }
+
+// defaultDataDir is the forkd data directory default; the snapshot hostPath is
+// rooted here when HuskPodOptions.DataDir is empty (matches cmd/forkd's
+// --data-dir default).
+const defaultDataDir = "/var/lib/agent-run"
 
 // defaultHuskCPU and defaultHuskMemory size a husk pod when the template
 // carries no Resources. They make the sandbox visible to the scheduler as
@@ -118,6 +177,85 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	//     permissions are pinned. It is NOT privileged and escalation is denied.
 	runAsNonRoot := false
 
+	dataDir := opts.DataDir
+	if dataDir == "" {
+		dataDir = defaultDataDir
+	}
+
+	// The stub args. The husk pod serves the mTLS NETWORK control on
+	// HuskControlPort (not the unix --control-socket the in-CI driver uses): the
+	// controller dials podIP:HuskControlPort to activate. The three TLS PEM paths
+	// point at the mounted PKI Secret (mirrors how forkd reads its leaf + CA from
+	// a mounted Secret). The kernel and snapshot are read-only mounts below.
+	args := []string{
+		"--firecracker", "/usr/local/bin/firecracker",
+		"--kernel", huskKernelMountPath,
+		"--workdir", huskWorkdir,
+		"--control-listen", fmt.Sprintf(":%d", HuskControlPort),
+		"--tls-cert", filepath.Join(huskTLSMountPath, "tls.crt"),
+		"--tls-key", filepath.Join(huskTLSMountPath, "tls.key"),
+		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
+	}
+
+	// Volumes + mounts: the mTLS Secret, the node's template snapshot subdir
+	// (read-only hostPath; the stub reads SnapshotDir/{mem,vmstate}), and the
+	// guest kernel. PLACEMENT REQUIREMENT: the snapshot hostPath assumes the
+	// template snapshot is materialized on this pod's node. The pod is pinned to a
+	// KVM node (nodeSelector below); the pool's existing snapshot
+	// build/distribution machinery must ensure the snapshot is present on those
+	// nodes. A refinement (CAS-pull the snapshot into the pod) removes the
+	// hostPath dependency; documented as a follow-up.
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+	if opts.TLSSecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: opts.TLSSecretName},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-tls", MountPath: huskTLSMountPath, ReadOnly: true})
+	}
+	if opts.CASecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-ca",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: opts.CASecretName,
+					// Only the CA certificate is projected; the CA private key in
+					// this Secret must never reach the husk pod.
+					Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-ca", MountPath: huskCAMountPath, ReadOnly: true})
+	}
+	if opts.SnapshotID != "" {
+		hostType := corev1.HostPathDirectory
+		volumes = append(volumes, corev1.Volume{
+			Name: "snapshot",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "templates", opts.SnapshotID, "snapshot"),
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "snapshot", MountPath: huskSnapshotMountPath, ReadOnly: true})
+
+		fileType := corev1.HostPathFile
+		volumes = append(volumes, corev1.Volume{
+			Name: "kernel",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "vmlinux"),
+					Type: &fileType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "kernel", MountPath: huskKernelMountPath, ReadOnly: true})
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
@@ -131,21 +269,29 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
 			// until terminated. Restart on crash so the warm slot recovers.
 			RestartPolicy: corev1.RestartPolicyAlways,
+			// Pin to a KVM node: the dormant VMM needs /dev/kvm AND the pod must
+			// land where the template snapshot hostPath exists.
+			NodeSelector: map[string]string{huskKVMNodeLabel: "true"},
+			Volumes:      volumes,
 			Containers: []corev1.Container{
 				{
 					Name:  huskContainerName,
 					Image: opts.StubImage,
-					// Prepare a dormant Firecracker VMM and serve the control
-					// socket. The firecracker binary and guest kernel are
-					// provided by the image (see Dockerfile.husk-stub), mirroring
-					// how forkd ships firecracker. The activation transport over
-					// --control-socket is slice 2.
-					Args: []string{
-						"--firecracker", "/usr/local/bin/firecracker",
-						"--kernel", "/var/lib/agent-run/kernel/vmlinux",
-						"--workdir", huskWorkdir,
-						"--control-socket", huskControlSocket,
-					},
+					// Prepare a dormant Firecracker VMM and serve the mTLS network
+					// control. The firecracker binary is provided by the image
+					// (see Dockerfile.husk-stub); the guest kernel and the template
+					// snapshot are read-only hostPath mounts. The controller dials
+					// the control port to activate (slice 2).
+					Args: args,
+					Ports: []corev1.ContainerPort{{
+						// The activated VM's sandbox HTTP API (exec/files). The
+						// claim's Status.Endpoint is podIP:this, so it must be a
+						// declared container port to be reachable.
+						Name:          "sandbox",
+						ContainerPort: huskSandboxPort,
+						Protocol:      corev1.ProtocolTCP,
+					}},
+					VolumeMounts: mounts,
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceName(kvmResource): resource.MustParse("1"),
@@ -231,7 +377,14 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 	case existing < desired:
 		deficit := desired - existing
 		logger.Info("husk pod deficit", "existing", existing, "desired", desired, "creating", deficit)
-		opts := HuskPodOptions{StubImage: r.HuskStubImage, KVMResourceName: r.KVMResourceName}
+		opts := HuskPodOptions{
+			StubImage:       r.HuskStubImage,
+			KVMResourceName: r.KVMResourceName,
+			SnapshotID:      pool.Spec.TemplateRef.Name,
+			DataDir:         r.DataDir,
+			TLSSecretName:   r.HuskTLSSecretName,
+			CASecretName:    r.HuskCASecretName,
+		}
 		for i := int32(0); i < deficit; i++ {
 			pod := r.buildHuskPod(pool, template, opts)
 			if err := r.Create(ctx, pod); err != nil {
@@ -260,3 +413,70 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+// huskPodReady reports whether a husk pod is a usable dormant slot: Running,
+// with a Ready condition True, and a non-empty PodIP (so the controller can
+// dial its control channel and set a reachable endpoint).
+func huskPodReady(p *corev1.Pod) bool {
+	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
+		return false
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// selectDormantHuskPod returns one Running+Ready husk pod for the pool that has
+// a PodIP and is not yet claimed (no agentrun.dev/claim label). It is the warm
+// slot the claim path activates. Returns nil (no error) when none is available,
+// so the caller pends the claim. Selection is deterministic (lowest name) so
+// concurrent reconciles converge on the same victim; the claim-label patch in
+// markHuskPodClaimed is the conflict-safe commit.
+func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool) (*corev1.Pod, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(pool.Namespace),
+		client.MatchingLabels{huskPoolLabel: pool.Name, huskLabel: "true"},
+	); err != nil {
+		return nil, fmt.Errorf("list husk pods for pool %s: %w", pool.Name, err)
+	}
+
+	var candidates []corev1.Pod
+	for i := range pods.Items {
+		p := pods.Items[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		if p.Labels[huskClaimLabel] != "" {
+			continue
+		}
+		if !huskPodReady(&p) {
+			continue
+		}
+		candidates = append(candidates, p)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
+	chosen := candidates[0]
+	return &chosen, nil
+}
+
+// markHuskPodClaimed stamps the agentrun.dev/claim label on a husk pod so it is
+// not selected again. It uses a merge patch (not an Update) so it does not
+// conflict with concurrent status writes (kubelet) on the same pod.
+func (r *SandboxClaimReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.Pod, claimName string) error {
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[huskClaimLabel] = claimName
+	if err := r.Patch(ctx, pod, patch); err != nil {
+		return fmt.Errorf("mark husk pod %s claimed by %s: %w", pod.Name, claimName, err)
+	}
+	return nil
+}

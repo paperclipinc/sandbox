@@ -35,6 +35,8 @@ func main() {
 	var maxPendingDuration time.Duration
 	var enableHuskPods bool
 	var huskStubImage string
+	var huskControlPort int
+	var huskDataDir string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -43,6 +45,8 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.BoolVar(&enableHuskPods, "enable-husk-pods", false, "Maintain a warm pool of pre-scheduled husk pods per SandboxPool instead of building node-local snapshots (issue #18, slice 1). Default false: the raw-forkd snapshot path is used.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "agent-run-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
+	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
+	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/agent-run", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.Parse()
 
@@ -83,22 +87,32 @@ func main() {
 	peerToken := os.Getenv("FORKD_PEER_TOKEN")
 
 	if err := (&controller.SandboxPoolReconciler{
-		Client:          mgr.GetClient(),
-		NodeRegistry:    nodeRegistry,
-		PeerToken:       peerToken,
-		EnableHuskPods:  enableHuskPods,
-		HuskStubImage:   huskStubImage,
-		KVMResourceName: "agentrun.dev/kvm",
+		Client:            mgr.GetClient(),
+		NodeRegistry:      nodeRegistry,
+		PeerToken:         peerToken,
+		EnableHuskPods:    enableHuskPods,
+		HuskStubImage:     huskStubImage,
+		KVMResourceName:   "agentrun.dev/kvm",
+		DataDir:           huskDataDir,
+		HuskTLSSecretName: controller.ForkdTLSSecretName,
+		HuskCASecretName:  controller.CASecretName,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)
 	}
 
-	if err := (&controller.SandboxClaimReconciler{
+	// The claim reconciler holds the husk fields. Its HuskTLS (the controller
+	// client mTLS config used to dial a husk stub's network control) is the SAME
+	// config EnsurePKI returns for forkd dialing; it is assigned below after
+	// bootstrap, exactly like nodeRegistry.TLS.
+	claimReconciler := &controller.SandboxClaimReconciler{
 		Client:             mgr.GetClient(),
 		NodeRegistry:       nodeRegistry,
 		MaxPendingDuration: maxPendingDuration,
-	}).SetupWithManager(mgr); err != nil {
+		EnableHuskPods:     enableHuskPods,
+		HuskControlPort:    huskControlPort,
+	}
+	if err := claimReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxClaim")
 		os.Exit(1)
 	}
@@ -123,6 +137,13 @@ func main() {
 
 	if disablePKIBootstrap {
 		logger.Info("PKI bootstrap disabled; forkd dialing will be insecure unless the cluster brings its own certs")
+		if enableHuskPods {
+			// The husk activate channel delivers tenant secrets and refuses to send
+			// them over an unauthenticated channel (ActivateHuskPod rejects a nil
+			// TLS config). Without PKI there is no controller client cert to present,
+			// so husk activation would fail closed; make that explicit at startup.
+			logger.Info("PKI bootstrap disabled with --enable-husk-pods: husk activation requires the controller mTLS client cert and will fail closed until certs are provided")
+		}
 	} else {
 		// mgr.GetClient() is cache-backed and the cache only starts with
 		// mgr.Start, so bootstrap uses a direct client. Failure is fatal:
@@ -139,6 +160,8 @@ func main() {
 		}
 		nodeRegistry.TLS = tlsConf
 		discovery.TLS = tlsConf
+		// The husk control channel uses the SAME controller client config.
+		claimReconciler.HuskTLS = tlsConf
 		logger.Info("PKI bootstrap complete; dialing forkd with mTLS", "namespace", discoveryNamespace)
 	}
 

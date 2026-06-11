@@ -16,17 +16,48 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/observability"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 // BuildHuskPodForTest exposes buildHuskPod to the external controller_test
 // package so the husk pod spec can be unit-tested.
 func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
 	return r.buildHuskPod(pool, template, opts)
+}
+
+// HuskTestClaimLabel marks a claim as owned by the husk-activation tests. The
+// suite registers the raw claim reconciler to SKIP these (so it does not fight a
+// manually driven husk reconciler over the same object) and a husk-enabled
+// reconciler to handle ONLY these.
+const HuskTestClaimLabel = "agentrun.dev/husk-test"
+
+// SkipLabel restricts this reconciler to claims WITHOUT the given label; only
+// used by the test harness so a raw and a husk reconciler can share one manager.
+func (r *SandboxClaimReconciler) SkipLabel(label string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[label] == ""
+	})
+	r.controllerName = "sandboxclaim-raw"
+}
+
+// OnlyLabel restricts this reconciler to claims WITH the given label.
+func (r *SandboxClaimReconciler) OnlyLabel(label string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[label] != ""
+	})
+	r.controllerName = "sandboxclaim-husk"
+}
+
+// SetActivateForTest injects a fake husk activator (the test seam).
+func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
+	r.Activate = fn
 }
 
 // ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
