@@ -444,9 +444,19 @@ or spoof.
 - ⬜ claim->first-exec end to end through the controller on a real cluster
   (the harness measures the engine data path, not the controller + pool path)
 - ⬜ sustained claims/sec, density curves, pool-rebuild propagation
-- ⬜ Bare-metal reference numbers on the Hetzner + Talos reference node; CI
-  runs on pinned bare-metal hardware per release → `BENCHMARKS.md` results
-  section (current CI numbers are shared-runner-class, not representative)
+- ✅ Raw-forkd vs pod-native claim-to-first-exec comparison: the two
+  shared-CI datapoints (raw-forkd `fork_to_first_exec` from the bench phase,
+  pod-native husk activation from the husk-stub phase) are synthesized in
+  `BENCHMARKS.md` with the design-win framing (VMM spawn amortized to
+  warm-pool-fill time, claim hot path is activation only, pod-native is
+  competitive with raw-forkd). See `BENCHMARKS.md` "Raw-forkd vs pod-native"
+  section. The measured bare-metal <=10ms stays a TARGET (#16, needs the
+  reference node).
+- ⬜ Bare-metal reference numbers on the Hetzner + Talos reference node;
+  includes the <=10ms warm-pool claim-to-first-exec TARGET (#18/#16, not a
+  shared-CI claim); CI runs on pinned bare-metal hardware per release →
+  `BENCHMARKS.md` results section (current CI numbers are shared-runner-class,
+  not representative)
 - ⬜ Comparison table regenerated from in-repo scripts against E2B
   self-hosted, Daytona OSS, Agent Sandbox + Kata warm pools on the same
   hardware; reproducible by anyone

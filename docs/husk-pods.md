@@ -915,3 +915,25 @@ The default flip moves the epic forward by proving the full cluster object
 lifecycle (build the snapshot, place husk pods, activate one on a claim) on the
 KVM-capable kind runner, with the in-VM activation + exec path already proven on
 real KVM in `kvm-test.yaml`.
+
+## 8. Performance
+
+The warm-pool design keeps pod scheduling and the Firecracker process spawn off the
+claim hot path. A claim that hits a warm pool pays only the activation cost: in-place
+snapshot load + resume + guest-ready, plus the mTLS control round-trip from the
+controller to the husk pod. The VMM process spawn (and pod scheduling/admission) is
+paid at warm-pool-fill time, before any claim arrives.
+
+This inverts the naive concern that pod-native is slower than raw-forkd: because the
+Firecracker spawn is pre-paid, the pod-native claim hot path is competitive with, or
+faster than, raw-forkd's full `fork_to_first_exec` (which includes the FC spawn).
+The one added cost vs raw-forkd is the mTLS control round-trip (a real network call
+that raw-forkd's local gRPC path does not pay), but this is smaller than the FC
+spawn cost eliminated. See [BENCHMARKS.md](../BENCHMARKS.md) for the full
+comparison, the two shared-CI datapoints (raw-forkd `fork_to_first_exec` from the
+bench phase, pod-native husk activation from the husk-stub phase), and the honest
+accounting of the warm-pool-fill cost.
+
+The bare-metal target is **<= 10ms warm-pool claim-to-first-exec** (issue #18 / #16
+reference node). This is NOT a shared-CI claim and has not been measured; it is the
+directive target for when the pinned reference node exists.

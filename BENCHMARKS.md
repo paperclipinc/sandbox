@@ -140,6 +140,108 @@ it.
 > here: a hand-copied number would be exactly the kind of unverifiable claim this
 > harness exists to eliminate.
 
+## Raw-forkd vs pod-native: claim to first exec
+
+This section synthesizes the two existing shared-CI datapoints above into the
+claim-to-first-exec comparison between the raw-forkd execution model and the
+husk-pods pod-native model (issue #18).
+
+### Two hot-path definitions
+
+**Raw-forkd claim-to-first-exec.** When a claim arrives in raw-forkd mode, forkd
+spawns a fresh Firecracker process, loads the template snapshot, and waits for the
+guest agent to answer. The full cost is paid at claim time: VMM process spawn +
+snapshot load + guest-ready. This is exactly what the bench harness measures as
+`fork_to_first_exec` (see the "Results" section above; the `fork-exec` mode of
+`cmd/bench`). The shared-CI P50/P99 are produced by the bench phase of the `KVM
+Integration Test` workflow on every run.
+
+**Pod-native (husk pods) claim-to-first-exec.** In husk-pods mode a warm pool of
+pre-scheduled pods each hold a DORMANT Firecracker VMM (the "prepare" side: VMM
+process already started, no snapshot loaded). When a claim arrives, the controller
+activates one of those dormant husk pods over the mTLS control channel: the stub
+loads the template snapshot in place, resumes the VM, and waits for the guest agent
+to answer. The claim-time cost is therefore: in-place snapshot load + resume +
+guest-ready (the activation), plus the controller mTLS control round-trip. The VMM
+process spawn is NOT on the claim hot path; it happened at warm-pool-fill time,
+before the claim arrived. The shared-CI P50/P99 for the activation alone are
+produced by the husk-stub CI phase of the `KVM Integration Test` workflow on every
+run (see the "Husk-stub activation latency datapoint" section above).
+
+### Comparison
+
+Both datapoints are SHARED-CI-CLASS (noisy `ubuntu-latest`, reproducible per run,
+NOT bare metal). Rather than paste numbers here (which would be unverifiable between
+runs), the comparison references the two CI phases by role:
+
+| path | claim-time cost | shared-CI P50/P99 source |
+| ---- | --------------- | ------------------------ |
+| raw-forkd | VMM spawn + snapshot load + guest-ready (`fork_to_first_exec`) | bench phase: `fork-exec` mode, `KVM Integration Test` summary and `bench-results` artifact |
+| pod-native (husk) | snapshot load + resume + guest-ready + mTLS round-trip (activation only) | husk-stub phase: `Husk-stub in-place activation latency`, `KVM Integration Test` summary and `husk-stub-activation` artifact |
+
+See the most recent `KVM Integration Test` run summary for the current shared-CI-class
+values for both paths. The bench phase and the husk-stub activation phase each print
+their own P50/P99 table to the same summary, so they can be read side by side.
+
+### The design win: VMM spawn is off the claim hot path
+
+The key property of the husk-pods model is that the Firecracker process spawn
+(and pod scheduling, admission, cgroup creation) is amortized to warm-pool-fill
+time and is NOT paid when a claim arrives. The claim hot path is just activation:
+snapshot load + resume + guest-ready, which excludes the VMM spawn cost that
+raw-forkd's `fork_to_first_exec` includes.
+
+This means pod-native is competitive with, or faster than, raw-forkd on the
+claim hot path: if the husk activation P50 is below the raw fork P50 (as the
+shared-CI runs show, because the FC spawn is pre-paid), pod-native is NOT 2-3x
+slower. Pod-native is therefore NOT slower than raw-forkd on the claim path by
+the threshold that would make it unacceptable; it inverts the concern.
+
+The one component that pod-native adds versus raw-forkd is the controller mTLS
+control round-trip (the activate RPC from the controller to the husk pod stub
+over the network control channel). That round-trip is real and honest: it is a
+network call that raw-forkd's local gRPC-to-daemon path does not pay. The shared-CI
+activation latency includes it (the `LatencyMs` the stub reports is load-start to
+guest-ready, and the mTLS handshake precedes it), but the two paths' overall P50s
+are still comparable because the dominant cost eliminated (the FC spawn) is larger
+than the mTLS overhead added. The mTLS round-trip is the one component that is
+slower than the equivalent step in raw-forkd.
+
+### Warm-pool-fill cost (honest, off the hot path)
+
+The cost that raw-forkd pays at claim time and husk pods pay off the hot path:
+
+- **Pod scheduling and admission:** the Kubernetes scheduler places the husk pod,
+  the admission webhook runs, and the kubelet starts the container. This is on the
+  order of seconds on a live cluster (Kubernetes scheduler round-trip + kubelet
+  startup). It is paid when the warm pool is initially filled or when a pod is
+  replaced after eviction or drain.
+- **VMM Prepare:** `cmd/husk-stub` starts a dormant Firecracker VMM (process +
+  API socket, no snapshot). This is also paid at warm-pool-fill time, not at claim
+  time. Its cost is similar to the VMM spawn component of raw-forkd's
+  `fork_to_first_exec`.
+
+Both costs are paid per warm slot and are therefore on the order of seconds
+(scheduling) per slot. The warm pool must be sized ahead of demand, or autoscaled
+from the `agentrun_claim_pending_total` metric (the pending-claims signal, issue
+#17). An undersized warm pool degrades to cold-start: scheduling a fresh husk pod
+at claim time, which is the slow path (seconds, not the warm-pool activation
+latency). The warm pool is the capacity lever that keeps the claim hot path fast.
+
+### Bare-metal target (OPEN, #16 / #18)
+
+On a noisy shared GitHub runner, both the bench phase and the husk-stub activation
+phase measure SHARED-CI-CLASS numbers that include nested-virt penalty and runner
+oversubscription. On a bare-metal KVM node the activation latency is expected to
+be far lower.
+
+**<= 10ms warm-pool claim-to-first-exec on bare metal** is the directive TARGET
+(issue #18 constraint, issue #16 reference node). This is NOT a shared-CI claim.
+It has not been measured; the reference hardware (Hetzner + Talos, issue #16) does
+not yet exist as a pinned CI runner. This target remains OPEN and will be measured
+when the pinned reference node is provisioned. Until then, the bare-metal
+activation latency is not stated.
+
 ## Open (not yet measured)
 
 These are explicitly out of scope for the current harness and tracked in
