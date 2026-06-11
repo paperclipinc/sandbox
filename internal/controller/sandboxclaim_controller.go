@@ -25,6 +25,19 @@ type SandboxClaimReconciler struct {
 	NodeRegistry *NodeRegistry
 }
 
+// SandboxClaim ownership: get/list/watch to reconcile, update to write the
+// terminate finalizer, delete for the garbage collector's TTL sweep of
+// finished claims. status writes phase, conditions, and FinishedAt.
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/finalizers,verbs=update
+// SandboxTemplate and SandboxPool are read-only inputs to claim placement.
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch
+// Secrets: get/list to read mounted secrets referenced by a sandbox and to
+// reconcile the per-sandbox token Secret; create/update to mint and heal that
+// token Secret (and the controller's PKI Secrets, see EnsurePKI).
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

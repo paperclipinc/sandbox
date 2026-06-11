@@ -19,6 +19,10 @@ type SandboxPoolReconciler struct {
 	NodeRegistry *NodeRegistry
 }
 
+// SandboxPool ownership: get/list/watch to reconcile, status to write warmed
+// counts and conditions. SandboxTemplate is read-only (covered above).
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get;update;patch
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

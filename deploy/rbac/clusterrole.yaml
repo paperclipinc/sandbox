@@ -1,0 +1,85 @@
+# Controller ClusterRole. This is the surfaced copy of config/rbac/role.yaml,
+# which mirrors the // +kubebuilder:rbac markers in internal/controller. Every
+# rule below is justified by a client call in the controller code; nothing is
+# granted speculatively.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-run-controller
+  labels:
+    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/component: controller
+rules:
+  # The owned CRDs. The reconcilers read/watch them and write progress; the
+  # garbage collector deletes finished claims and forks on TTL expiry; the
+  # claim reconciler writes the terminate finalizer so no Ready object can
+  # disappear without forkd reaping its VM.
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims
+      - sandboxforks
+      - sandboxpools
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # SandboxTemplate is a read-only input to pool/claim/fork placement.
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  # Adding or removing the terminate finalizer touches the finalizers
+  # subresource, which some apiservers gate separately from the parent update.
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims/finalizers
+      - sandboxforks/finalizers
+    verbs:
+      - update
+  # status writes phase, conditions (NodeLost, Rejected, Terminated), warmed
+  # counts, and FinishedAt.
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims/status
+      - sandboxforks/status
+      - sandboxpools/status
+    verbs:
+      - get
+      - patch
+      - update
+  # ForkdDiscovery lists the labeled forkd Pods to learn each node's pod IP.
+  # Read-only.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  # Secrets: get/list/watch to read sandbox-referenced mounted Secrets and to
+  # reconcile the per-sandbox token Secret; create/update to mint and heal that
+  # token Secret and the control plane PKI Secrets (EnsurePKI: agent-run-ca,
+  # agent-run-forkd-tls, agent-run-controller-tls). Token and CA-key VALUES are
+  # never logged. No delete: owned Secrets are reaped by owner-reference GC.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch

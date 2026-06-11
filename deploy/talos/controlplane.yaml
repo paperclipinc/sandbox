@@ -1,0 +1,14 @@
+# Talos control-plane MachineConfig PATCH.
+#
+# The control plane runs NO sandboxes and needs NO KVM, vsock, tun, or data
+# disk: a stock Talos control plane is sufficient. This patch only stamps a
+# label so the control-plane role is visible in `kubectl get nodes --show-labels`
+# and to keep symmetry with deploy/talos/worker-kvm.yaml. Apply it the same way:
+#
+#   talosctl machineconfig patch controlplane.yaml --patch @deploy/talos/controlplane.yaml -o controlplane-merged.yaml
+#
+# If you do not need the label, skip this file entirely and use the generated
+# controlplane.yaml as-is.
+machine:
+  nodeLabels:
+    agentrun.dev/control-plane: "true"

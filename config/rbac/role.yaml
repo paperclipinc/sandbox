@@ -1,0 +1,67 @@
+# Mirror of the // +kubebuilder:rbac markers in internal/controller. Surfaced
+# into deploy/rbac/clusterrole.yaml for the production install. controller-gen
+# v0.21.0 emits no rbac output under Go 1.26 (loader regression), so this file
+# is kept by hand in the controller-gen output shape; regenerate from the
+# markers once the tooling supports the toolchain.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-run-controller
+rules:
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims
+      - sandboxforks
+      - sandboxpools
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims/finalizers
+      - sandboxforks/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxclaims/status
+      - sandboxforks/status
+      - sandboxpools/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch

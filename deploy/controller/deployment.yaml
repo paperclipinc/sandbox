@@ -19,9 +19,17 @@ spec:
         app.kubernetes.io/component: controller
     spec:
       serviceAccountName: agent-run-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
           image: ghcr.io/paperclipinc/sandbox-controller:latest
+          # Production runs with the default flags: metrics on :8080, health
+          # on :8081, PKI bootstrap ENABLED (mTLS to forkd). --mock is a no-op
+          # on the controller and --disable-pki-bootstrap is deliberately
+          # omitted so the control plane refuses to dial forkd unauthenticated.
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
@@ -37,92 +45,21 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: health
             initialDelaySeconds: 5
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: health
             initialDelaySeconds: 15
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: agent-run-controller
-  namespace: agent-run
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: agent-run-controller
-rules:
-  # delete drives TTL cleanup of finished claims and forks; update writes the
-  # terminate finalizer onto a claim before it acquires a VM, so no Ready
-  # object can disappear without forkd reaping its sandbox.
-  - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # update on /status writes phase, FinishedAt, and conditions (NodeLost,
-  # Terminated, lifecycle reaping).
-  - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status"]
-    verbs: ["get", "update", "patch"]
-  # update on /finalizers: adding or removing the terminate finalizer touches
-  # the finalizers subresource. Some apiservers gate this separately from the
-  # main resource update, so grant it explicitly for the finalizer-based reap.
-  - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxclaims/finalizers", "sandboxforks/finalizers"]
-    verbs: ["update"]
-  - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxpools/scale"]
-    verbs: ["get", "update"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list"]
-  # PKI bootstrap: the controller creates and heals the control plane TLS
-  # Secrets (agent-run-ca, agent-run-forkd-tls, agent-run-controller-tls).
-  # create cannot be scoped by resourceNames (the object does not exist yet
-  # at admission time), so it gets its own unscoped rule.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
-  # update is deliberately unscoped: besides the three fixed PKI secret
-  # names, the controller updates per-sandbox token Secrets
-  # (<claim>-sandbox-token, <forkID>-sandbox-token) whose names are dynamic
-  # and cannot be enumerated in resourceNames. The controller already holds
-  # unscoped get+list+create on secrets, so this widens write reach only to
-  # objects it could already read.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["update"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "create", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: agent-run-controller
-subjects:
-  - kind: ServiceAccount
-    name: agent-run-controller
-    namespace: agent-run
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: agent-run-controller
+            periodSeconds: 20

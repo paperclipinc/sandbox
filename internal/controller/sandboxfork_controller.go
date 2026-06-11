@@ -18,6 +18,14 @@ type SandboxForkReconciler struct {
 	NodeRegistry *NodeRegistry
 }
 
+// SandboxFork ownership: get/list/watch to reconcile, update to write
+// progress, delete for the garbage collector's TTL sweep. status writes
+// ReadyForks and conditions (e.g. Rejected). The fork reconciler reads its
+// source SandboxClaim, the owning SandboxPool, and the SandboxTemplate, all of
+// which are already covered by the SandboxClaim reconciler's markers.
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks/finalizers,verbs=update
 func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

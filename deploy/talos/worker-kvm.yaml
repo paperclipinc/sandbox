@@ -1,0 +1,47 @@
+# Talos worker MachineConfig PATCH for KVM-capable forkd nodes.
+#
+# This is NOT a full machine config. It is a strategic-merge patch applied over
+# the worker.yaml that `talosctl gen config` produces, e.g.:
+#
+#   talosctl machineconfig patch worker.yaml --patch @deploy/talos/worker-kvm.yaml -o worker-kvm-merged.yaml
+#
+# or at gen time:
+#
+#   talosctl gen config <cluster> https://<endpoint>:6443 --config-patch-worker @deploy/talos/worker-kvm.yaml
+#
+# See deploy/talos/README.md for the full flow and the Hetzner AX dedicated
+# hardware requirement (Hetzner Cloud cannot run this: no nested /dev/kvm).
+machine:
+  kernel:
+    modules:
+      # Firecracker boots each microVM through /dev/kvm. The kvm module is the
+      # arch-neutral core; kvm_intel and kvm_amd are the vendor backends. Both
+      # are listed so one image serves Intel and AMD Hetzner AX nodes; the
+      # module for the absent vendor simply fails to load and is harmless.
+      - name: kvm
+      - name: kvm_intel
+      - name: kvm_amd
+      # The guest agent talks to forkd over a vsock; vhost_vsock provides the
+      # host side of that transport.
+      - name: vhost_vsock
+      # forkd creates a per-sandbox tap device for guest networking; tun is the
+      # tun/tap driver behind it.
+      - name: tun
+  # forkd schedules only onto nodes carrying this label (the DaemonSet
+  # nodeSelector agentrun.dev/kvm: "true" in deploy/daemon/daemonset.yaml).
+  nodeLabels:
+    agentrun.dev/kvm: "true"
+  # No extra sysctls are required: /dev/kvm comes from the kvm modules, the
+  # guest-agent vsock from vhost_vsock, and tap devices from tun. Add
+  # machine.sysctls here only if a future networking change needs one.
+  #
+  # Mount a dedicated data partition at /var/lib/agent-run, the forkd dataDir
+  # (--data-dir in deploy/daemon/daemonset.yaml). Snapshot, rootfs, and the
+  # jailer chroot base all live here and must share one filesystem so forkd can
+  # hard-link them into each per-VM chroot. Point device at the actual data
+  # disk on the Hetzner AX node (commonly the second NVMe, e.g. /dev/nvme1n1);
+  # adjust per machine.
+  disks:
+    - device: /dev/nvme1n1
+      partitions:
+        - mountpoint: /var/lib/agent-run
