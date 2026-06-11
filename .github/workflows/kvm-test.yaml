@@ -17,9 +17,11 @@ on:
       - 'cmd/dns-stub/**'
       - 'cmd/tmpl-smoke/**'
       - 'cmd/vol-smoke/**'
+      - 'cmd/crypt-smoke/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
       - 'internal/vsock/**'
+      - 'internal/storecrypt/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -734,6 +736,113 @@ jobs:
           echo "================================"
           echo "  Per-fork volumes proven (Fresh round-trip + Snapshot CoW independence)"
           echo "================================"
+
+      # Encryption-at-rest proof (#31) on REAL cryptsetup. This phase drives the
+      # REAL internal/storecrypt Manager (cmd/crypt-smoke uses the production
+      # DefaultRunner, so the same package code forkd's encryption integration
+      # uses is what runs here, not a hand-rolled cryptsetup script). It creates
+      # a per-scope LUKS2 container, writes a unique plaintext marker inside the
+      # decrypted mount, and proves three things:
+      #
+      #   1. CIPHERTEXT-AT-REST: a control read while the container is still
+      #      mounted finds the marker in the decrypted view (proving the marker
+      #      string IS findable, so the grep is sound), but a grep of the raw
+      #      backing <scope>.img after close finds it ZERO times. The bytes on
+      #      disk are ciphertext, not the plaintext marker.
+      #   2. DECRYPT/RESTORE-WORKS: reopen the container with the key and mount
+      #      it; the marker reads back intact. Because dm-crypt sits below the
+      #      page cache, the mem mmap CoW restore path the engine uses sees these
+      #      same decrypted pages, so CoW page sharing across forks is preserved
+      #      exactly as in the plaintext case. The full engine
+      #      fork-through-encryption path is exercised by the engine unit tests
+      #      (internal/fork) plus this decrypt-roundtrip; this CI phase proves the
+      #      real cryptsetup block layer underneath them.
+      #   3. CRYPTO-SHRED: Shred (luksErase wipes the keyslots + removes the img),
+      #      then reopening with the ORIGINAL key FAILS and the img is gone. The
+      #      ciphertext is unrecoverable even though we still hold the key.
+      #
+      # Setup needs root, cryptsetup, and a loop device (/dev/mapper). A missing
+      # tool or device is logged as ENCRYPTION-SETUP-FLAKE and still fails the
+      # job (distinctly from ENCRYPTION-ASSERTION-FAILED, a real proof failure).
+      # This phase GATES: no continue-on-error.
+      - name: Encryption at rest, ciphertext on disk, decrypt restore, crypto-shred
+        timeout-minutes: 8
+        run: |
+          set -e
+          fail_setup() { echo "ENCRYPTION-SETUP-FLAKE: $1"; exit 1; }
+          fail_assert() { echo "ENCRYPTION-ASSERTION-FAILED: $1"; exit 1; }
+
+          # Real cryptsetup must be present (the whole point of this gate).
+          if ! command -v cryptsetup >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cryptsetup || fail_setup "cryptsetup install failed"
+          fi
+          command -v cryptsetup >/dev/null || fail_setup "cryptsetup not available"
+          cryptsetup --version
+
+          # storecrypt drives losetup under the hood via cryptsetup luksFormat on
+          # a file image; confirm loop + device-mapper are usable on this runner.
+          [ -d /dev/mapper ] || fail_setup "no /dev/mapper (device-mapper unavailable)"
+          sudo modprobe dm_crypt 2>/dev/null || true
+          sudo modprobe loop 2>/dev/null || true
+
+          ROOT=/tmp/agent-run-test/crypt
+          MOUNT=$ROOT/mnt/tmpl1
+          KEY=$ROOT/test.key
+          SCOPE=tmpl1
+          MARKER="PLAINTEXT-MARKER-7f3a9c21"
+          IMG=$ROOT/enc/$SCOPE.img
+          sudo rm -rf $ROOT
+          mkdir -p $ROOT
+
+          go build -o /tmp/crypt-smoke ./cmd/crypt-smoke/
+
+          # Generate the (CI-only) test key once for this run.
+          /tmp/crypt-smoke gen-key -key-file $KEY || fail_setup "gen-key failed"
+
+          # (setup) Create + mount the container and write the marker inside it.
+          # Create touches /dev/mapper and mount, so a failure here is setup.
+          if ! sudo /tmp/crypt-smoke create \
+              -root $ROOT -scope $SCOPE -mount $MOUNT -key-file $KEY \
+              -marker "$MARKER" -size-mib 64 2>/tmp/crypt-create.out; then
+            cat /tmp/crypt-create.out || true
+            grep -qiE 'mapper|loop|cryptsetup|mount' /tmp/crypt-create.out \
+              && fail_setup "container create failed (loop/dm/mount unavailable on runner)" \
+              || fail_assert "container create failed unexpectedly"
+          fi
+          cat /tmp/crypt-create.out || true
+
+          # (1a control) The marker IS findable in the decrypted mount, then close.
+          sudo /tmp/crypt-smoke probe-open \
+            -root $ROOT -scope $SCOPE -mount $MOUNT -marker "$MARKER" \
+            || fail_assert "marker not readable in the decrypted mount (control grep failed)"
+          sudo /tmp/crypt-smoke close -root $ROOT -scope $SCOPE -mount $MOUNT \
+            || fail_setup "close failed"
+
+          # (1b ciphertext-at-rest) The marker is ABSENT in the raw backing img.
+          sudo ls -lh $IMG || fail_setup "raw image missing after create"
+          sudo /tmp/crypt-smoke grep-raw -root $ROOT -scope $SCOPE -marker "$MARKER" \
+            || fail_assert "marker found as PLAINTEXT in the raw image (not encrypted at rest)"
+
+          # (2 decrypt/restore) Reopen with the key, mount, read the marker back.
+          sudo /tmp/crypt-smoke reopen-read \
+            -root $ROOT -scope $SCOPE -mount $MOUNT -key-file $KEY -marker "$MARKER" \
+            || fail_assert "decrypt/restore failed: marker not intact after reopen"
+          sudo /tmp/crypt-smoke close -root $ROOT -scope $SCOPE -mount $MOUNT \
+            || fail_setup "close after reopen failed"
+
+          # (3 crypto-shred) luksErase + remove img, then reopen MUST fail.
+          sudo /tmp/crypt-smoke shred -root $ROOT -scope $SCOPE -mount $MOUNT \
+            || fail_assert "shred failed"
+          sudo /tmp/crypt-smoke reopen-fail \
+            -root $ROOT -scope $SCOPE -mount $MOUNT -key-file $KEY \
+            || fail_assert "container reopened after shred OR img still present (data recoverable)"
+
+          echo "================================================="
+          echo "  Encryption at rest proven:"
+          echo "  ciphertext on disk, decrypt/restore works,"
+          echo "  crypto-shred makes the data unrecoverable"
+          echo "================================================="
 
       # Benchmark phase: run the reproducible cmd/bench harness against the real
       # KVM-backed engine and publish the latency distributions to the run page.

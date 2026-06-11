@@ -51,6 +51,7 @@ func main() {
 		agentBin          string
 		busyboxBin        string
 		enableVolumes     bool
+		enableEncryption  bool
 		auditLog          string
 		otlpEndpoint      string
 	)
@@ -79,6 +80,7 @@ func main() {
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
+	flag.BoolVar(&enableEncryption, "enable-encryption", false, "Encrypt template snapshots at rest: each template is built inside a per-template LUKS2 container (requires cryptsetup) and crypto-shred at delete. Default false (plaintext snapshots on disk, exactly as before). PR1 KEY-CUSTODY LIMITATION: keys are generated and held in node memory only, are NOT escrowed, and are lost on restart (an existing encrypted template can then no longer be opened); a follow-up moves key custody to a Kubernetes Secret or KMS")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Parse()
@@ -132,6 +134,14 @@ func main() {
 		}
 		if enableVolumes {
 			fmt.Println("forkd: per-fork volumes ENABLED")
+		}
+		if enableEncryption {
+			engineOpts.EnableEncryption = true
+			// PR1 key custody: an in-memory provider generates and caches a key
+			// per template in node memory only (not escrowed; lost on restart).
+			// PR2 swaps in a Secret/KMS-backed provider.
+			engineOpts.KeyProvider = fork.NewInMemoryKeyProvider()
+			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR1: keys held in node memory only, not escrowed, lost on restart)")
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")
