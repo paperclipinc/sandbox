@@ -1629,6 +1629,245 @@ jobs:
             /tmp/agent-run-test/husk-stub/latencies.txt
           if-no-files-found: warn
 
+      # Husk activate-correctness proof (#18). The fork-correctness phase above
+      # proves the GUEST mechanism (distinct RNG + clock resync) when the host
+      # sends NotifyForked directly via test-agent. THIS phase proves the same
+      # three correctness properties for the husk ACTIVATE path, where the husk
+      # stub itself runs the fork-correctness handshake during Activate (fresh
+      # crypto/rand entropy -> NotifyForked reseed + clock step) and delivers the
+      # claim-time env/secrets via Configure, fail-closed (a guest that did not
+      # report ReseededRNG is not served). The model mirrors fork-correctness:
+      # ONE snapshot (the bench template, same one the husk-stub phase used),
+      # activated into TWO independent VMs via two fresh dormant stubs, then a
+      # READ-ONLY sample of each activated guest.
+      #
+      # Each stub is activated with an env var and a secret via the --activate
+      # client's --env/--secret flags. The stubs are LONG-LIVED, so both stay
+      # alive holding their activated VMs while test-agent --mode read EXECs each
+      # guest (sending NO NotifyForked; the stub already reseeded) to sample the
+      # CRNG, the wall clock, and the delivered values. Assertions, mirroring the
+      # fork-correctness phase exactly:
+      #   (1) DISTINCT RNG: the two guests' /dev/urandom samples MUST differ. If
+      #       they are EQUAL the activate reseed failed and the CRNG is shared
+      #       across activations: a real correctness/DESIGN failure, FAIL loudly
+      #       (HUSK-ACTIVATE-FAILED), not a flake.
+      #   (2) CORRECT CLOCKS: each guest wall clock is within 2s of the runner
+      #       (it stepped forward from the frozen snapshot time), same tolerance
+      #       and method as fork-correctness.
+      #   (3) ENV/SECRET DELIVERY: the env var AND the secret delivered at
+      #       activate are readable in the guest (ENVVAL), AND neither value
+      #       appears in the host-side stub/client logs (entropy + secrets are
+      #       never logged).
+      # A missing snapshot or missing /dev/kvm is a SETUP FLAKE (HUSK-ACTIVATE-
+      # SETUP), distinct from a real correctness failure (HUSK-ACTIVATE-FAILED).
+      - name: Husk activate-correctness, distinct RNG + stepped clock + secret delivery across two activations
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
+          WORKBASE=/tmp/agent-run-test/husk-activate
+          mkdir -p $WORKBASE
+
+          fail_setup()  { echo "HUSK-ACTIVATE-SETUP: $1"; exit 1; }
+          fail_active() { echo "HUSK-ACTIVATE-FAILED: $1"; exit 1; }
+
+          sudo chmod 666 /dev/kvm || fail_setup "no /dev/kvm on this runner"
+
+          if [ ! -f "$SNAP_DIR/mem" ] || [ ! -f "$SNAP_DIR/vmstate" ]; then
+            ls -lhR "$SNAP_DIR" || true
+            fail_setup "bench template snapshot not present at $SNAP_DIR (snapshot build did not complete); cannot run husk activate-correctness"
+          fi
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # The env value is non-secret and safe to log. The secret value is the
+          # canary we assert IS readable in the guest and is NOT in the host logs.
+          ENV_KEY=HUSK_ENV
+          ENV_VAL=husk-env-value
+          SECRET_KEY=HUSK_SECRET
+          SECRET_VAL=s3cr3t-husk-canary-$RANDOM
+
+          # PIDs of the two long-lived serving stubs; killed at the end and on
+          # every failure path so no firecracker process leaks.
+          STUB1_PID=""; STUB2_PID=""
+          cleanup() {
+            [ -n "$STUB1_PID" ] && kill $STUB1_PID 2>/dev/null || true
+            [ -n "$STUB2_PID" ] && kill $STUB2_PID 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # activate_vm <n>: start a FRESH dormant husk-stub in its own workdir,
+          # wait for its control socket, run the --activate client carrying the
+          # env var + secret, and LEAVE the stub alive (it is long-lived and holds
+          # the activated VM). Sets STUB<n>_PID and prints the vsock path on a
+          # VSOCK<n>= line. The stub itself runs the fork-correctness handshake
+          # during Activate; this returns OK only if the guest reseeded.
+          activate_vm() {
+            local n=$1
+            local workdir=$WORKBASE/vm$n
+            local ctrl=$WORKBASE/control$n.sock
+            local stublog=$WORKBASE/stub$n.log
+            local result=$WORKBASE/result$n.json
+            mkdir -p $workdir
+            rm -f $ctrl
+
+            /tmp/husk-stub \
+              --firecracker /usr/local/bin/firecracker \
+              --workdir $workdir \
+              --control-socket $ctrl \
+              --mem-mib 256 \
+              > $stublog 2>&1 &
+            local pid=$!
+            eval "STUB${n}_PID=$pid"
+
+            local ready=0
+            for i in $(seq 1 40); do
+              if [ -S "$ctrl" ]; then ready=1; break; fi
+              if ! kill -0 $pid 2>/dev/null; then break; fi
+              sleep 0.25
+            done
+            if [ "$ready" -ne 1 ]; then
+              echo "=== stub$n log ==="; cat $stublog || true
+              fail_setup "control socket $ctrl never appeared for VM $n (dormant VMM did not come up); SETUP, not a correctness failure"
+            fi
+
+            # Activate WITH an env var and a secret. --secret values are never
+            # echoed by the client (kvFlag.String reports counts only). Exit
+            # non-zero => not OK (snapshot load, guest-readiness, or reseed
+            # handshake failed): a real activation failure, fail closed.
+            if ! /tmp/husk-stub --activate \
+                --control-socket $ctrl \
+                --snapshot-dir $SNAP_DIR \
+                --env "$ENV_KEY=$ENV_VAL" \
+                --secret "$SECRET_KEY=$SECRET_VAL" \
+                > $result 2>$WORKBASE/activate$n.err; then
+              echo "=== activate$n stderr ==="; cat $WORKBASE/activate$n.err || true
+              echo "=== result$n.json ==="; cat $result || true
+              echo "=== stub$n log ==="; cat $stublog || true
+              fail_active "activate $n did not return OK (snapshot load, guest-readiness, or fork-correctness reseed handshake failed); this is a real activation failure"
+            fi
+            cat $result
+
+            local ok vsock
+            ok=$(jq -r '.ok' $result)
+            vsock=$(jq -r '.vsock_path' $result)
+            if [ "$ok" != "true" ]; then
+              fail_active "activate $n result ok=$ok"
+            fi
+            echo "activate $n: OK vsock=$vsock"
+          }
+
+          # Activate both VMs from the SAME snapshot; both stubs stay alive. The
+          # vsock path is read back from each result JSON (activate_vm runs in the
+          # current shell so STUB<n>_PID is set for cleanup).
+          activate_vm 1
+          activate_vm 2
+          VSOCK1=$(jq -r '.vsock_path' $WORKBASE/result1.json)
+          VSOCK2=$(jq -r '.vsock_path' $WORKBASE/result2.json)
+          echo "VSOCK1=$VSOCK1 VSOCK2=$VSOCK2"
+
+          # READ-ONLY sample of each activated guest. test-agent --mode read sends
+          # NO NotifyForked (the stub already reseeded during Activate); it only
+          # EXECs the guest to sample URANDOM + WALLCLOCK_NS and read back the
+          # delivered secret as ENVVAL. Run while both serving stubs are alive.
+          sample_vm() {
+            local n=$1 vsock=$2
+            echo "Sampling activated VM $n (vsock=$vsock)..."
+            if ! timeout 60 /tmp/test-agent --mode read --read-env "$SECRET_KEY" "$vsock" \
+                | tee $WORKBASE/read$n.out; then
+              echo "=== stub$n log ==="; cat $WORKBASE/stub$n.log || true
+              fail_active "read-back exec through activated VM $n FAILED; the VM was reported active but is not usable"
+            fi
+          }
+          sample_vm 1 "$VSOCK1"
+          sample_vm 2 "$VSOCK2"
+
+          # --- assertions, mirroring the fork-correctness phase ---
+          RUNNER_NS=$(date +%s%N)
+
+          URANDOM1=$(grep '^URANDOM=' $WORKBASE/read1.out | head -1 | cut -d= -f2-)
+          URANDOM2=$(grep '^URANDOM=' $WORKBASE/read2.out | head -1 | cut -d= -f2-)
+          WALL1=$(grep '^WALLCLOCK_NS=' $WORKBASE/read1.out | head -1 | cut -d= -f2-)
+          WALL2=$(grep '^WALLCLOCK_NS=' $WORKBASE/read2.out | head -1 | cut -d= -f2-)
+          ENVVAL1=$(grep '^ENVVAL=' $WORKBASE/read1.out | head -1 | cut -d= -f2-)
+          ENVVAL2=$(grep '^ENVVAL=' $WORKBASE/read2.out | head -1 | cut -d= -f2-)
+
+          echo "URANDOM1=$URANDOM1"
+          echo "URANDOM2=$URANDOM2"
+          echo "WALL1=$WALL1 WALL2=$WALL2 RUNNER_NS=$RUNNER_NS"
+
+          # (1) DISTINCT RNG across the two activations.
+          if [ -z "$URANDOM1" ] || [ -z "$URANDOM2" ]; then
+            fail_active "missing URANDOM sample from an activated VM"
+          fi
+          if [ "$URANDOM1" = "$URANDOM2" ]; then
+            fail_active "two activations produced IDENTICAL /dev/urandom output: the activate reseed failed and the CRNG is shared across activations (shared-RNG correctness failure, not a flake)"
+          fi
+          echo "PASS: two activations produced distinct RNG streams"
+
+          # (2) CORRECT CLOCKS: each guest wall clock within 2s of the runner, i.e.
+          # it stepped forward from the frozen snapshot time.
+          for pair in "1:$WALL1" "2:$WALL2"; do
+            n=${pair%%:*}; wall=${pair#*:}
+            if [ -z "$wall" ]; then fail_active "VM $n missing WALLCLOCK_NS"; fi
+            diff_ns=$(( wall > RUNNER_NS ? wall - RUNNER_NS : RUNNER_NS - wall ))
+            if [ "$diff_ns" -gt 2000000000 ]; then
+              fail_active "VM $n wall clock off by ${diff_ns}ns (> 2s); the clock did not step from the snapshot"
+            fi
+            echo "PASS: VM $n wall clock within ${diff_ns}ns of runner"
+          done
+
+          # (3) ENV/SECRET DELIVERY: the delivered secret is readable in each guest.
+          if [ "$ENVVAL1" != "$SECRET_VAL" ] || [ "$ENVVAL2" != "$SECRET_VAL" ]; then
+            # Do NOT echo the expected secret value; report only the mismatch.
+            fail_active "delivered secret was not present in an activated guest (VM1 match=$([ "$ENVVAL1" = "$SECRET_VAL" ] && echo yes || echo no), VM2 match=$([ "$ENVVAL2" = "$SECRET_VAL" ] && echo yes || echo no))"
+          fi
+          echo "PASS: env/secret delivered at activate are readable in both guests"
+
+          # The secret value MUST NOT appear in the host-side stub logs or the
+          # activate client stderr. The guest read-back (read*.out) intentionally
+          # contains it, so it is excluded from this grep.
+          if grep -rF "$SECRET_VAL" \
+              $WORKBASE/stub1.log $WORKBASE/stub2.log \
+              $WORKBASE/activate1.err $WORKBASE/activate2.err \
+              $WORKBASE/result1.json $WORKBASE/result2.json 2>/dev/null; then
+            fail_active "the delivered secret value LEAKED into a host-side stub/client log; secrets must never be logged"
+          fi
+          echo "PASS: delivered secret value is NOT present in any host-side stub/client log"
+
+          {
+            echo ""
+            echo "## Husk activate-correctness (shared-CI-class)"
+            echo ""
+            echo "Two VMs activated from ONE bench template snapshot via two fresh dormant \`cmd/husk-stub\` processes. Each Activate runs the fork-correctness handshake (fresh \`crypto/rand\` entropy reseeds the guest CRNG via NotifyForked, the wall clock steps) and delivers a claim-time env var + secret via Configure, fail-closed. Proven, mirroring the fork-correctness suite:"
+            echo ""
+            echo "| property | result |"
+            echo "| --- | --- |"
+            echo "| distinct RNG across two activations | PASS |"
+            echo "| each guest wall clock within 2s of runner | PASS |"
+            echo "| env + secret delivered to each guest | PASS |"
+            echo "| secret value absent from host-side logs | PASS |"
+            echo ""
+            echo "See \`docs/husk-pods.md\` and \`docs/fork-correctness.md\`."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "================================"
+          echo "  Husk activate-correctness checks passed"
+          echo "================================"
+
+      - name: Upload husk activate-correctness artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: husk-activate-correctness
+          path: |
+            /tmp/agent-run-test/husk-activate/result*.json
+            /tmp/agent-run-test/husk-activate/read*.out
+          if-no-files-found: warn
+
       # Install the host networking tools the egress phases need. nftables and
       # iproute2 are what the real internal/network Linux Manager shells out to
       # (nft, ip); a stock ubuntu-latest runner has iproute2 but may lack nft.

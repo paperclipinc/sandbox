@@ -21,6 +21,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -29,11 +30,81 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/husk"
 )
+
+// kvFlag collects repeatable KEY=VALUE flags into a map. It is used for --env
+// and --secret. The String method NEVER renders the values: a --secret flag's
+// values must not leak via usage/error output, so String reports counts only.
+type kvFlag struct {
+	pairs map[string]string
+}
+
+func (f *kvFlag) String() string {
+	// Keys and values are intentionally omitted: a secret value must never be
+	// printed. Report only how many pairs were collected.
+	return fmt.Sprintf("(%d pairs)", len(f.pairs))
+}
+
+func (f *kvFlag) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok || k == "" {
+		// The error mentions only that the form is wrong, never the value, so a
+		// malformed --secret does not echo its payload.
+		return fmt.Errorf("expected KEY=VALUE")
+	}
+	if f.pairs == nil {
+		f.pairs = make(map[string]string)
+	}
+	f.pairs[k] = val
+	return nil
+}
+
+// orNil returns the collected map, or nil when empty, so an absent flag threads
+// through as a nil map rather than an empty one.
+func (f *kvFlag) orNil() map[string]string {
+	if len(f.pairs) == 0 {
+		return nil
+	}
+	return f.pairs
+}
+
+// loadSecretFile reads KEY=VALUE lines (one per line, blank and #-comment lines
+// skipped) into m, creating it if nil. Secret values are never logged: parse
+// errors mention the line number only, never the line content.
+func loadSecretFile(path string, m map[string]string) (map[string]string, error) {
+	file, err := os.Open(path) //nolint:gosec // operator-supplied secret file path
+	if err != nil {
+		return m, fmt.Errorf("open secret file: %w", err)
+	}
+	defer file.Close()
+
+	if m == nil {
+		m = make(map[string]string)
+	}
+	scanner := bufio.NewScanner(file)
+	line := 0
+	for scanner.Scan() {
+		line++
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(text, "=")
+		if !ok || k == "" {
+			return m, fmt.Errorf("secret file line %d: expected KEY=VALUE", line)
+		}
+		m[k] = v
+	}
+	if err := scanner.Err(); err != nil {
+		return m, fmt.Errorf("read secret file: %w", err)
+	}
+	return m, nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -52,11 +123,23 @@ func run() error {
 		memMiB         = flag.Int("mem-mib", 512, "guest memory in MiB")
 		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket, send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
 		snapshotDir    = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
+		secretFile     = flag.String("secret-file", "", "activate client mode: path to a KEY=VALUE secret file (one per line) delivered to the guest; values are never logged")
 	)
+	var envFlag, secretFlag kvFlag
+	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
+	flag.Var(&secretFlag, "secret", "activate client mode: repeatable KEY=VALUE guest secret; values are never logged")
 	flag.Parse()
 
 	if *activate {
-		return runActivateClient(*controlSocket, *snapshotDir)
+		secrets := secretFlag.orNil()
+		if *secretFile != "" {
+			var err error
+			secrets, err = loadSecretFile(*secretFile, secrets)
+			if err != nil {
+				return err
+			}
+		}
+		return runActivateClient(*controlSocket, *snapshotDir, envFlag.orNil(), secrets)
 	}
 
 	if *workdir == "" {
@@ -127,7 +210,11 @@ func run() error {
 // owns no VMM; it only drives the control protocol so CI can measure the
 // activation latency and gate on a successful in-place activation. The
 // snapshotDir carries no secrets, so it is safe to echo in the result.
-func runActivateClient(controlSocket, snapshotDir string) error {
+//
+// env and secrets are delivered to the guest by the stub after the restore
+// handshake. Their VALUES are never logged here: only the result (OK, latency,
+// vsock path, and any error, none of which carries a secret) is printed.
+func runActivateClient(controlSocket, snapshotDir string, env, secrets map[string]string) error {
 	if controlSocket == "" {
 		return fmt.Errorf("--activate requires --control-socket")
 	}
@@ -141,7 +228,11 @@ func runActivateClient(controlSocket, snapshotDir string) error {
 	}
 	defer conn.Close()
 
-	if err := husk.WriteRequest(conn, husk.ActivateRequest{SnapshotDir: snapshotDir}); err != nil {
+	if err := husk.WriteRequest(conn, husk.ActivateRequest{
+		SnapshotDir: snapshotDir,
+		Env:         env,
+		Secrets:     secrets,
+	}); err != nil {
 		return fmt.Errorf("send activate request: %w", err)
 	}
 

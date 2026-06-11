@@ -194,18 +194,36 @@ this phase supports is narrow: the prepare/activate split works, an in-place
 snapshot load activates a usable VM, and the claim-time cost is the activation
 alone (the measured latency, with its shared-CI caveat), not a VMM spawn.
 
-### Fork-correctness is NOT yet wired into activate
+### Fork-correctness on activate
 
 A correct fork delivers fresh per-activation entropy (RNG reseed), resyncs the
 guest wall clock, and delivers per-claim secrets. That is the engine's
 `NotifyForked` handshake (see [docs/fork-correctness.md](fork-correctness.md));
-the fork/daemon path drives it today. The husk stub's `Activate` is the RESTORE
-mechanism only: it loads and resumes the snapshot and confirms the guest
-answers. It does NOT yet send `NotifyForked`, so it does not yet reseed the RNG,
-resync the clock, or deliver secrets per activation. Wiring the fork-correctness
-handshake into the stub's activate path is an integration follow-up and is
-REQUIRED before pod-native bring-up can become the default; this PR does not
-silently handle it, and the gap is tracked under "Remaining" below.
+the fork/daemon path drives it, and now the husk stub's `Activate` runs the SAME
+handshake. After the snapshot loads, resumes, and the guest answers, `Activate`:
+
+- generates fresh `crypto/rand` entropy and an incrementing generation, then
+  sends `NotifyForkedWithConfig` so the guest reseeds its CRNG, steps its wall
+  clock forward off the frozen snapshot time, and re-addresses its NIC;
+- delivers the claim-time env and secrets via `Configure`, in the same order the
+  daemon's `deliverConfig` uses (notify first, then env/secrets);
+- FAILS CLOSED: a connect/handshake error, or a guest that does not report
+  `ReseededRNG`, leaves the VM NOT active and unserved. A VM that did not reseed
+  is never reported as usable. Entropy and secret VALUES are never logged.
+
+This is CI-proven on the KVM runner: the husk activate-correctness phase
+activates two VMs from ONE bench template snapshot via two fresh dormant stubs
+and asserts, mirroring the fork-correctness suite, distinct RNG streams across
+the two activations (equal urandom is a real correctness failure, not a flake),
+each guest wall clock within 2s of the runner (the clock stepped), and an env
+var plus a secret delivered at activate readable in each guest while the secret
+value is absent from every host-side stub/client log. See
+[docs/fork-correctness.md](fork-correctness.md).
+
+This PR proves the stub CAN apply claim-time config and reseed per activation.
+The remaining #18 work is the controller migration, which includes sourcing the
+claim-time secrets and env from the controller (today the stub's `--activate`
+client carries them over the local control socket); see "Remaining" below.
 
 ## 4. The honest nuance: first-faulter charging is not fair per-tenant accounting
 
@@ -250,6 +268,13 @@ the CoW-aware metering, not the first-faulter `memory.current`.
   activation latency (load-start to first exec, shared-CI-class) and gates on
   activate OK plus a working exec through the activated VM. Fail-closed on a
   failed load.
+- Fork-correctness on activate: the stub's `Activate` runs the same
+  `NotifyForked` reseed + clock-step handshake as the engine fork path plus
+  env/secret delivery via `Configure`, fail-closed (a VM that did not report
+  `ReseededRNG` is not served). The KVM husk activate-correctness phase activates
+  two VMs from one bench snapshot and gates on distinct RNG streams, each guest
+  wall clock within 2s of the runner, and a delivered env var plus secret
+  readable in each guest with the secret value absent from the host-side logs.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
@@ -261,12 +286,11 @@ full husk-pods epic still needs:
 - running the stub INSIDE a real husk pod (the pod spec, the device-plugin
   resource request, the cgroup/netns placement); the stub binary and its control
   protocol exist, but nothing runs it in a pod yet;
-- wiring the fork-correctness handshake into the stub's activate path
-  (per-activation RNG reseed, clock resync, secret delivery via `NotifyForked`);
-  the stub's `Activate` is the restore mechanism only and does NOT yet do this,
-  and it is REQUIRED before pod-native bring-up becomes the default;
 - migrating the pool/claim/fork controllers to create + activate husk pods (with
-  raw-forkd mode kept behind a flag and pod-native as the default);
+  raw-forkd mode kept behind a flag and pod-native as the default), including
+  sourcing the claim-time env and secrets from the controller; the stub can
+  already apply them per activation (proven above), so the migration is the
+  controller wiring, not the stub mechanism;
 - the conformance suite, each acceptance criterion a test: scheduler truth,
   ResourceQuota/LimitRange, NetworkPolicy/Cilium over the pod netns, PSA
   `restricted` minus the documented device-plugin exception, `kubectl get pods`,

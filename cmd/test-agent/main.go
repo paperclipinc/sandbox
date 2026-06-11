@@ -20,13 +20,23 @@ import (
 // sends NotifyForked, then samples the guest CRNG, the guest wall clock, and
 // the recorded fork generation, printing labeled lines the workflow can grep.
 //
+// The read mode is the read-only counterpart used by the husk activate-
+// correctness phase: it sends NO NotifyForked (the husk stub already ran the
+// fork-correctness handshake during Activate). It only EXECs the already-active
+// guest to sample the CRNG, the wall clock, and an optional named env var,
+// printing the same URANDOM / WALLCLOCK_NS labels plus ENVVAL so the workflow
+// can assert distinct RNG, a stepped clock, and env/secret delivery across two
+// independently activated VMs.
+//
 // Usage:
 //
 //	test-agent <vsock-uds-path>                              # default suite
 //	test-agent --mode notify --generation N <vsock-uds-path> # fork proof
+//	test-agent --mode read --read-env KEY <vsock-uds-path>   # post-activate sample
 func main() {
-	mode := flag.String("mode", "default", "test mode: default | notify | egress | name-egress")
+	mode := flag.String("mode", "default", "test mode: default | notify | read | egress | name-egress")
 	generation := flag.Uint64("generation", 1, "fork generation to send in notify mode")
+	readEnv := flag.String("read-env", "", "read mode: name of a guest env var to print as ENVVAL (e.g. a delivered secret or env key)")
 	guestIP := flag.String("guest-ip", "", "egress mode: guest eth0 IP to configure (e.g. 10.0.0.2)")
 	prefixLen := flag.Int("prefix-len", 30, "egress mode: guest eth0 prefix length")
 	gateway := flag.String("gateway", "", "egress mode: guest default gateway (the host tap IP)")
@@ -52,6 +62,8 @@ func main() {
 	switch *mode {
 	case "notify":
 		runNotify(client, *generation)
+	case "read":
+		runRead(client, *readEnv)
 	case "default":
 		runDefault(client)
 	case "egress":
@@ -74,7 +86,7 @@ func main() {
 			directIP:   *directIP,
 		})
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify|egress|name-egress)\n", *mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify|read|egress|name-egress)\n", *mode)
 		os.Exit(1)
 	}
 }
@@ -311,6 +323,34 @@ func runNotify(client *vsock.Client, generation uint64) {
 	fmt.Printf("URANDOM=%s\n", strings.TrimSpace(urandom))
 	fmt.Printf("WALLCLOCK_NS=%s\n", strings.TrimSpace(wallclock))
 	fmt.Printf("FORKGEN=%s\n", strings.TrimSpace(forkgen))
+}
+
+// runRead is the read-only sampler for the husk activate-correctness phase. The
+// husk stub already ran the fork-correctness handshake (NotifyForked reseed +
+// clock step) and delivered env/secrets via Configure during Activate, so this
+// mode sends NO NotifyForked: it only EXECs the already-active guest to sample
+// the CRNG (URANDOM) and the wall clock (WALLCLOCK_NS), and, when readEnv is
+// set, prints the value of that guest env var as ENVVAL so the workflow can
+// assert a delivered env/secret reached the guest. The workflow then asserts the
+// URANDOM samples from two independently activated VMs DIFFER (distinct reseed),
+// each WALLCLOCK_NS is near the runner clock (stepped from the frozen snapshot),
+// and ENVVAL matches the delivered value (env/secret delivery). The delivered
+// value is printed only because the workflow must read it back from the guest;
+// it is the SAME value the workflow then greps the host stub log to confirm is
+// absent there. test-agent prints to its own stdout, not the stub log.
+func runRead(client *vsock.Client, readEnv string) {
+	urandom := execOrDie(client, "head -c 32 /dev/urandom | base64 | tr -d '\\n'")
+	wallclock := execOrDie(client, "date +%s%N")
+	fmt.Printf("URANDOM=%s\n", strings.TrimSpace(urandom))
+	fmt.Printf("WALLCLOCK_NS=%s\n", strings.TrimSpace(wallclock))
+
+	if readEnv != "" {
+		// printf with no trailing newline so ENVVAL is the exact value. The env
+		// var is referenced indirectly so the var NAME, not a literal, is what is
+		// printed by the guest shell.
+		val := execOrDie(client, fmt.Sprintf("printf '%%s' \"$%s\"", readEnv))
+		fmt.Printf("ENVVAL=%s\n", strings.TrimSpace(val))
+	}
 }
 
 // execOrDie runs a shell command in the guest and returns stdout, failing hard

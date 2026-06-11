@@ -15,6 +15,7 @@ import (
 	"io"
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
 // ActivateRequest is the control message asking the dormant VMM to load a
@@ -22,10 +23,25 @@ import (
 // reads the mem and vmstate files from it using the same layout the fork engine
 // writes (SnapshotDir/mem and SnapshotDir/vmstate). NetworkOverrides remap the
 // snapshot's baked placeholder NIC to this husk's tap, exactly as the engine
-// fork path passes them. All fields are config and carry no secrets.
+// fork path passes them.
+//
+// Env and Secrets are the claim-time guest configuration delivered after the
+// restore handshake, mirroring the daemon's deliverConfig. Network and Volumes
+// are the per-fork guest network and volume-mount table threaded into the
+// NotifyForked handshake, for parity with the engine fork path.
+//
+// Secret VALUES are never logged anywhere in the control path: the codec moves
+// them, but no log or error message ever prints them. In this PR the secrets
+// ride the local control socket only; the real claim-time secret source is the
+// controller, delivered to the husk pod's stub by the future controller-
+// migration PR.
 type ActivateRequest struct {
 	SnapshotDir      string                        `json:"snapshot_dir"`
 	NetworkOverrides []firecracker.NetworkOverride `json:"network_overrides,omitempty"`
+	Env              map[string]string             `json:"env,omitempty"`
+	Secrets          map[string]string             `json:"secrets,omitempty"`
+	Network          *vsock.NotifyForkedNetwork    `json:"network,omitempty"`
+	Volumes          []vsock.VolumeMountEntry      `json:"volumes,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded

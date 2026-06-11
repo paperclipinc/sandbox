@@ -41,13 +41,21 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     activation latency (load-start to first exec, shared-CI-class) and gates on
     activate OK plus a real exec through the activated VM. `docs/husk-pods.md`
     records the prepare/activate model and the honest target-vs-measured framing.
+  - ✅ Fork-correctness handshake on activate: the stub's `Activate` runs the
+    same `NotifyForked` reseed + clock-step handshake as the engine fork path
+    (per-activation RNG reseed, clock step) plus env/secret delivery via
+    `Configure`, fail-closed (a guest that did not report `ReseededRNG` is left
+    unserved). The KVM husk activate-correctness phase proves it across two
+    activations from one bench snapshot: distinct RNG streams, each guest wall
+    clock within 2s of the runner, and a delivered env var plus secret readable
+    in each guest with the secret value absent from the host-side logs. See
+    `docs/fork-correctness.md` and `docs/husk-pods.md`.
   - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged);
     running the stub INSIDE a real husk pod (pod spec, device-plugin resource
-    request, cgroup/netns placement); wiring the fork-correctness handshake
-    (per-activation RNG reseed / clock resync / secret delivery via
-    `NotifyForked`) into the stub's activate, REQUIRED before pod-native default;
-    migrating the pool/claim/fork controllers to create + activate husk pods; the
-    conformance suite (scheduler truth, ResourceQuota/LimitRange,
+    request, cgroup/netns placement); migrating the pool/claim/fork controllers
+    to create + activate husk pods, including sourcing the claim-time env and
+    secrets from the controller (the stub can already apply them per activation);
+    the conformance suite (scheduler truth, ResourceQuota/LimitRange,
     NetworkPolicy/PSA-restricted, `kubectl get pods`,
     eviction/preemption/PDB/drain); and the BARE-METAL P99 claim-to-first-exec
     <= 10ms warm-pool benchmark (the shared-CI activation latency is not that

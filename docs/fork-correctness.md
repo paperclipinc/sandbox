@@ -18,6 +18,16 @@ test missing or incomplete. `done` = implemented + test runs in the
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
 | 6 | Incompatible snapshot restored (crash/corruption) | Refuse on load: the manifest records the producing environment (format version, Firecracker version, CPU model, kernel, config hash); require exact VMM match, exact CPU-model match, format version in the supported set (kernel informational); `--allow-incompatible-snapshots` dev escape hatch | go: `internal/snapcompat` `TestCheck*`, `internal/fork/compat_test.go`; KVM: record a real manifest, assert compatible passes and a VMM / format-version mismatch is refused | **done** (load-gate enforcement after the digest verify, before any Firecracker launch; CPU templates + live cross-version restore open) |
 
+The husk-pods activate path (issue #18, `internal/husk`, `cmd/husk-stub`) runs
+the SAME RNG-reseed + clock-step `NotifyForked` handshake as the engine fork
+path (rows 1 and 2), plus env/secret delivery via `Configure` (row 3), on every
+`Activate`. It fails closed: a VM whose guest does not report `ReseededRNG` is
+left unserved. The KVM husk activate-correctness phase proves it by activating
+two VMs from one bench snapshot and asserting distinct `/dev/urandom`, each wall
+clock within 2s of the runner, and a delivered env var plus secret readable in
+each guest with the secret value absent from the host-side logs. See
+[docs/husk-pods.md](husk-pods.md).
+
 ## 1. RNG and entropy after restore
 
 Every VM restored from the same snapshot wakes up with byte-identical kernel
@@ -214,6 +224,14 @@ the generation sent. A jailer-boot phase restores the same snapshot under the
 jailer to prove the chroot/uid mechanics (it does not prove the dropped
 capability set, since the runner is root; that sub-step is `continue-on-error`,
 see issue #2).
+
+The same job also runs a husk activate-correctness phase: it activates two VMs
+from one bench template snapshot via two fresh dormant `cmd/husk-stub` processes
+(each `Activate` runs the reseed + clock-step handshake and delivers env/secrets,
+fail-closed) and asserts the same three properties as the fork-correctness phase
+across the two activations: distinct `/dev/urandom`, each wall clock within 2s of
+the runner, and a delivered env var plus secret readable in each guest with the
+secret value absent from every host-side stub/client log.
 
 Until every row above is `done`, fork correctness is the top engineering
 priority and blocks feature work (see `ROADMAP.md`).

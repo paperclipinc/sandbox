@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
 func TestActivateRequestRoundTrip(t *testing.T) {
@@ -13,6 +14,16 @@ func TestActivateRequestRoundTrip(t *testing.T) {
 		SnapshotDir: "/data/templates/tmpl-a/snapshot",
 		NetworkOverrides: []firecracker.NetworkOverride{
 			{IfaceID: "eth0", HostDevName: "tap-fork-1"},
+		},
+		Env:     map[string]string{"PATH": "/usr/bin", "LANG": "C"},
+		Secrets: map[string]string{"API_KEY": "s3cr3t-value"},
+		Network: &vsock.NotifyForkedNetwork{
+			GuestIP:   "10.0.0.2",
+			GatewayIP: "10.0.0.1",
+			PrefixLen: 30,
+		},
+		Volumes: []vsock.VolumeMountEntry{
+			{Device: "/dev/vdb", MountPath: "/data"},
 		},
 	}
 
