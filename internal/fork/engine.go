@@ -150,6 +150,35 @@ func (e *Engine) prepareForkVolumes(templateID, sandboxID string, specs []volume
 	return rebinds, prepared, nil
 }
 
+// volumeMountTable builds the guest mount table from the per-fork prepared
+// volumes, in the SAME order they were attached. Firecracker enumerates block
+// devices in attach order: the rootfs drive is /dev/vda and the i-th volume
+// drive (0-based) is /dev/vd{b+i}. The guest agent mounts each entry's Device at
+// MountPath after the host has rebound the drive to this fork's backing. Returns
+// nil when there are no volumes so the guest mounts nothing.
+func volumeMountTable(prepared []volume.Prepared) []vsock.VolumeMountEntry {
+	if len(prepared) == 0 {
+		return nil
+	}
+	entries := make([]vsock.VolumeMountEntry, 0, len(prepared))
+	for i, p := range prepared {
+		entries = append(entries, vsock.VolumeMountEntry{
+			Device:    volumeDeviceName(i),
+			MountPath: p.MountPath,
+			ReadOnly:  p.ReadOnly,
+		})
+	}
+	return entries
+}
+
+// volumeDeviceName returns the guest block device node for the i-th volume drive
+// (0-based). The rootfs is /dev/vda, so volumes follow as /dev/vdb, /dev/vdc, ...
+// in attach order. i is bounded by the number of template volumes (small), so a
+// single trailing letter is sufficient.
+func volumeDeviceName(i int) string {
+	return fmt.Sprintf("/dev/vd%c", 'b'+i)
+}
+
 // driveReadOnly resolves whether a volume's baked Firecracker drive must be
 // read-only at the BLOCK-DEVICE level. Firecracker bakes is_read_only into the
 // snapshot at template build time and PATCH /drives cannot flip it on a fork's
@@ -341,6 +370,12 @@ type ForkResult struct {
 	// its distinct guest IP + gateway. Nil when networking is disabled or the
 	// fork carried no NetworkOpts. Addresses are safe to log.
 	GuestNetwork *vsock.NotifyForkedNetwork
+	// VolumeMounts, when non-empty, is the per-fork volume mount table the daemon
+	// delivers to the guest in the NotifyForked message AFTER the drives are
+	// rebound, so the guest mounts each device at its mount path. Nil when
+	// volumes are disabled or the fork carried none. Device nodes and paths are
+	// safe to log.
+	VolumeMounts []vsock.VolumeMountEntry
 }
 
 // SandboxRecord is the minimal view of a live sandbox an engine reports
@@ -519,7 +554,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 	// fork policy BEFORE the snapshot is loaded so the files exist; the drive
 	// rebinds are applied with PATCH after resume. Returns nil when volumes are
 	// disabled or the fork carries none.
-	rebinds, _, err := e.prepareForkVolumes(snapshotID, sandboxID, opts.Volumes)
+	rebinds, prepared, err := e.prepareForkVolumes(snapshotID, sandboxID, opts.Volumes)
 	if err != nil {
 		_ = fcClient.Kill()
 		if fnet != nil {
@@ -599,6 +634,7 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    vsockPath,
 		GuestNetwork: guestNet,
+		VolumeMounts: volumeMountTable(prepared),
 	}, nil
 }
 

@@ -50,6 +50,25 @@ type NotifyForkedRequest struct {
 	// host could not route return traffic per fork. IPs and prefix length are
 	// safe to log.
 	Network *NotifyForkedNetwork `json:"network,omitempty"`
+	// Volumes is the per-fork volume mount table. The host rebinds each baked
+	// placeholder drive to this fork's backing (PATCH /drives) BEFORE sending
+	// this notification, so the devices are in place; the guest then mounts each
+	// entry's Device at MountPath. Empty (the default) means the fork has no
+	// volumes and the guest mounts nothing. Device nodes and paths carry no
+	// secrets and are safe to log.
+	Volumes []VolumeMountEntry `json:"volumes,omitempty"`
+}
+
+// VolumeMountEntry is one volume the guest agent mounts after a restore. Device
+// is the guest block device node (e.g. /dev/vdb) the host assigned by the drive
+// attach order (rootfs is /dev/vda, the i-th volume drive is /dev/vd{b+i}).
+// MountPath is where the guest mounts it, and ReadOnly attaches it MS_RDONLY so
+// a read-only or shared volume cannot be written from the guest. All fields are
+// config (no secrets) and safe to log.
+type VolumeMountEntry struct {
+	Device    string `json:"device"`
+	MountPath string `json:"mount_path"`
+	ReadOnly  bool   `json:"read_only"`
 }
 
 // NotifyForkedNetwork is the per-fork eth0 configuration the guest agent

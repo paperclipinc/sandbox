@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/volume"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
 // MockEngine simulates fork operations without KVM.
@@ -142,7 +143,31 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
 		VsockPath:    e.vsockPath(sandboxID),
+		// Mirror the real engine's mount table so the daemon delivery path can be
+		// exercised without KVM: device names follow attach order (vdb, vdc, ...)
+		// and the read-only flag is the resolved drive policy (Share or explicit
+		// readOnly). The mock does not prepare backings, so it derives the table
+		// directly from the requested specs.
+		VolumeMounts: mockMountTable(opts.Volumes),
 	}, nil
+}
+
+// mockMountTable builds the guest mount table the mock reports, matching the
+// real engine's device ordering and resolved read-only policy. Returns nil for
+// no volumes.
+func mockMountTable(specs []volume.Spec) []vsock.VolumeMountEntry {
+	if len(specs) == 0 {
+		return nil
+	}
+	prepared := make([]volume.Prepared, 0, len(specs))
+	for _, s := range specs {
+		prepared = append(prepared, volume.Prepared{
+			Name:      s.Name,
+			MountPath: s.MountPath,
+			ReadOnly:  driveReadOnly(s),
+		})
+	}
+	return volumeMountTable(prepared)
 }
 
 func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error {

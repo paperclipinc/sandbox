@@ -193,6 +193,42 @@ func filepathGlobExists(dir string) (string, bool) {
 	return dir, len(matches) > 0
 }
 
+// TestVolumeMountTableDeviceOrdering proves the guest mount table the engine
+// builds from the prepared volumes: the i-th volume drive is /dev/vd{b+i}
+// (rootfs is /dev/vda), the mount path comes from the spec, and ReadOnly comes
+// from the resolved drive policy (Share or explicit readOnly).
+func TestVolumeMountTableDeviceOrdering(t *testing.T) {
+	prepared := []volume.Prepared{
+		{Name: "data", MountPath: "/data", ReadOnly: false},
+		{Name: "shared", MountPath: "/shared", ReadOnly: true},
+		{Name: "cache", MountPath: "/cache", ReadOnly: false},
+	}
+	got := volumeMountTable(prepared)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 mount entries, got %d", len(got))
+	}
+	wantDev := []string{"/dev/vdb", "/dev/vdc", "/dev/vdd"}
+	for i, p := range prepared {
+		if got[i].Device != wantDev[i] {
+			t.Errorf("entry[%d] device = %q, want %q", i, got[i].Device, wantDev[i])
+		}
+		if got[i].MountPath != p.MountPath {
+			t.Errorf("entry[%d] mountPath = %q, want %q", i, got[i].MountPath, p.MountPath)
+		}
+		if got[i].ReadOnly != p.ReadOnly {
+			t.Errorf("entry[%d] readOnly = %v, want %v", i, got[i].ReadOnly, p.ReadOnly)
+		}
+	}
+}
+
+// TestVolumeMountTableEmpty proves no volumes means a nil table (the guest
+// mounts nothing).
+func TestVolumeMountTableEmpty(t *testing.T) {
+	if got := volumeMountTable(nil); got != nil {
+		t.Errorf("expected nil table for no volumes, got %v", got)
+	}
+}
+
 // TestDriveReadOnlyFromPolicy proves the resolved read-only flag the template
 // build bakes into each placeholder drive: a volume is read-only at the drive
 // level iff spec.ReadOnly is true OR the resolved policy is Share. Firecracker

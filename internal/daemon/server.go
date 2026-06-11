@@ -119,7 +119,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()
 
-	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork); err != nil {
+	if err := s.deliverConfig(result.SandboxID, result.VsockPath, env, secrets, result.GuestNetwork, result.VolumeMounts); err != nil {
 		// A sandbox that reports Ready without its secrets is a lie; reap it.
 		_ = s.engine.Terminate(result.SandboxID)
 		activeSandboxes.Dec()
@@ -144,7 +144,7 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 // Config delivery keeps its prior policy: strict only when secrets are present
 // (a sandbox Ready without its secrets is a lie); env-only failures are
 // best-effort. Secret values and entropy are never logged.
-func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string, guestNet *vsock.NotifyForkedNetwork) error {
+func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[string]string, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	if !s.engine.GetCapacity().KVMAvailable {
 		return nil // mock engine: no guest to deliver to
 	}
@@ -153,7 +153,7 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
 
-	if err := s.notifyForked(sandboxID, guestNet); err != nil {
+	if err := s.notifyForked(sandboxID, guestNet, volumes); err != nil {
 		return err
 	}
 
@@ -173,13 +173,13 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // crypto/rand entropy) to a connected guest. The agent must already be
 // registered. Entropy is never logged. Errors are returned so the caller can
 // reap the sandbox: a guest that did not reseed shares RNG state.
-func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork) error {
+func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
 		return fmt.Errorf("generate fork entropy: %w", err)
 	}
 	gen := s.forkGeneration.Add(1)
-	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet); err != nil {
+	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet, volumes); err != nil {
 		return fmt.Errorf("notify guest of fork: %w", err)
 	}
 	return nil
@@ -233,8 +233,9 @@ func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
 	}
 	// Live forks inherit the source VM's baked network identity in memory; the
 	// engine does not (yet) re-address them, so no per-fork network config is
-	// delivered here. Distinct-identity live forks are a follow-up (#18).
-	return s.notifyForked(sandboxID, nil)
+	// delivered here. Distinct-identity live forks are a follow-up (#18). Live
+	// forks also inherit the source's mounted volumes, so no mount table is sent.
+	return s.notifyForked(sandboxID, nil, nil)
 }
 
 // Terminate handles a sandbox termination request.

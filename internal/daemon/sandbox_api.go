@@ -166,14 +166,16 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 // reseed the kernel CRNG, step the wall clock, and signal userspace. When
 // guestNet is non-nil it also carries this fork's distinct eth0 address +
 // gateway so the guest re-addresses its NIC (every fork restores the same
-// snapshot-baked guest IP). Entropy is sensitive seed material and is never
-// logged; the network addresses are safe to log.
-func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork) error {
+// snapshot-baked guest IP). When volumes is non-empty it carries the per-fork
+// volume mount table (device, mount path, read-only) the guest mounts after the
+// host rebound the drives. Entropy is sensitive seed material and is never
+// logged; the network addresses, device nodes, and paths are safe to log.
+func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	agent, err := api.getAgent(sandboxID)
 	if err != nil {
 		return err
 	}
-	_, err = agent.NotifyForkedWithNetwork(generation, entropy, guestNet)
+	_, err = agent.NotifyForkedWithConfig(generation, entropy, guestNet, volumes)
 	return err
 }
 

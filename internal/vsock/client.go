@@ -140,6 +140,16 @@ func (c *Client) NotifyForked(generation uint64, entropy []byte) (*NotifyForkedR
 // snapshot-baked guest IP, is re-addressed to its allocator-assigned /30.
 // Passing nil network is identical to NotifyForked. The IPs are safe to log.
 func (c *Client) NotifyForkedWithNetwork(generation uint64, entropy []byte, network *NotifyForkedNetwork) (*NotifyForkedResponse, error) {
+	return c.NotifyForkedWithConfig(generation, entropy, network, nil)
+}
+
+// NotifyForkedWithConfig is NotifyForkedWithNetwork plus the per-fork volume
+// mount table the guest mounts after the restore. The host must have already
+// rebound each baked placeholder drive to this fork's backing (PATCH /drives)
+// before this call, so the devices are in place when the guest mounts them.
+// Passing nil volumes is identical to NotifyForkedWithNetwork. Device nodes and
+// paths are safe to log.
+func (c *Client) NotifyForkedWithConfig(generation uint64, entropy []byte, network *NotifyForkedNetwork, volumes []VolumeMountEntry) (*NotifyForkedResponse, error) {
 	resp, err := c.send(&Request{
 		Type: TypeNotifyForked,
 		NotifyForked: &NotifyForkedRequest{
@@ -147,6 +157,7 @@ func (c *Client) NotifyForkedWithNetwork(generation uint64, entropy []byte, netw
 			HostWallClockNanos: time.Now().UnixNano(),
 			Entropy:            entropy,
 			Network:            network,
+			Volumes:            volumes,
 		},
 	})
 	if err != nil {

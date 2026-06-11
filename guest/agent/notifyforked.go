@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/paperclipinc/sandbox/internal/vsock"
@@ -37,10 +39,12 @@ func handleNotifyForked(req *vsock.NotifyForkedRequest) vsock.Response {
 
 	configureNetwork(req.Network)
 
+	mounted := mountVolumes(req.Volumes)
+
 	signaled := signalUserspace()
 
-	fmt.Printf("sandbox-agent: notify_forked generation=%d entropy_bytes=%d reseeded=%v clock_step_ns=%d signaled=%d\n",
-		req.Generation, len(req.Entropy), reseeded, step, signaled)
+	fmt.Printf("sandbox-agent: notify_forked generation=%d entropy_bytes=%d reseeded=%v clock_step_ns=%d volumes_mounted=%d signaled=%d\n",
+		req.Generation, len(req.Entropy), reseeded, step, mounted, signaled)
 
 	return vsock.Response{
 		OK: true,
@@ -177,6 +181,71 @@ func configureNetwork(cfg *vsock.NotifyForkedNetwork) {
 		}
 	}
 	fmt.Printf("sandbox-agent: configured %s addr=%s gateway=%s\n", guestNetIface, addr, cfg.GatewayIP)
+}
+
+// volumeFSType is the filesystem the host formats every volume backing with.
+// Fresh and Snapshot volumes are ext4 images; Share/Clone copy an ext4 seed.
+const volumeFSType = "ext4"
+
+// mountVolumes mounts each volume in the post-restore mount table. For every
+// entry it mkdir -p's the mount path and mounts the device read-write, or
+// read-only (MS_RDONLY) when ReadOnly is set so a shared or read-only volume
+// cannot be written from the guest. The host has already rebound each baked
+// placeholder drive to this fork's backing before sending the table, so the
+// device is in place. It is idempotent: an already-mounted path is skipped
+// (a re-delivered notification does not double-mount). Best effort per entry:
+// a failure is logged (device and path only, no secrets) and the others still
+// mount. Returns the count of devices now mounted at their path.
+func mountVolumes(entries []vsock.VolumeMountEntry) int {
+	mounted := 0
+	for _, e := range entries {
+		if e.Device == "" || e.MountPath == "" {
+			fmt.Fprintf(os.Stderr, "sandbox-agent: skipping volume with empty device/path: device=%q path=%q\n", e.Device, e.MountPath)
+			continue
+		}
+		if isMounted(e.MountPath) {
+			mounted++
+			continue
+		}
+		if err := os.MkdirAll(e.MountPath, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox-agent: mkdir mount path %s: %v\n", e.MountPath, err)
+			continue
+		}
+		var flags uintptr
+		if e.ReadOnly {
+			flags |= unix.MS_RDONLY
+		}
+		if err := unix.Mount(e.Device, e.MountPath, volumeFSType, flags, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox-agent: mount %s at %s (ro=%v): %v\n", e.Device, e.MountPath, e.ReadOnly, err)
+			continue
+		}
+		mounted++
+	}
+	if len(entries) > 0 {
+		fmt.Printf("sandbox-agent: mounted %d/%d volumes\n", mounted, len(entries))
+	}
+	return mounted
+}
+
+// isMounted reports whether mountPath is already a mount point by scanning
+// /proc/mounts (field 2 is the mount target). It makes mountVolumes idempotent
+// across a re-delivered fork notification. On any read error it returns false so
+// the caller attempts the mount (a redundant mount fails loudly rather than
+// silently skipping).
+func isMounted(mountPath string) bool {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) >= 2 && fields[1] == mountPath {
+			return true
+		}
+	}
+	return false
 }
 
 // signalUserspace sends SIGUSR2 to every userspace process except PID 1 (this

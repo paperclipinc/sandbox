@@ -23,6 +23,7 @@ import (
 
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/vsock"
+	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,
@@ -261,6 +262,42 @@ func TestForkNotifiesAgentWithFreshEntropy(t *testing.T) {
 	}
 	if isAllZero(n.Entropy) {
 		t.Error("entropy is all zero")
+	}
+}
+
+// TestForkDeliversVolumeMountTable proves the daemon plumbs the engine's
+// per-fork volume mount table into the notify_forked message the guest agent
+// receives: the i-th volume drive is /dev/vd{b+i}, the mount paths come from the
+// specs, and the Share volume is delivered read-only even though its spec did
+// not set ReadOnly (the resolved drive policy).
+func TestForkDeliversVolumeMountTable(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-vol", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	volumes := []*forkdpb.VolumeMount{
+		{Name: "data", MountPath: "/data", Size: "64Mi", ForkPolicy: "Fresh"},
+		{Name: "shared", MountPath: "/shared", Size: "64Mi", ForkPolicy: "Share"},
+	}
+	if _, err := srv.Fork(context.Background(), "py", "sb-vol", nil, nil, nil, volumes, "t"); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.notifies) != 1 {
+		t.Fatalf("expected one notify_forked, got %d", len(rec.notifies))
+	}
+	mounts := rec.notifies[0].Volumes
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mount entries, got %d: %+v", len(mounts), mounts)
+	}
+	if mounts[0].Device != "/dev/vdb" || mounts[0].MountPath != "/data" || mounts[0].ReadOnly {
+		t.Errorf("entry[0] = %+v, want {/dev/vdb /data ro=false}", mounts[0])
+	}
+	if mounts[1].Device != "/dev/vdc" || mounts[1].MountPath != "/shared" || !mounts[1].ReadOnly {
+		t.Errorf("entry[1] = %+v, want {/dev/vdc /shared ro=true}", mounts[1])
 	}
 }
 
