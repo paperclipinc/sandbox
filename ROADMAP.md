@@ -93,8 +93,16 @@ Plan: `docs/superpowers/plans/2026-06-10-control-plane-wiring.md`.
 - ✅ SandboxPool snapshot accounting and creation (was a no-op); works
   against the mock engine; the real engine needs an image→rootfs build
   pipeline (template.Spec.Image is currently passed as a rootfs file path)
-- ⬜ Image→rootfs build pipeline so pool templates can be built from OCI
-  images on real nodes (guest/rootfs/build.sh is offline tooling today)
+- ✅ Image→rootfs build pipeline so pool templates can be built from OCI
+  images on real nodes: internal/ociroot pulls and flattens an OCI image into
+  an ext4 rootfs with the guest agent as /init; Engine.CreateTemplate builds
+  from an OCI ref (vs a file path), boots, runs template.Spec.Init IN the VM
+  (a failed init aborts the build), waits for agent readiness, then snapshots;
+  proven end to end in KVM CI from busybox:stable (see docs/templates.md).
+  Open follow-ups: go:embed the agent into forkd so no external --agent-bin is
+  needed; OCI layer caching tied to the CAS store for faster pool builds;
+  registry credentials / private images and a pull-through mirror; non-ext4
+  backends (erofs, virtio-fs)
 - ✅ forkd node discovery + capacity heartbeats (was a TODO)
 - ✅ Truthful claim endpoints (point at forkd's sandbox API, not a
   fabricated address)

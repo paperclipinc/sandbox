@@ -21,7 +21,10 @@ func buildRootfsFromImage(ctx context.Context, ref, outPath, agentBin, busyboxBi
 
 	img, err := ociroot.PullImage(ctx, ref)
 	if err != nil {
-		return err
+		// Marked so callers (and CI) can distinguish a registry/network pull
+		// flake, which is retryable and not a pipeline defect, from a genuine
+		// build/boot/init failure downstream.
+		return fmt.Errorf("PULL_FAILED: pull image %q: %w", ref, err)
 	}
 
 	tmpDir, err := os.MkdirTemp("", "ociroot-extract-")

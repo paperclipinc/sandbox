@@ -13,6 +13,8 @@ on:
       - 'cmd/test-agent/**'
       - 'cmd/cas-verify/**'
       - 'cmd/net-smoke/**'
+      - 'cmd/tmpl-smoke/**'
+      - 'internal/ociroot/**'
       - 'internal/vsock/**'
   pull_request:
     branches: [main]
@@ -241,6 +243,77 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/agent-run-test/agent ./guest/agent/
           ls -lh /tmp/agent-run-test/agent
+
+      # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
+      # proves Engine.CreateTemplate builds a bootable template FROM A REAL OCI
+      # IMAGE, not a hand-built rootfs: pull busybox:stable, flatten its layers,
+      # inject the agent as /init, build an ext4, boot it, run an init command
+      # INSIDE the VM, snapshot, fork a sandbox, and exec assertions over the
+      # guest agent. cmd/tmpl-smoke drives fork.NewEngine directly so the engine's
+      # image build path is the thing under test.
+      #
+      # Two assertions GATE:
+      #   1. init-command proof: the init command wrote /built.txt IN the template
+      #      VM at build time, so the forked sandbox can cat it back. This proves
+      #      boot -> init-in-VM -> snapshot -> fork carried the init side effect.
+      #   2. image-filesystem proof: /bin/busybox resolves in the fork, proving
+      #      the OCI layers were flattened into the rootfs (not an empty ext4).
+      #
+      # The Docker Hub pull can flake. tmpl-smoke marks pull failures with
+      # PULL_FAILED so this loop retries ONLY the registry flake and never masks
+      # a build/boot/init defect: a non-PULL_FAILED failure fails immediately, and
+      # exhausting the pull retries fails clearly as a pull problem. A registry
+      # mirror is the production answer (documented in docs/templates.md).
+      - name: Image to rootfs pipeline, build from busybox and run init in the VM
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          # A static busybox to inject as /bin/sh if the image lacks a shell
+          # (busybox:stable ships its own, but tmpl-smoke passes this through and
+          # it is required for any shell-less image).
+          curl -fsSL -o /tmp/agent-run-test/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          chmod +x /tmp/agent-run-test/busybox
+
+          go build -o /tmp/tmpl-smoke ./cmd/tmpl-smoke/
+
+          run_smoke() {
+            rm -rf /tmp/agent-run-test/smoke-data
+            /tmp/tmpl-smoke \
+              --image busybox:stable \
+              --init 'echo built-by-init > /built.txt' \
+              --data-dir /tmp/agent-run-test/smoke-data \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/agent-run-test/vmlinux \
+              --agent-bin /tmp/agent-run-test/agent \
+              --busybox-bin /tmp/agent-run-test/busybox \
+              --expect-file /built.txt --expect-content built-by-init \
+              --expect-cmd 'ls /bin/busybox'
+          }
+
+          attempt=1
+          max=4
+          while true; do
+            echo "=== tmpl-smoke attempt ${attempt}/${max} ==="
+            if run_smoke 2>&1 | tee /tmp/smoke.out; then
+              echo "================================"
+              echo "  Image to rootfs pipeline proven (build + boot + init + fork + exec)"
+              echo "================================"
+              break
+            fi
+            if ! grep -q 'PULL_FAILED' /tmp/smoke.out; then
+              echo "FAIL: pipeline failure (not a registry pull flake); failing the job"
+              exit 1
+            fi
+            if [ "$attempt" -ge "$max" ]; then
+              echo "FAIL: image pull from Docker Hub kept flaking after ${max} attempts (PULL_FAILED). This is a registry/network problem, not a pipeline defect; a registry mirror is the production fix."
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
 
       - name: Inject agent into rootfs and test exec via vsock
         timeout-minutes: 5

@@ -619,6 +619,16 @@ func (e *Engine) GetCapacity() Capacity {
 func (e *Engine) CreateTemplate(id string, image string, initCommands []string) error {
 	cfg := firecracker.DefaultVMConfig()
 
+	// The template rootfs runs the guest agent as PID 1 at /init: ociroot
+	// injects the agent there for image builds, and the hand-built file-path
+	// rootfs places it there too. A normal (non-initramfs) root filesystem does
+	// NOT have /init in the kernel's default init search path, so the agent only
+	// becomes PID 1 if we say so explicitly. Append init=/init unless the caller
+	// already pinned an init=.
+	if !strings.Contains(cfg.BootArgs, "init=") {
+		cfg.BootArgs += " init=/init"
+	}
+
 	if isImageRef(image) {
 		// Build the rootfs from the image into the template's own rootfs path.
 		// The template manager copies cfg.RootfsPath into the template workdir,
