@@ -146,6 +146,33 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	}, nil
 }
 
+// PullTemplate fetches a template's snapshot from a peer forkd's CAS and
+// records it locally. The PullToken in the request is a credential: it is
+// passed straight to the engine and is NEVER logged or recorded as a span
+// attribute. Only the template id, source URL, and digest (content addresses,
+// safe to log) are surfaced.
+func (g *grpcService) PullTemplate(ctx context.Context, req *forkdpb.PullTemplateRequest) (*forkdpb.PullTemplateResponse, error) {
+	if err := validateIDs(req.TemplateId); err != nil {
+		return nil, err
+	}
+	ctx, span := tracer.Start(ctx, "forkd.PullTemplate", trace.WithAttributes(
+		attribute.String("template.id", req.TemplateId),
+		attribute.String("source.url", req.SourceUrl),
+		attribute.String("manifest.digest", req.ManifestDigest),
+	))
+	defer span.End()
+
+	if err := g.srv.engine.PullTemplate(ctx, req.TemplateId, req.ManifestDigest, req.SourceUrl, req.PullToken); err != nil {
+		span.RecordError(err)
+		return nil, grpcError(err)
+	}
+	digest := g.srv.engine.GetCapacity().TemplateDigests[req.TemplateId]
+	return &forkdpb.PullTemplateResponse{
+		TemplateId:     req.TemplateId,
+		TemplateDigest: digest,
+	}, nil
+}
+
 func (g *grpcService) Exec(ctx context.Context, _ *forkdpb.ExecRequest) (*forkdpb.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "exec is served by the HTTP sandbox API on the forkd HTTP port")
 }

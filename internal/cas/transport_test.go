@@ -309,6 +309,55 @@ func TestHTTPHandlerRejectsInvalidDigest(t *testing.T) {
 	}
 }
 
+// TestRequirePullTokenGatesCAS asserts the token middleware rejects an absent
+// or wrong bearer token with 403, and that a transport carrying the right token
+// pulls successfully through the gated surface.
+func TestRequirePullTokenGatesCAS(t *testing.T) {
+	src := t.TempDir()
+	memData := bytes.Repeat([]byte{0x9a}, 7<<20)
+	mem := writeFile(t, src, "mem", memData)
+
+	storeA := newStore(t)
+	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 5000})
+	if err != nil {
+		t.Fatalf("PutSnapshot: %v", err)
+	}
+
+	const token = "s3cret-peer-token"
+	gated := RequirePullToken(token, NewHTTPHandler(storeA))
+	srv := httptest.NewServer(gated)
+	defer srv.Close()
+
+	// Absent token: every CAS route rejects with 403.
+	resp, err := http.Get(srv.URL + "/cas/manifest/" + string(mA.Digest())) //nolint:noctx,bodyclose // test
+	if err != nil {
+		t.Fatalf("GET manifest without token: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("manifest without token: status %d, want 403", resp.StatusCode)
+	}
+
+	// Wrong token: rejected.
+	storeWrong := newStore(t)
+	wrong := NewHTTPTransport(srv.URL, srv.Client()).WithBearerToken("not-the-token")
+	if err := Pull(context.Background(), storeWrong, wrong, mA.Digest()); err == nil {
+		t.Fatal("expected Pull with wrong token to fail")
+	}
+
+	// Correct token: Pull succeeds and materializes byte-identical.
+	storeB := newStore(t)
+	good := NewHTTPTransport(srv.URL, srv.Client()).WithBearerToken(token)
+	if err := Pull(context.Background(), storeB, good, mA.Digest()); err != nil {
+		t.Fatalf("Pull with correct token: %v", err)
+	}
+	dst := t.TempDir()
+	if err := storeB.Materialize(mA.Digest(), dst); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	assertByteIdentical(t, filepath.Join(dst, "mem"), memData)
+}
+
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := New(filepath.Join(t.TempDir(), "store"))

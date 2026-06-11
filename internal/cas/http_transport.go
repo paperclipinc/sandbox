@@ -3,6 +3,7 @@ package cas
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +41,27 @@ func NewHTTPHandler(store *Store) http.Handler {
 
 type httpHandler struct {
 	store *Store
+}
+
+// RequirePullToken wraps an http.Handler so every request must carry a matching
+// Authorization: Bearer credential. A request with an absent or wrong token is
+// rejected with 403 Forbidden before the wrapped handler runs, so the CAS
+// surface never enumerates or serves chunks to an unauthenticated peer. The
+// comparison is constant-time so a wrong token leaks no timing signal. The
+// token value is compared but NEVER logged. The token gates enumeration and
+// pull; chunk integrity is independently enforced by digest verification on
+// receipt, so the caller must still serve this only over TLS to keep the token
+// itself confidential.
+func RequirePullToken(token string, next http.Handler) http.Handler {
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(got, want) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *httpHandler) getManifest(w http.ResponseWriter, r *http.Request) {
@@ -97,15 +119,21 @@ func (h *httpHandler) getChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 // HTTPTransport is a Transport that talks to a NewHTTPHandler endpoint over
-// HTTP. It is the transport the future P2P layer uses between nodes.
+// HTTP. It is the transport the node-to-node distribution layer uses between
+// nodes.
 type HTTPTransport struct {
 	baseURL string
 	client  *http.Client
+	// bearerToken, when non-empty, is attached as an Authorization: Bearer
+	// header on every request so a token-gated CAS surface accepts the pull. It
+	// is a SECRET VALUE: it is only ever copied into the request header and is
+	// NEVER logged or placed in an error message.
+	bearerToken string
 }
 
 // NewHTTPTransport builds a transport against baseURL (the root the handler is
-// mounted at, e.g. http://node:9092). If client is nil, http.DefaultClient is
-// used.
+// mounted at, e.g. https://node:9091/cas). If client is nil, http.DefaultClient
+// is used.
 func NewHTTPTransport(baseURL string, client *http.Client) *HTTPTransport {
 	if client == nil {
 		client = http.DefaultClient
@@ -113,6 +141,23 @@ func NewHTTPTransport(baseURL string, client *http.Client) *HTTPTransport {
 	return &HTTPTransport{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		client:  client,
+	}
+}
+
+// WithBearerToken returns t configured to send token as an
+// Authorization: Bearer header on every request. The token is a credential: it
+// is stored only to set the request header and is never logged. An empty token
+// leaves the transport unauthenticated (the prior behavior).
+func (t *HTTPTransport) WithBearerToken(token string) *HTTPTransport {
+	t.bearerToken = token
+	return t
+}
+
+// authorize attaches the bearer credential to a request when one is configured.
+// The token value never leaves this header.
+func (t *HTTPTransport) authorize(req *http.Request) {
+	if t.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+t.bearerToken)
 	}
 }
 
@@ -127,6 +172,7 @@ func (t *HTTPTransport) HasChunks(ctx context.Context, digests []Digest) (map[Di
 		return nil, fmt.Errorf("build has request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	t.authorize(req)
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post has: %w", err)
@@ -150,6 +196,7 @@ func (t *HTTPTransport) GetChunk(ctx context.Context, d Digest) (io.ReadCloser, 
 	if err != nil {
 		return nil, fmt.Errorf("build chunk request: %w", err)
 	}
+	t.authorize(req)
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("get chunk %s: %w", d, err)
@@ -168,6 +215,7 @@ func (t *HTTPTransport) GetManifest(ctx context.Context, d Digest) (Manifest, er
 	if err != nil {
 		return Manifest{}, fmt.Errorf("build manifest request: %w", err)
 	}
+	t.authorize(req)
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("get manifest %s: %w", d, err)

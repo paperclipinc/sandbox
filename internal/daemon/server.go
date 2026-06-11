@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/storecrypt"
 	"github.com/paperclipinc/sandbox/internal/volume"
@@ -96,8 +98,31 @@ func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
 	forkdpb.RegisterForkDaemonServer(s, &grpcService{srv: srv})
 }
 
-// ServeHTTP starts the HTTP server for metrics, health, and sandbox API.
-func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
+// CASServing carries the optional configuration that lets the forkd HTTP server
+// serve its content-addressed store to peer nodes for template distribution.
+// The store is the engine's CAS; Token is the shared peer credential a pull
+// must present; TLS is the server TLS config the listener is wrapped in.
+//
+// CAS serving is enabled only when ALL of Store, Token, and TLS are set. The
+// chunks are digest-addressed, so integrity does not depend on the channel, but
+// the token gates enumeration and pull and the token itself must stay
+// confidential, so it travels only over TLS. When any field is missing the
+// /cas/ surface is NOT mounted and the server behaves exactly as before. The
+// token value is never logged.
+type CASServing struct {
+	Store *cas.Store
+	Token string
+	TLS   *tls.Config
+}
+
+func (c *CASServing) enabled() bool {
+	return c != nil && c.Store != nil && c.Token != "" && c.TLS != nil
+}
+
+// ServeHTTP starts the HTTP server for metrics, health, and the sandbox API,
+// and (when cas is enabled) the token-gated CAS surface for peer template
+// pulls. A nil or disabled cas leaves the prior plaintext server unchanged.
+func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI, casCfg *CASServing) {
 	mux := http.NewServeMux()
 
 	// Metrics
@@ -128,7 +153,22 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	apiHandler := sandboxAPI.Handler()
 	mux.Handle("/v1/", apiHandler)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// Token-gated, TLS-only CAS surface for peer template distribution. Mounted
+	// only when fully configured; the gate rejects an absent/wrong token with
+	// 403 before any store access. Served over TLS so the token stays
+	// confidential.
+	if casCfg.enabled() {
+		mux.Handle("/cas/", cas.RequirePullToken(casCfg.Token, cas.NewHTTPHandler(casCfg.Store)))
+		log.Printf("forkd: CAS peer distribution ENABLED on %s/cas (TLS, token-gated)", addr)
+		srv := &http.Server{Addr: addr, Handler: mux, TLSConfig: casCfg.TLS, ReadHeaderTimeout: 10 * time.Second}
+		// Certs are supplied via TLSConfig.Certificates, so the paths are empty.
+		if err := srv.ListenAndServeTLS("", ""); err != nil {
+			log.Printf("forkd: https server: %v", err)
+		}
+		return
+	}
+
+	if err := http.ListenAndServe(addr, mux); err != nil { //nolint:gosec // operational mux; sandbox routes carry their own bearer auth
 		log.Printf("forkd: http server: %v", err)
 	}
 }
