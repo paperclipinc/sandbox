@@ -17,6 +17,16 @@ type VMConfig struct {
 	// vmstate) that prepareChroot hard-links into the VM's chroot before
 	// launch. Ignored when the jailer is disabled.
 	ChrootFiles []string
+	// VolumeDrives are placeholder block devices baked into the snapshot at
+	// build time, one per template volume. Firecracker bakes its device model at
+	// snapshot time and cannot add a drive on restore, so the device must exist
+	// in the snapshot; each fork then rebinds the drive's backing to its own
+	// file via PatchDrive after restore. The drives are added (in slice order)
+	// BEFORE InstanceStart and are NOT mounted in the guest at build time. The
+	// guest device order follows AddDrive order: rootfs is vda, these follow as
+	// vdb, vdc, ... in this slice's order. Empty keeps the prior drive-less
+	// behavior (only the rootfs drive).
+	VolumeDrives []VolumeDrive
 	// Network, when set, attaches a NIC to the VM. It is used two ways:
 	// for a FRESH boot (template creation, non-restore claims) the NIC is
 	// bound to a live tap before InstanceStart; the engine fork path instead
@@ -24,6 +34,16 @@ type VMConfig struct {
 	// the snapshot's baked placeholder NIC to its own tap. The zero value
 	// keeps the prior NIC-less behavior. The fields are safe to log.
 	Network *NetworkIdentity
+}
+
+// VolumeDrive is one placeholder block device a template build attaches before
+// snapshot. DriveID is the volume name (forks rebind this exact id), PathOnHost
+// is the template seed backing baked into the snapshot, and ReadOnly carries
+// the volume's read-only flag. All fields are config (no secrets), safe to log.
+type VolumeDrive struct {
+	DriveID    string
+	PathOnHost string
+	ReadOnly   bool
 }
 
 // NetworkIdentity is the per-VM network binding StartVM applies: which guest
@@ -60,6 +80,19 @@ type Drive struct {
 	PathOnHost   string `json:"path_on_host"`
 	IsReadOnly   bool   `json:"is_read_only"`
 	IsRootDevice bool   `json:"is_root_device"`
+}
+
+// DrivePatch is the PATCH /drives/{drive_id} request body. Firecracker accepts
+// a path_on_host update on an existing drive to rebind its backing file. This
+// is how each fork of one shared snapshot points its baked placeholder volume
+// drive at the fork's OWN backing: the snapshot bakes the block device by
+// drive_id, and every fork PATCHes that drive_id to its prepared backing after
+// the snapshot is loaded and resumed (before the guest mounts it). The field
+// names match the Firecracker API exactly; the values (drive id and host path)
+// carry no secrets and are safe to log.
+type DrivePatch struct {
+	DriveID    string `json:"drive_id"`
+	PathOnHost string `json:"path_on_host"`
 }
 
 type Vsock struct {

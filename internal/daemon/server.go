@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
@@ -98,11 +99,16 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 // netConf is nil the fork gets no network identity (networking disabled or no
 // policy on the template). The egress policy and allowlist entries are safe to
 // log.
-func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, apiToken string) (*fork.ForkResult, error) {
+func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, secrets map[string]string, netConf *forkdpb.NetworkConfig, volumes []*forkdpb.VolumeMount, apiToken string) (*fork.ForkResult, error) {
+	vols, err := volumeSpecs(volumes)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: invalid volume spec: %w", sandboxID, err)
+	}
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
 		Network: networkOpts(netConf),
+		Volumes: vols,
 	})
 	if err != nil {
 		return nil, err
@@ -285,6 +291,31 @@ func networkOpts(c *forkdpb.NetworkConfig) *fork.NetworkOpts {
 		EgressPolicy: c.EgressPolicy,
 		AllowList:    c.AllowList,
 	}
+}
+
+// volumeSpecs converts the proto VolumeMounts into engine volume specs. It
+// parses each size string into megabytes and carries the fork policy through as
+// the API string. An unparseable size fails the whole fork: a volume sized
+// wrong is a hard misconfiguration, not something to silently default.
+func volumeSpecs(mounts []*forkdpb.VolumeMount) ([]volume.Spec, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	specs := make([]volume.Spec, 0, len(mounts))
+	for _, m := range mounts {
+		sizeMB, err := volume.ParseSizeMB(m.Size)
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", m.Name, err)
+		}
+		specs = append(specs, volume.Spec{
+			Name:      m.Name,
+			SizeMB:    sizeMB,
+			MountPath: m.MountPath,
+			ReadOnly:  m.ReadOnly,
+			Policy:    volume.ForkPolicy(m.ForkPolicy),
+		})
+	}
+	return specs, nil
 }
 
 // UpdateMetrics refreshes capacity metrics.

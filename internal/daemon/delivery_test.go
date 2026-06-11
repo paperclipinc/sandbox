@@ -46,13 +46,13 @@ func (e *kvmReportingEngine) Terminate(id string) error {
 func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 	engine := &kvmReportingEngine{MockEngine: fork.NewMockEngine()}
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	_, err := srv.Fork(context.Background(), "py", "sb-secret", nil,
-		map[string]string{"API_KEY": "v"}, nil, "test-token")
+		map[string]string{"API_KEY": "v"}, nil, nil, "test-token")
 	if err == nil {
 		t.Fatal("fork with undeliverable secrets must fail")
 	}
@@ -71,13 +71,13 @@ func TestForkWithSecretsFailsWhenAgentUnreachable(t *testing.T) {
 func TestForkFailsWhenAgentUnreachableEvenEnvOnly(t *testing.T) {
 	engine := &kvmReportingEngine{MockEngine: fork.NewMockEngine()}
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	_, err := srv.Fork(context.Background(), "py", "sb-env",
-		map[string]string{"SESSION": "abc"}, nil, nil, "test-token")
+		map[string]string{"SESSION": "abc"}, nil, nil, nil, "test-token")
 	if err == nil {
 		t.Fatal("real-engine fork with unreachable guest must fail (cannot reseed RNG)")
 	}
@@ -89,13 +89,13 @@ func TestForkFailsWhenAgentUnreachableEvenEnvOnly(t *testing.T) {
 func TestForkMockEngineSkipsDelivery(t *testing.T) {
 	engine := fork.NewMockEngine() // KVMAvailable=false
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 
 	if _, err := srv.Fork(context.Background(), "py", "sb-mock", nil,
-		map[string]string{"API_KEY": "v"}, nil, "test-token"); err != nil {
+		map[string]string{"API_KEY": "v"}, nil, nil, "test-token"); err != nil {
 		t.Fatalf("mock-mode fork must not require delivery: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestForkDeliversConfigureToAgent(t *testing.T) {
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
 	engine := &kvmReportingEngine{MockEngine: mock}
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The mock will report this exact path for sandbox "sb-ok".
@@ -196,7 +196,7 @@ func TestForkDeliversConfigureToAgent(t *testing.T) {
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
 	if _, err := srv.Fork(context.Background(), "py", "sb-ok",
 		map[string]string{"SESSION": "abc"},
-		map[string]string{"API_KEY": "v"}, nil, "test-token"); err != nil {
+		map[string]string{"API_KEY": "v"}, nil, nil, "test-token"); err != nil {
 		t.Fatalf("fork with reachable agent: %v", err)
 	}
 
@@ -225,7 +225,7 @@ func kvmEngineWithTemplate(t *testing.T, dir string) *kvmReportingEngine {
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
 	engine := &kvmReportingEngine{MockEngine: mock}
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return engine
@@ -246,7 +246,7 @@ func TestForkNotifiesAgentWithFreshEntropy(t *testing.T) {
 	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-ok", "vsock.sock"))
 
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
-	if _, err := srv.Fork(context.Background(), "py", "sb-ok", nil, nil, nil, "test-token"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-ok", nil, nil, nil, nil, "test-token"); err != nil {
 		t.Fatalf("fork: %v", err)
 	}
 
@@ -271,10 +271,10 @@ func TestForkGenerationIncrementsAcrossForks(t *testing.T) {
 	rec2 := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-2", "vsock.sock"))
 
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
-	if _, err := srv.Fork(context.Background(), "py", "sb-1", nil, nil, nil, "t"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-1", nil, nil, nil, nil, "t"); err != nil {
 		t.Fatalf("fork 1: %v", err)
 	}
-	if _, err := srv.Fork(context.Background(), "py", "sb-2", nil, nil, nil, "t"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-2", nil, nil, nil, nil, "t"); err != nil {
 		t.Fatalf("fork 2: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestForkFailsWhenNotifyForkedErrors(t *testing.T) {
 	startFakeVsockAgentErr(t, filepath.Join(dir, "sandboxes", "sb-bad", "vsock.sock"), true)
 
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
-	_, err := srv.Fork(context.Background(), "py", "sb-bad", nil, nil, nil, "test-token")
+	_, err := srv.Fork(context.Background(), "py", "sb-bad", nil, nil, nil, nil, "test-token")
 	if err == nil {
 		t.Fatal("fork must fail when the guest cannot reseed RNG state")
 	}
@@ -317,13 +317,13 @@ func TestForkMockEngineSendsNoNotify(t *testing.T) {
 	mock := fork.NewMockEngine() // KVMAvailable=false
 	mock.ForkDelay = 0
 	mock.VsockDir = dir
-	if err := mock.CreateTemplate("py", "py", nil); err != nil {
+	if err := mock.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	rec := startFakeVsockAgent(t, filepath.Join(dir, "sandboxes", "sb-mock", "vsock.sock"))
 
 	srv := NewServer(mock, NewSandboxAPI(t.TempDir()))
-	if _, err := srv.Fork(context.Background(), "py", "sb-mock", nil, nil, nil, "t"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-mock", nil, nil, nil, nil, "t"); err != nil {
 		t.Fatalf("mock fork: %v", err)
 	}
 

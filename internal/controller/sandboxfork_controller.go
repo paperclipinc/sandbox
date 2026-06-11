@@ -6,7 +6,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/workspace"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -114,12 +113,11 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	for i := int32(0); i < needed; i++ {
 		forkID := fmt.Sprintf("%s-fork-%d", fork.Name, fork.Status.TotalForks+i)
 
-		// Prepare volumes per fork policies
-		_, err := r.prepareVolumes(ctx, template.Spec.Volumes, forkID, fork.Spec.VolumeOverrides)
-		if err != nil {
-			logger.Error(err, "volume preparation failed", "fork", forkID)
-			continue
-		}
+		// Translate the template's volumes (with this fork's VolumeOverrides
+		// applied) into the Fork RPC's VolumeMounts. A live fork (ForkRunning)
+		// inherits the source's already-attached drives, so these are carried
+		// for the node to reconcile rather than re-prepared here.
+		volumes := volumeMounts(template.Spec.Volumes, fork.Spec.VolumeOverrides)
 
 		// Per-fork bearer token: the source's token never opens the fork.
 		// The value reaches exactly two places: the ForkRunningRequest and
@@ -132,7 +130,7 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		// Call forkd.ForkRunning on the source node
-		result, err := r.forkRunningOnNode(ctx, node, source.Status.SandboxID, forkID, fork.Spec.PauseSource, apiToken)
+		result, err := r.forkRunningOnNode(ctx, node, source.Status.SandboxID, forkID, fork.Spec.PauseSource, volumes, apiToken)
 		if err != nil {
 			logger.Error(err, "fork failed", "fork", forkID)
 			continue
@@ -179,29 +177,6 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	return ctrl.Result{}, nil
-}
-
-func (r *SandboxForkReconciler) prepareVolumes(ctx context.Context, templateVols []v1alpha1.SandboxVolume, sandboxID string, overrides []v1alpha1.VolumeOverride) ([]*workspace.PreparedVolume, error) {
-	overrideMap := make(map[string]v1alpha1.ForkPolicy)
-	for _, o := range overrides {
-		overrideMap[o.Name] = o.ForkPolicy
-	}
-
-	var prepared []*workspace.PreparedVolume
-	for _, vol := range templateVols {
-		policy := vol.ForkPolicy
-		if override, ok := overrideMap[vol.Name]; ok {
-			policy = override
-		}
-
-		handler := workspace.HandlerForPolicy(policy)
-		pv, err := handler.Prepare(ctx, vol, sandboxID)
-		if err != nil {
-			return nil, fmt.Errorf("volume %s: %w", vol.Name, err)
-		}
-		prepared = append(prepared, pv)
-	}
-	return prepared, nil
 }
 
 type forkRunningResult struct {

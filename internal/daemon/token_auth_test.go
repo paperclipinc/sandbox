@@ -213,7 +213,7 @@ func TestUnregisterSandboxClearsToken(t *testing.T) {
 func TestForkRegistersTokenOnServer(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())
@@ -221,7 +221,7 @@ func TestForkRegistersTokenOnServer(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "sb-tok", nil, nil, nil, "tok-fork"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-tok", nil, nil, nil, nil, "tok-fork"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,7 +246,7 @@ func TestForkRegistersTokenOnServer(t *testing.T) {
 func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())
@@ -254,7 +254,7 @@ func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "sb-naked", nil, nil, nil, ""); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "sb-naked", nil, nil, nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -270,7 +270,7 @@ func TestForkWithEmptyTokenFailsClosed(t *testing.T) {
 func TestForkRunningRegistersToken(t *testing.T) {
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "py", nil); err != nil {
+	if err := engine.CreateTemplate("py", "py", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	api := NewSandboxAPI(t.TempDir())
@@ -278,7 +278,7 @@ func TestForkRunningRegistersToken(t *testing.T) {
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.Fork(context.Background(), "py", "parent", nil, nil, nil, "tok-parent"); err != nil {
+	if _, err := srv.Fork(context.Background(), "py", "parent", nil, nil, nil, nil, "tok-parent"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := srv.ForkRunning(context.Background(), "parent", "child", false, "tok-child"); err != nil {

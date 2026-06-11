@@ -62,6 +62,19 @@ func New(root string) *Backend {
 	}
 }
 
+// NewWithRunner returns a Backend rooted at root that runs argv through runner
+// instead of execRunner. It exists so callers in other packages (the fork
+// engine's tests) can record mkfs/cp invocations without running real
+// subprocesses. Production code uses New.
+func NewWithRunner(root string, runner func(argv []string) error) *Backend {
+	return &Backend{root: root, runner: runner}
+}
+
+// Root reports the directory the backend roots its backing files under.
+func (b *Backend) Root() string {
+	return b.root
+}
+
 // execRunner runs argv as a subprocess, surfacing combined output on failure.
 func execRunner(argv []string) error {
 	if len(argv) == 0 {
@@ -83,6 +96,38 @@ func (b *Backend) volumePath(sandboxID, name string) string {
 
 func (b *Backend) volumesDir(sandboxID string) string {
 	return filepath.Join(b.root, "sandboxes", sandboxID, "volumes")
+}
+
+// TemplateVolumePath is the seed backing file for volume name under template
+// templateID. The template build writes one empty (or seeded) ext4 here per
+// template volume so it can be baked into the snapshot AND used as the
+// reflink/copy source for Snapshot and Clone forks. The id and name come from
+// validated CRD fields, so they are safe to log.
+func (b *Backend) TemplateVolumePath(templateID, name string) string {
+	return filepath.Join(b.root, "templates", templateID, "volumes", name+".ext4")
+}
+
+// FreshTemplate creates the seed backing for a template volume at
+// TemplateVolumePath: an empty ext4 of the spec size. It mirrors Fresh but
+// targets the template-scoped path so the snapshot can bake the block device
+// and forks can reflink/copy from it. Returns the seed host path.
+func (b *Backend) FreshTemplate(spec Spec, templateID string) (string, error) {
+	dst := b.TemplateVolumePath(templateID, spec.Name)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", fmt.Errorf("template volume %s: mkdir: %w", spec.Name, err)
+	}
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("template volume %s: create backing file: %w", spec.Name, err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("template volume %s: close backing file: %w", spec.Name, err)
+	}
+	size := fmt.Sprintf("%dM", spec.SizeMB)
+	if err := b.runner([]string{"mkfs.ext4", "-F", "-q", dst, size}); err != nil {
+		return "", fmt.Errorf("template volume %s: mkfs: %w", spec.Name, err)
+	}
+	return dst, nil
 }
 
 // Fresh creates an empty ext4 image sized from the spec.

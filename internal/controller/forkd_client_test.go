@@ -10,6 +10,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/volume"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,7 +23,7 @@ func startFakeForkd(t *testing.T, templates ...string) (string, *fork.MockEngine
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,7 +51,7 @@ func TestForkOnNode(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, "tok-sb-1")
+	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1")
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
 		Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
 	}
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, "tok"); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok"); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 
@@ -118,7 +119,7 @@ func TestForkOnNodeNilNetworkPolicy(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, "tok"); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok"); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 	if got := engine.LastForkNetwork(); got != nil {
@@ -136,12 +137,12 @@ func TestForkRunningOnNode(t *testing.T) {
 	}
 
 	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, "tok-parent"); err != nil {
+	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent"); err != nil {
 		t.Fatal(err)
 	}
 
 	forkRec := &SandboxForkReconciler{NodeRegistry: registry}
-	result, err := forkRec.forkRunningOnNode(context.Background(), node, "parent", "child", true, "tok-child")
+	result, err := forkRec.forkRunningOnNode(context.Background(), node, "parent", "child", true, nil, "tok-child")
 	if err != nil {
 		t.Fatalf("forkRunningOnNode: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, "tok-sb"); err == nil {
+	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb"); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
 		t.Fatalf("expected NotFound through the wrap, got: %v", err)
@@ -195,7 +196,10 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	}
 
 	initCommands := []string{"echo ready"}
-	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, 5)
+	templateVols := []v1alpha1.SandboxVolume{
+		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1alpha1.ForkPolicyFresh},
+	}
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, 5)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -212,6 +216,12 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	// the template received them.
 	if got := engineWithout.LastInitCommands(); !reflect.DeepEqual(got, initCommands) {
 		t.Fatalf("engine init commands = %v, want %v", got, initCommands)
+	}
+	// The template's declared volumes must flow through the CreateTemplate RPC
+	// to the engine so the snapshot bakes a placeholder drive per volume.
+	gotVols := engineWithout.LastTemplateVolumes()
+	if len(gotVols) != 1 || gotVols[0].Name != "data" || gotVols[0].Policy != volume.ForkPolicyFresh {
+		t.Fatalf("engine template volumes = %+v, want one Fresh volume named data", gotVols)
 	}
 	if got := r.readySnapshotCount("py-tmpl"); got != 2 {
 		t.Fatalf("ready after create = %d, want 2", got)

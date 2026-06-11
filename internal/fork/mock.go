@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/paperclipinc/sandbox/internal/volume"
 )
 
 // MockEngine simulates fork operations without KVM.
@@ -29,10 +31,18 @@ type MockEngine struct {
 	// the fork carried none). Tests assert the template's NetworkPolicy was
 	// plumbed all the way through the Fork RPC to the engine.
 	lastNetwork *NetworkOpts
+	// lastVolumes records the volume specs of the most recent Fork call (nil if
+	// the fork carried none). Tests assert the template's Volumes were plumbed
+	// all the way through the Fork RPC to the engine.
+	lastVolumes []volume.Spec
 	// lastInitCommands records the init commands of the most recent
 	// CreateTemplate call. Tests assert template.Spec.Init was plumbed all the
 	// way through the CreateTemplate RPC to the engine.
 	lastInitCommands []string
+	// lastTemplateVolumes records the volume specs of the most recent
+	// CreateTemplate call (nil if none). Tests assert the template's declared
+	// volumes were plumbed through the CreateTemplate RPC to the engine.
+	lastTemplateVolumes []volume.Spec
 }
 
 // LastInitCommands returns the init commands passed to the most recent
@@ -53,6 +63,26 @@ func (e *MockEngine) LastForkNetwork() *NetworkOpts {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.lastNetwork
+}
+
+// LastForkVolumes returns the volume specs passed to the most recent Fork call,
+// or nil if none has been recorded (or the last fork carried no volumes). It
+// lets controller envtests assert the template's Volumes reached the engine
+// through the Fork RPC.
+func (e *MockEngine) LastForkVolumes() []volume.Spec {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastVolumes
+}
+
+// LastTemplateVolumes returns the volume specs passed to the most recent
+// CreateTemplate call, or nil if none has been recorded. It lets controller
+// envtests assert the template's declared volumes reached the engine through
+// the CreateTemplate RPC.
+func (e *MockEngine) LastTemplateVolumes() []volume.Spec {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastTemplateVolumes
 }
 
 // vsockPath reports the vsock UDS path for a sandbox, rooted at VsockDir.
@@ -100,6 +130,7 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 	e.mu.Lock()
 	e.sandboxes[sandboxID] = sandbox
 	e.lastNetwork = opts.Network
+	e.lastVolumes = opts.Volumes
 	e.mu.Unlock()
 
 	elapsed := time.Since(start)
@@ -114,11 +145,12 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 	}, nil
 }
 
-func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.lastInitCommands = initCommands
+	e.lastTemplateVolumes = volumes
 	e.templates[id] = &Template{
 		ID:          id,
 		Image:       image,

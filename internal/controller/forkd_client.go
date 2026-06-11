@@ -60,7 +60,7 @@ func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sand
 // policy (egress mode + allowlist); nil leaves the ForkRequest's NetworkConfig
 // unset and forkd applies no per-fork egress ruleset. The policy and allowlist
 // entries (IPs/ports/names) are safe to log.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, apiToken string) (*forkResult, error) {
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string) (*forkResult, error) {
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -71,6 +71,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		Env:        toEnvVars(env),
 		Secrets:    toSecretVars(secrets),
 		Network:    toNetworkConfig(network),
+		Volumes:    volumes,
 		ApiToken:   apiToken,
 	})
 	if err != nil {
@@ -86,7 +87,14 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 // forkRunningOnNode asks forkd to checkpoint a running sandbox and fork it.
 // apiToken is the NEW sandbox's own bearer token (the source's token does
 // not open the fork); it is never logged.
-func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool, apiToken string) (*forkRunningResult, error) {
+// volumes are the resolved VolumeMounts for the new fork (with overrides
+// applied). A live fork inherits the source's already-attached drives, and the
+// ForkRunning RPC does not yet carry volume mounts, so they are accepted and
+// validated here but not sent on the wire until the live-fork drive-rebind
+// path lands (Task 3). Names, mount paths, and policies are config, safe to
+// log.
+func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *NodeInfo, sourceSandboxID, newSandboxID string, pauseSource bool, volumes []*forkdpb.VolumeMount, apiToken string) (*forkRunningResult, error) {
+	_ = volumes
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		return nil, err
@@ -139,6 +147,37 @@ func toNetworkConfig(n *v1alpha1.NetworkPolicy) *forkdpb.NetworkConfig {
 		EgressPolicy: string(n.Egress),
 		AllowList:    n.Allow,
 	}
+}
+
+// volumeMounts translates a template's Volumes into the proto VolumeMounts the
+// Fork RPC carries, applying any per-name VolumeOverride to the fork policy.
+// The node resolves the backing source and prepares the drive per policy; the
+// controller only passes the spec through. Names, mount paths, policies, and
+// sizes are config (no secrets), safe to log. A nil result means the template
+// declared no volumes.
+func volumeMounts(templateVols []v1alpha1.SandboxVolume, overrides []v1alpha1.VolumeOverride) []*forkdpb.VolumeMount {
+	if len(templateVols) == 0 {
+		return nil
+	}
+	overrideMap := make(map[string]v1alpha1.ForkPolicy, len(overrides))
+	for _, o := range overrides {
+		overrideMap[o.Name] = o.ForkPolicy
+	}
+	mounts := make([]*forkdpb.VolumeMount, 0, len(templateVols))
+	for _, vol := range templateVols {
+		policy := vol.ForkPolicy
+		if override, ok := overrideMap[vol.Name]; ok {
+			policy = override
+		}
+		mounts = append(mounts, &forkdpb.VolumeMount{
+			Name:       vol.Name,
+			MountPath:  vol.MountPath,
+			ReadOnly:   vol.ReadOnly,
+			ForkPolicy: string(policy),
+			Size:       vol.Size,
+		})
+	}
+	return mounts
 }
 
 func toSecretVars(m map[string]string) []*forkdpb.SecretVar {

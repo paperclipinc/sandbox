@@ -39,6 +39,7 @@ func main() {
 		dnsResolver     string
 		agentBin        string
 		busyboxBin      string
+		enableVolumes   bool
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -61,6 +62,7 @@ func main() {
 	flag.StringVar(&dnsResolver, "dns-resolver", "", "DNS resolver IP guests may reach; adds a DNS allow rule to each fork's egress ruleset. Empty omits the rule")
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
+	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
 	flag.Parse()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
@@ -74,7 +76,7 @@ func main() {
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
 		mock := fork.NewMockEngine()
-		if err := mock.CreateTemplate("default", "python:3.12-slim", nil); err != nil {
+		if err := mock.CreateTemplate("default", "python:3.12-slim", nil, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: mock template: %v\n", err)
 			os.Exit(1)
 		}
@@ -93,6 +95,10 @@ func main() {
 			AllowUnverified: allowUnverified,
 			AgentBinPath:    agentBin,
 			BusyboxPath:     busyboxBin,
+			EnableVolumes:   enableVolumes,
+		}
+		if enableVolumes {
+			fmt.Println("forkd: per-fork volumes ENABLED")
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")

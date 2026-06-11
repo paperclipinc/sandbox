@@ -209,6 +209,12 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 	if cfg.RootfsPath != "" {
 		cfg.ChrootFiles = append(cfg.ChrootFiles, templateRootfs)
 	}
+	// Placeholder volume backings are baked into the snapshot, so they must be
+	// linked into the chroot in jailer mode too (same as the rootfs) for the
+	// AddDrive path_on_host below to resolve inside it.
+	for _, vd := range cfg.VolumeDrives {
+		cfg.ChrootFiles = append(cfg.ChrootFiles, vd.PathOnHost)
+	}
 
 	// Start the VM
 	client, err := StartVM(cfg)
@@ -228,6 +234,19 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 
 	if err := client.AddDrive("rootfs", templateRootfs, false, true); err != nil {
 		return nil, fmt.Errorf("add rootfs drive: %w", err)
+	}
+
+	// Attach one placeholder volume drive per template volume BEFORE
+	// InstanceStart so the snapshot bakes the block devices. Firecracker cannot
+	// add a drive on restore, so each fork later rebinds these baked drives
+	// (by drive id, which is the volume name) to its OWN backing via PatchDrive.
+	// The guest does NOT mount them at build time. They are attached in slice
+	// order, so the guest device order is deterministic: rootfs is vda and these
+	// follow as vdb, vdc, ... in order.
+	for _, vd := range cfg.VolumeDrives {
+		if err := client.AddDrive(vd.DriveID, vd.PathOnHost, vd.ReadOnly, false); err != nil {
+			return nil, fmt.Errorf("add placeholder volume drive %s: %w", vd.DriveID, err)
+		}
 	}
 
 	// Set up vsock for guest communication.

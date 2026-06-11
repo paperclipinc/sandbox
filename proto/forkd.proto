@@ -41,6 +41,11 @@ message CreateTemplateRequest {
   repeated string init_commands = 3;
   string kernel_path = 4;
   ResourceSpec resources = 5;
+  // Volumes the template declares. The node bakes one placeholder block device
+  // per volume into the snapshot at build time so each fork can rebind it to
+  // its own backing; the fork's ForkRequest.volumes must match this set by
+  // name. Empty means the template has no volumes.
+  repeated VolumeMount volumes = 6;
 }
 
 message CreateTemplateResponse {
@@ -106,6 +111,21 @@ message ForkRequest {
   // Bearer token the HTTP sandbox API will require for this sandbox.
   // Empty means no token is registered and HTTP calls fail closed (401).
   string api_token = 6;
+  // Volumes to prepare and attach to the fork. The node resolves the backing
+  // source for Snapshot/Share/Clone policies; the controller passes the policy
+  // and spec.
+  repeated VolumeMount volumes = 7;
+}
+
+message VolumeMount {
+  string name = 1;
+  string mount_path = 2;
+  bool read_only = 3;
+  // fork_policy is the API ForkPolicy string: Fresh, Share, Clone, Snapshot.
+  string fork_policy = 4;
+  // size is a Kubernetes resource quantity such as 5Gi or 512Mi. Empty uses the
+  // node default. Only meaningful for the Fresh policy.
+  string size = 5;
 }
 
 message ForkResponse {

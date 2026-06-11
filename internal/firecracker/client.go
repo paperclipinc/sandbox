@@ -295,6 +295,21 @@ func (c *Client) AddDrive(driveID string, path string, readOnly bool, rootDevice
 	})
 }
 
+// PatchDrive rebinds an existing drive's backing file to pathOnHost via
+// PATCH /drives/{drive_id}. Firecracker has long supported updating a drive's
+// path_on_host on a configured VM, including one restored from a snapshot. It
+// is how each fork gives its baked placeholder volume drive its OWN backing:
+// the snapshot bakes the block device by driveID, and every fork PATCHes that
+// driveID to the fork's prepared backing after the snapshot is loaded and
+// resumed but before the guest mounts it. The drive id and host path carry no
+// secrets and are safe to log.
+func (c *Client) PatchDrive(driveID, pathOnHost string) error {
+	return c.patch("/drives/"+driveID, DrivePatch{
+		DriveID:    driveID,
+		PathOnHost: pathOnHost,
+	})
+}
+
 // SetNetwork attaches a guest NIC bound to a host tap device via
 // PUT /network-interfaces/{ifaceID}. It must be called before InstanceStart
 // (Firecracker does not support hot-plugging a NIC after boot). For a

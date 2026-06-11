@@ -98,7 +98,7 @@ func run(o opts) error {
 	templateID := "smoke-tmpl"
 	fmt.Printf("tmpl-smoke: building template %q from image %q (init=%v)\n", templateID, o.image, initCommands)
 	buildStart := time.Now()
-	if err := engine.CreateTemplate(templateID, o.image, initCommands); err != nil {
+	if err := engine.CreateTemplate(templateID, o.image, initCommands, nil); err != nil {
 		return fmt.Errorf("create template from image: %w", err)
 	}
 	fmt.Printf("tmpl-smoke: template built in %s\n", time.Since(buildStart).Round(time.Millisecond))

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -88,20 +87,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
-	// Prepare volumes per fork policies
-	volumes, err := r.prepareVolumes(ctx, template.Spec.Volumes, claim.Name, claim.Spec.VolumeOverrides)
-	if err != nil {
-		logger.Error(err, "volume preparation failed")
-		now := metav1.Now()
-		claim.Status.Phase = v1alpha1.SandboxFailed
-		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
-		// without it ttlFinished skips the claim forever (etcd leak).
-		claim.Status.FinishedAt = &now
-		// Best-effort status write; the return below already requeues or surfaces the error.
-		_ = r.Status().Update(ctx, &claim)
-		return ctrl.Result{}, err
-	}
-	_ = volumes
+	// Translate the template's volumes (with this claim's VolumeOverrides
+	// applied) into the Fork RPC's VolumeMounts. The node prepares and attaches
+	// the backing drives per policy; the controller only forwards the spec.
+	volumes := volumeMounts(template.Spec.Volumes, claim.Spec.VolumeOverrides)
 
 	// Resolve secrets
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
@@ -135,7 +124,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Call forkd on the selected node: this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, apiToken)
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken)
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.
@@ -341,29 +330,6 @@ func (r *SandboxClaimReconciler) selectNode(ctx context.Context, pool *v1alpha1.
 		return nil, "", err
 	}
 	return node, templateName, nil
-}
-
-func (r *SandboxClaimReconciler) prepareVolumes(ctx context.Context, templateVols []v1alpha1.SandboxVolume, sandboxID string, overrides []v1alpha1.VolumeOverride) ([]*workspace.PreparedVolume, error) {
-	overrideMap := make(map[string]v1alpha1.ForkPolicy)
-	for _, o := range overrides {
-		overrideMap[o.Name] = o.ForkPolicy
-	}
-
-	var prepared []*workspace.PreparedVolume
-	for _, vol := range templateVols {
-		policy := vol.ForkPolicy
-		if override, ok := overrideMap[vol.Name]; ok {
-			policy = override
-		}
-
-		handler := workspace.HandlerForPolicy(policy)
-		pv, err := handler.Prepare(ctx, vol, sandboxID)
-		if err != nil {
-			return nil, fmt.Errorf("volume %s: %w", vol.Name, err)
-		}
-		prepared = append(prepared, pv)
-	}
-	return prepared, nil
 }
 
 func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1alpha1.SecretMount) (envOut, secretsOut map[string]string, err error) {

@@ -43,7 +43,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if readySnapshots < desired {
 		deficit := desired - readySnapshots
 		logger.Info("snapshot deficit", "ready", readySnapshots, "desired", desired, "creating", deficit)
-		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, deficit)
+		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, deficit)
 		if err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -85,7 +85,7 @@ func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
 
 // createSnapshotsOnNodes asks up to deficit healthy nodes that lack the
 // template to build it. Returns how many builds were started.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, deficit int32) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, deficit int32) (int32, error) {
 	var created int32
 	var errs []error
 	for _, node := range r.NodeRegistry.ListNodes() {
@@ -105,10 +105,15 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// hung node cannot stall pool reconciliation forever. Moving builds to
 		// a background queue is roadmap work (snapshot distribution).
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		// The template's declared volumes are baked into the snapshot as
+		// placeholder drives. No fork-policy override applies at build time, so
+		// volumeMounts is called with no overrides; each fork's ForkRequest must
+		// match this set by name.
 		resp, err := forkdpb.NewForkDaemonClient(conn).CreateTemplate(cctx, &forkdpb.CreateTemplateRequest{
 			TemplateId:   templateID,
 			Image:        image,
 			InitCommands: initCommands,
+			Volumes:      volumeMounts(templateVolumes, nil),
 		})
 		cancel()
 		if err != nil {
