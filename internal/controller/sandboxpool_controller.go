@@ -39,6 +39,18 @@ type SandboxPoolReconciler struct {
 	// access (the device plugin slot, not privileged: true). Empty defaults to
 	// agentrun.dev/kvm. Only used when EnableHuskPods is true.
 	KVMResourceName string
+	// DataDir is the forkd data directory on the node; the husk pod's snapshot
+	// hostPath is rooted here (<DataDir>/templates/<id>/snapshot). Empty defaults
+	// to /var/lib/agent-run. Only used when EnableHuskPods is true.
+	DataDir string
+	// HuskTLSSecretName is the Secret holding the husk stub's mTLS server leaf
+	// (tls.crt, tls.key), mounted into each husk pod so the stub can serve the
+	// mTLS network control. Only used when EnableHuskPods is true.
+	HuskTLSSecretName string
+	// HuskCASecretName is the Secret holding the control plane CA (ca.crt),
+	// mounted into each husk pod so the stub verifies the controller client cert.
+	// Only used when EnableHuskPods is true.
+	HuskCASecretName string
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed

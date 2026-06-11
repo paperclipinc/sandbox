@@ -3,6 +3,7 @@ package controller_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/husk"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -34,7 +36,33 @@ var (
 	// test can assert a secret value never appears in any log line. It is
 	// concurrency-safe because the manager logs from reconcile goroutines.
 	logBuf = &syncBuffer{}
+
+	// huskTestActivatorMu guards the swappable husk activator the suite's
+	// husk-enabled claim reconciler dials through. Tests set it via
+	// setHuskTestActivator before creating their claim.
+	huskTestActivatorMu sync.Mutex
+	huskTestActivator   func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
 )
+
+// setHuskTestActivator installs the husk activator the suite reconciler uses.
+func setHuskTestActivator(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
+	huskTestActivatorMu.Lock()
+	defer huskTestActivatorMu.Unlock()
+	huskTestActivator = fn
+}
+
+// currentHuskTestActivator returns the installed activator, or a default that
+// fails closed (so a test that forgot to set one does not silently pass).
+func currentHuskTestActivator() func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+	huskTestActivatorMu.Lock()
+	defer huskTestActivatorMu.Unlock()
+	if huskTestActivator == nil {
+		return func(context.Context, string, *tls.Config, husk.ActivateRequest) (husk.ActivateResult, error) {
+			return husk.ActivateResult{OK: false, Error: "no husk test activator installed"}, nil
+		}
+	}
+	return huskTestActivator
+}
 
 // syncBuffer is a concurrency-safe io.Writer that accumulates everything
 // written and lets a test snapshot the bytes.
@@ -105,10 +133,32 @@ func TestMain(m *testing.M) {
 		NodeRegistry: nodeRegistry,
 	}).SetupWithManager(mgr)
 
-	_ = (&controller.SandboxClaimReconciler{
+	rawClaim := &controller.SandboxClaimReconciler{
 		Client:       mgr.GetClient(),
 		NodeRegistry: nodeRegistry,
-	}).SetupWithManager(mgr)
+	}
+	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
+	// fight the husk reconciler over the same object.
+	rawClaim.SkipLabel(controller.HuskTestClaimLabel)
+	if err := rawClaim.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+
+	// A husk-enabled claim reconciler that handles ONLY husk-test claims. Its
+	// activator is swappable per test via setHuskTestActivator.
+	huskClaim := &controller.SandboxClaimReconciler{
+		Client:         mgr.GetClient(),
+		NodeRegistry:   nodeRegistry,
+		EnableHuskPods: true,
+		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; the fake activator ignores it
+	}
+	huskClaim.OnlyLabel(controller.HuskTestClaimLabel)
+	huskClaim.SetActivateForTest(func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+		return currentHuskTestActivator()(ctx, addr, tlsConf, req)
+	})
+	if err := huskClaim.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
 
 	_ = (&controller.SandboxForkReconciler{
 		Client:       mgr.GetClient(),

@@ -1509,11 +1509,15 @@ jobs:
 
             # Prepare: dormant VMM + control socket served in the background. The
             # stub runs firecracker in $workdir, so the snapshot's baked relative
-            # vsock.sock is rebound at $workdir/vsock.sock.
+            # vsock.sock is rebound at $workdir/vsock.sock. A per-n sandbox port
+            # keeps concurrent/overlapping stubs from colliding on the in-pod
+            # sandbox HTTP API port (this phase exercises the control socket +
+            # vsock exec, not the HTTP API).
             /tmp/husk-stub \
               --firecracker /usr/local/bin/firecracker \
               --workdir $workdir \
               --control-socket $ctrl \
+              --sandbox-listen 127.0.0.1:$((19090 + n)) \
               --mem-mib 256 \
               > $stublog 2>&1 &
             local stub_pid=$!
@@ -1714,10 +1718,15 @@ jobs:
             mkdir -p $workdir
             rm -f $ctrl
 
+            # A per-n sandbox port: two husk stubs run CONCURRENTLY in this phase,
+            # so each needs a distinct in-pod sandbox HTTP API port (this phase
+            # execs over vsock, not the HTTP API, but the stub serves it on
+            # activate and the two must not collide on one port).
             /tmp/husk-stub \
               --firecracker /usr/local/bin/firecracker \
               --workdir $workdir \
               --control-socket $ctrl \
+              --sandbox-listen 127.0.0.1:$((19090 + n)) \
               --mem-mib 256 \
               > $stublog 2>&1 &
             local pid=$!
@@ -1866,6 +1875,310 @@ jobs:
           path: |
             /tmp/agent-run-test/husk-activate/result*.json
             /tmp/agent-run-test/husk-activate/read*.out
+          if-no-files-found: warn
+
+      # Husk NETWORK mTLS activation proof (#18, slice 2). The two husk phases
+      # above drive activation over a LOCAL unix control socket. This phase proves
+      # the SLICE-2 transport: a real husk activation over the NETWORK mTLS
+      # control channel (internal/husk ServeTLS) using the EXACT controller
+      # reconcile path (internal/controller ActivateHuskPod), the wire a claim
+      # uses to activate a pre-scheduled dormant husk pod in place. The model:
+      #
+      #   certs    cmd/husk-stub --emit-certs issues an internal/pki test CA and
+      #            the two control plane leaves (the husk SERVER leaf carrying the
+      #            pki.ServerName SAN, the controller CLIENT leaf carrying the
+      #            pki.ControllerName SAN) plus an INDEPENDENT wrong-CA controller
+      #            leaf. Reusing internal/pki (not openssl) guarantees the SANs
+      #            match what ServerTLSConfig/ClientTLSConfig pin and what
+      #            AuthorizeControllerIdentity authorizes; SAN drift is impossible.
+      #   prepare  cmd/husk-stub --control-listen serves a DORMANT VMM's mTLS
+      #            network control (RequireAndVerifyClientCert, authorized to the
+      #            controller identity), refusing to serve without all three TLS
+      #            flags (fail closed).
+      #   activate cmd/husk-stub --activate --control-addr drives ActivateHuskPod
+      #            over mTLS with a claim-time env var + secret; OK means the
+      #            snapshot loaded, the guest is ready, and the fork-correctness
+      #            reseed + secret delivery ran (fail closed).
+      #
+      # GATES (all):
+      #   1. mTLS network activate returns OK (ActivateHuskPod over the wire).
+      #   2. a real exec works through the activated guest agent over the
+      #      returned vsock (the VM is genuinely usable, not just a control reply).
+      #   3. the delivered secret is readable IN the guest and is NOT present in
+      #      any host-side stub/client log (secrets never logged).
+      #   4. NEGATIVE: an activate presenting a WRONG-CA controller client cert is
+      #      REJECTED by the mTLS gate (the handshake fails; no ActivateResult is
+      #      returned). This proves an unauthenticated/wrong-CA peer cannot drive
+      #      the secret-bearing activate path.
+      #   5. HTTP exec over the SANDBOX endpoint (podIP:sandboxPort, the wire the
+      #      claim advertises in Status.Endpoint): a tokened exec reaches the guest
+      #      and an UNTOKENED / WRONG-token exec is rejected (401/403). This proves
+      #      the advertised endpoint is reachable AND token-gated, and the per-
+      #      sandbox bearer token value never appears in any host-side log.
+      #
+      # HONEST SCOPE: SHARED-CI-CLASS, reproducible per run, NOT bare metal. This
+      # proves the network transport + mTLS auth + a real activate+exec+secret and
+      # the auth rejection; it does NOT make pod-native the default (raw-forkd
+      # remains the default) and the full kind claim->pod->exec-as-default is
+      # slice 3. A missing snapshot or /dev/kvm or a control port that never
+      # listens is a SETUP FLAKE (HUSK-NET-SETUP), distinct from a real failure
+      # (HUSK-NET-FAILED). This phase GATES.
+      - name: Husk activation over the mTLS NETWORK control channel (activate + vsock exec + secret + auth rejection + token-gated HTTP exec)
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
+          WORKBASE=/tmp/agent-run-test/husk-net
+          CERTS=$WORKBASE/certs
+          mkdir -p $WORKBASE
+
+          fail_setup() { echo "HUSK-NET-SETUP: $1"; exit 1; }
+          fail_net()   { echo "HUSK-NET-FAILED: $1"; exit 1; }
+
+          sudo chmod 666 /dev/kvm || fail_setup "no /dev/kvm on this runner"
+
+          if [ ! -f "$SNAP_DIR/mem" ] || [ ! -f "$SNAP_DIR/vmstate" ]; then
+            ls -lhR "$SNAP_DIR" || true
+            fail_setup "bench template snapshot not present at $SNAP_DIR (snapshot build did not complete); cannot run husk network activation"
+          fi
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # Issue the mTLS material via internal/pki so the SERVER leaf carries
+          # pki.ServerName and the CONTROLLER leaf carries pki.ControllerName,
+          # the exact names the husk server pins/authorizes. A second independent
+          # CA backs wrong-controller.{crt,key} for the negative test.
+          /tmp/husk-stub --emit-certs $CERTS || fail_setup "could not emit internal/pki test certs"
+          for f in ca.crt server.crt server.key controller.crt controller.key wrong-controller.crt wrong-controller.key; do
+            [ -f "$CERTS/$f" ] || fail_setup "cert $f missing after --emit-certs"
+          done
+
+          ENV_KEY=HUSK_NET_ENV
+          ENV_VAL=husk-net-env-value
+          SECRET_KEY=HUSK_NET_SECRET
+          SECRET_VAL=s3cr3t-husk-net-canary-$RANDOM
+
+          # The per-sandbox bearer token the controller mints and delivers over
+          # the control channel; the stub gates the in-pod sandbox HTTP API on it.
+          # Written to a FILE (never an argv flag) so it is not visible in ps; its
+          # value must never appear in any host-side log.
+          SANDBOX_TOKEN=husk-net-sandbox-token-canary-$RANDOM
+          TOKEN_FILE=$WORKBASE/token
+          umask 077; printf '%s' "$SANDBOX_TOKEN" > $TOKEN_FILE
+
+          # A free TCP port for the dormant pod's network control listener, and a
+          # second free port for the in-pod token-gated sandbox HTTP API.
+          PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+          SBPORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+          ADDR=127.0.0.1:$PORT
+          SBADDR=127.0.0.1:$SBPORT
+          STUBLOG=$WORKBASE/stub.log
+          WORKDIR=$WORKBASE/vm
+          mkdir -p $WORKDIR
+
+          STUB_PID=""
+          cleanup() { [ -n "$STUB_PID" ] && kill $STUB_PID 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Start a DORMANT husk pod serving mTLS network control. With all three
+          # TLS flags it serves ServeTLS authorized to the controller identity;
+          # WITHOUT them cmd/husk-stub refuses to serve (proven by the stub guard).
+          /tmp/husk-stub \
+            --firecracker /usr/local/bin/firecracker \
+            --workdir $WORKDIR \
+            --control-listen $ADDR \
+            --sandbox-listen $SBADDR \
+            --tls-cert $CERTS/server.crt \
+            --tls-key $CERTS/server.key \
+            --tls-ca $CERTS/ca.crt \
+            --mem-mib 256 \
+            > $STUBLOG 2>&1 &
+          STUB_PID=$!
+
+          # Wait for the control port to accept connections (dormant VMM up +
+          # listener bound). A port that never listens is SETUP, not a failure.
+          ready=0
+          for i in $(seq 1 60); do
+            if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.3); sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)" 2>/dev/null; then ready=1; break; fi
+            if ! kill -0 $STUB_PID 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "=== stub log ==="; cat $STUBLOG || true
+            fail_setup "control port $ADDR never accepted (dormant VMM/listener did not come up); SETUP, not an activation failure"
+          fi
+
+          # --- GATE 4 (negative) FIRST, while the VM is still dormant: a wrong-CA
+          # controller client must be REJECTED by the mTLS gate. ActivateHuskPod
+          # presents the wrong-CA leaf; the husk server, trusting only ca.crt,
+          # fails the handshake, so --activate exits non-zero and prints NO OK
+          # result. We assert it FAILS. Running this first keeps the VM dormant so
+          # a (wrongly) accepted activate could not hide behind an already-active
+          # VM; a rejected handshake leaves the VM dormant for the real activate.
+          echo "=== NEGATIVE: wrong-CA controller cert must be rejected by mTLS ==="
+          if /tmp/husk-stub --activate \
+              --control-addr $ADDR \
+              --snapshot-dir $SNAP_DIR \
+              --tls-cert $CERTS/wrong-controller.crt \
+              --tls-key $CERTS/wrong-controller.key \
+              --tls-ca $CERTS/ca.crt \
+              > $WORKBASE/neg.json 2>$WORKBASE/neg.err; then
+            echo "=== neg.json ==="; cat $WORKBASE/neg.json || true
+            echo "=== stub log ==="; cat $STUBLOG || true
+            fail_net "a WRONG-CA controller client was ACCEPTED by the mTLS network control; the activation auth gate did not hold"
+          fi
+          echo "PASS: wrong-CA controller activate was rejected by the mTLS gate"
+
+          # --- GATES 1-3: a real mTLS network activate with the VALID controller
+          # client cert, carrying a claim-time env var + secret, via the exact
+          # controller ActivateHuskPod path. OK means snapshot loaded + guest
+          # ready + reseed/secret-delivery handshake ran (fail closed).
+          echo "=== mTLS network activate (valid controller cert) ==="
+          if ! /tmp/husk-stub --activate \
+              --control-addr $ADDR \
+              --snapshot-dir $SNAP_DIR \
+              --tls-cert $CERTS/controller.crt \
+              --tls-key $CERTS/controller.key \
+              --tls-ca $CERTS/ca.crt \
+              --env "$ENV_KEY=$ENV_VAL" \
+              --secret "$SECRET_KEY=$SECRET_VAL" \
+              --token-file $TOKEN_FILE \
+              > $WORKBASE/result.json 2>$WORKBASE/activate.err; then
+            echo "=== activate stderr ==="; cat $WORKBASE/activate.err || true
+            echo "=== result.json ==="; cat $WORKBASE/result.json || true
+            echo "=== stub log ==="; cat $STUBLOG || true
+            fail_net "mTLS network activate did not return OK (handshake, snapshot load, guest-readiness, or reseed/secret handshake failed)"
+          fi
+          cat $WORKBASE/result.json
+          OK=$(jq -r '.ok' $WORKBASE/result.json)
+          VSOCK=$(jq -r '.vsock_path' $WORKBASE/result.json)
+          [ "$OK" = "true" ] || fail_net "mTLS network activate result ok=$OK"
+          echo "PASS: mTLS network activate returned OK (vsock=$VSOCK)"
+
+          # GATE 2: a real exec through the activated guest, and GATE 3 read-back
+          # of the delivered secret as ENVVAL. The serving stub is still alive
+          # holding the activated VM (husk pods are long-lived).
+          if ! timeout 60 /tmp/test-agent --mode read --read-env "$SECRET_KEY" "$VSOCK" \
+              | tee $WORKBASE/read.out; then
+            echo "=== stub log ==="; cat $STUBLOG || true
+            fail_net "exec through the mTLS-activated guest FAILED; the VM was reported active but is not usable"
+          fi
+          echo "PASS: exec works through the mTLS-activated guest"
+
+          ENVVAL=$(grep '^ENVVAL=' $WORKBASE/read.out | head -1 | cut -d= -f2-)
+          if [ "$ENVVAL" != "$SECRET_VAL" ]; then
+            # Do NOT echo the expected secret; report only the mismatch.
+            fail_net "delivered secret was not readable in the mTLS-activated guest (match=$([ "$ENVVAL" = "$SECRET_VAL" ] && echo yes || echo no))"
+          fi
+          echo "PASS: claim-time secret delivered over mTLS is readable in the guest"
+
+          # GATE 3 (leak check): the secret VALUE must NOT appear in any host-side
+          # stub/client log. read.out intentionally contains it (guest read-back)
+          # so it is excluded from this grep.
+          if grep -rF "$SECRET_VAL" \
+              $STUBLOG $WORKBASE/activate.err $WORKBASE/neg.err \
+              $WORKBASE/result.json $WORKBASE/neg.json 2>/dev/null; then
+            fail_net "the delivered secret value LEAKED into a host-side stub/client log; secrets must never be logged"
+          fi
+          echo "PASS: delivered secret value is NOT present in any host-side stub/client log"
+
+          # --- GATE 5 (HTTP exec over the SANDBOX endpoint, token-gated): the
+          # claim advertises Status.Endpoint = podIP:sandboxPort. Prove that
+          # endpoint is actually reachable: the activated stub serves the daemon
+          # SandboxAPI on $SBADDR, gated by the per-sandbox bearer token delivered
+          # over the control channel. An exec WITH the token must reach the guest;
+          # an exec WITHOUT the token (and with a WRONG token) must be rejected
+          # (401/403). This is the SDK-style path the controller advertises, not
+          # just the local vsock. Wait briefly for the sandbox listener (started on
+          # the first successful activate).
+          sbready=0
+          for i in $(seq 1 40); do
+            if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.3); sys.exit(0 if s.connect_ex(('127.0.0.1',$SBPORT))==0 else 1)" 2>/dev/null; then sbready=1; break; fi
+            sleep 0.25
+          done
+          [ "$sbready" -eq 1 ] || { echo "=== stub log ==="; cat $STUBLOG || true; fail_net "in-pod sandbox API never listened on $SBADDR after activate"; }
+
+          EXEC_BODY='{"sandbox":"husk","command":"echo husk-http-exec-ok"}'
+
+          # GATE 5a: tokened exec works and reaches the guest.
+          HTTP_CODE=$(curl -s -o $WORKBASE/exec.out -w '%{http_code}' \
+            -H "Authorization: Bearer $SANDBOX_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$EXEC_BODY" "http://$SBADDR/v1/exec" || echo 000)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "=== exec.out ==="; cat $WORKBASE/exec.out || true
+            echo "=== stub log ==="; cat $STUBLOG || true
+            fail_net "tokened HTTP exec over the sandbox endpoint returned $HTTP_CODE, want 200 (the advertised endpoint is not reachable + token-gated)"
+          fi
+          if ! grep -q "husk-http-exec-ok" $WORKBASE/exec.out; then
+            echo "=== exec.out ==="; cat $WORKBASE/exec.out || true
+            fail_net "tokened HTTP exec did not return the guest's stdout; the endpoint did not bridge to the VM"
+          fi
+          echo "PASS: tokened HTTP exec over the sandbox endpoint reached the guest"
+
+          # GATE 5b: an exec WITHOUT the token is rejected (fail closed).
+          NOTOK_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Content-Type: application/json" \
+            -d "$EXEC_BODY" "http://$SBADDR/v1/exec" || echo 000)
+          case "$NOTOK_CODE" in
+            401|403) echo "PASS: untokened HTTP exec rejected ($NOTOK_CODE)";;
+            *) fail_net "untokened HTTP exec returned $NOTOK_CODE, want 401/403 (the sandbox endpoint is NOT token-gated)";;
+          esac
+
+          # GATE 5c: an exec with a WRONG token is rejected.
+          WRONG_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer wrong-token-not-the-real-one" \
+            -H "Content-Type: application/json" \
+            -d "$EXEC_BODY" "http://$SBADDR/v1/exec" || echo 000)
+          case "$WRONG_CODE" in
+            401|403) echo "PASS: wrong-token HTTP exec rejected ($WRONG_CODE)";;
+            *) fail_net "wrong-token HTTP exec returned $WRONG_CODE, want 401/403";;
+          esac
+
+          # GATE 5 leak check: the bearer token VALUE must not appear in any
+          # host-side stub/client log.
+          if grep -rF "$SANDBOX_TOKEN" \
+              $STUBLOG $WORKBASE/activate.err $WORKBASE/neg.err \
+              $WORKBASE/result.json $WORKBASE/neg.json 2>/dev/null; then
+            fail_net "the per-sandbox bearer token value LEAKED into a host-side stub/client log; the token is a secret and must never be logged"
+          fi
+          echo "PASS: per-sandbox bearer token value is NOT present in any host-side stub/client log"
+
+          {
+            echo ""
+            echo "## Husk activation over the mTLS network control channel (slice 2, shared-CI-class)"
+            echo ""
+            echo "A real husk activation over the NETWORK mTLS control channel (\`internal/husk\` \`ServeTLS\`) driven by the exact controller reconcile path (\`internal/controller\` \`ActivateHuskPod\`), the wire a claim uses to activate a pre-scheduled dormant husk pod in place. Certs issued via \`internal/pki\` so the server leaf carries \`pki.ServerName\` and the controller leaf carries \`pki.ControllerName\`. Proven:"
+            echo ""
+            echo "| property | result |"
+            echo "| --- | --- |"
+            echo "| mTLS network activate returns OK (ActivateHuskPod over the wire) | PASS |"
+            echo "| exec works through the activated guest | PASS |"
+            echo "| claim-time secret delivered over mTLS, readable in the guest | PASS |"
+            echo "| secret value absent from host-side logs | PASS |"
+            echo "| wrong-CA controller cert rejected by the mTLS gate | PASS |"
+            echo "| HTTP exec over the sandbox endpoint with the bearer token reaches the guest | PASS |"
+            echo "| untokened / wrong-token HTTP exec over the sandbox endpoint rejected (401/403) | PASS |"
+            echo "| per-sandbox bearer token value absent from host-side logs | PASS |"
+            echo ""
+            echo "Honest scope: raw-forkd remains the DEFAULT; the full kind claim->pod->exec-as-default is slice 3. See \`docs/husk-pods.md\`."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "================================"
+          echo "  Husk mTLS network activation proven: activate + vsock exec + secret + auth rejection + token-gated HTTP exec over the sandbox endpoint"
+          echo "================================"
+
+      - name: Upload husk network-activation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: husk-net-activation
+          path: |
+            /tmp/agent-run-test/husk-net/result.json
+            /tmp/agent-run-test/husk-net/read.out
           if-no-files-found: warn
 
       # Install the host networking tools the egress phases need. nftables and

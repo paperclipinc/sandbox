@@ -2,20 +2,27 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/observability"
+	"github.com/paperclipinc/sandbox/internal/vsock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 // tracer is the controller component tracer; no-op unless tracing is configured.
@@ -39,6 +46,11 @@ const pendingSinceAnnotation = "agentrun.dev/capacity-pending-since"
 // once a node frees up or a new node joins.
 const capacityPendingRequeue = 5 * time.Second
 
+// huskActivator is the seam the claim reconciler dials a husk stub through. The
+// production value is ActivateHuskPod (huskclient.go); tests inject a fake to
+// record requests without a real mTLS server.
+type huskActivator func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
+
 type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
@@ -49,6 +61,43 @@ type SandboxClaimReconciler struct {
 
 	// Now is the reconciler's clock, injectable for tests. Nil uses time.Now.
 	Now func() time.Time
+
+	// EnableHuskPods selects the husk-pod activation path (issue #18, slice 2):
+	// the claim activates a dormant warm husk pod in place over the mTLS control
+	// channel instead of SelectNode+forkOnNode. Default false: the raw-forkd path
+	// is unchanged.
+	EnableHuskPods bool
+
+	// HuskTLS is the controller client mTLS config used to dial a husk stub's
+	// network control (the SAME config that dials forkd, EnsurePKI's controller
+	// leaf). Required when EnableHuskPods is true; a nil config makes
+	// ActivateHuskPod refuse to send secrets.
+	HuskTLS *tls.Config
+
+	// HuskControlPort is the TCP port the husk stub serves the mTLS control on.
+	// Zero defaults to HuskControlPort. Only used when EnableHuskPods is true.
+	HuskControlPort int
+
+	// HuskSandboxPort is the in-pod port the activated VM's sandbox HTTP API is
+	// reachable on; the claim's Status.Endpoint is podIP:this. Zero defaults to
+	// the husk sandbox port (9091). Only used when EnableHuskPods is true.
+	HuskSandboxPort int
+
+	// Activate is the husk-activation seam. Nil defaults to ActivateHuskPod.
+	// Tests inject a fake.
+	Activate huskActivator
+
+	// eventFilter optionally restricts which claims this reconciler watches. Nil
+	// watches all claims (the production default: a deployment runs exactly one
+	// claim reconciler, husk or raw). It exists so a test harness can run a raw
+	// and a husk reconciler on the same manager without the two fighting over the
+	// same object.
+	eventFilter predicate.Predicate
+
+	// controllerName overrides the controller-runtime controller name. Empty uses
+	// the kind-derived default. Only set by the test harness so two claim
+	// reconcilers can coexist on one manager.
+	controllerName string
 }
 
 // now returns the reconciler's current time, honoring the injectable clock.
@@ -148,6 +197,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claim.Status.Phase = v1alpha1.SandboxRestoring
 	if err := r.Status().Update(ctx, &claim); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Husk-pod activation path (issue #18, slice 2). When enabled, the claim
+	// activates a dormant warm husk pod in place over the mTLS control channel
+	// instead of SelectNode+forkOnNode. The default (flag off) leaves the
+	// raw-forkd path below unchanged.
+	if r.EnableHuskPods {
+		return r.reconcileHuskClaim(ctx, &claim, &pool, &template)
 	}
 
 	// Pick a node with a ready snapshot
@@ -304,6 +361,185 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	)
 
 	return ctrl.Result{}, nil
+}
+
+// reconcileHuskClaim activates a dormant warm husk pod for the claim in place
+// over the mTLS control channel. It selects a Running+Ready, unclaimed husk pod
+// for the pool; if none is available it pends the claim (recordClaimPending) and
+// requeues, mirroring the no-node placement-precondition path. Otherwise it
+// resolves env+secrets (the same resolveSecrets as the forkd path), builds an
+// ActivateRequest, dials the pod's control port, and on success sets the claim's
+// Endpoint (podIP:sandboxPort) and Node (pod.Spec.NodeName), marks the pod
+// claimed, mints + writes the per-sandbox API token Secret, and goes Ready.
+//
+// FAILS CLOSED: an activate transport error or a not-OK result NEVER goes Ready;
+// it pends with backpressure and an actionable message so a transient husk
+// (snapshot not yet materialized, stub still starting) can recover. Secret
+// VALUES are never logged or put in status/conditions.
+func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	pod, err := r.selectDormantHuskPod(ctx, pool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pod == nil {
+		// No warm husk slot: pend and retry. The pool reconciler is expected to
+		// scale the warm pool up; this is a transient placement precondition.
+		logger.Info("no dormant husk pod available, pending", "pool", pool.Name)
+		claim.Status.Phase = v1alpha1.SandboxPending
+		recordClaimPending()
+		setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.NewTime(r.now()),
+			Reason:             "NoHuskPod",
+			Message:            "no warm husk pod is ready in the pool; the claim will retry once the pool scales a dormant slot up",
+		})
+		_ = r.Status().Update(ctx, claim)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+
+	// Resolve env + secrets (same path as the forkd fork). Secret VALUES live
+	// only in memory here and ride the mTLS control channel; never logged.
+	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
+	if err != nil {
+		logger.Error(err, "secret resolution failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "secret")
+		now := metav1.Now()
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.FinishedAt = &now
+		_ = r.Status().Update(ctx, claim)
+		return ctrl.Result{}, err
+	}
+
+	// Mint the per-sandbox API bearer token before activating. It reaches exactly
+	// the owned token Secret below; never status, conditions, events, or logs.
+	apiToken, err := mintAPIToken()
+	if err != nil {
+		logger.Error(err, "token minting failed")
+		now := metav1.Now()
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.FinishedAt = &now
+		_ = r.Status().Update(ctx, claim)
+		return ctrl.Result{}, err
+	}
+
+	controlPort := r.HuskControlPort
+	if controlPort == 0 {
+		controlPort = HuskControlPort
+	}
+	sandboxPort := r.HuskSandboxPort
+	if sandboxPort == 0 {
+		sandboxPort = huskSandboxPort
+	}
+
+	activate := r.Activate
+	if activate == nil {
+		activate = ActivateHuskPod
+	}
+
+	// Claim the dormant pod BEFORE activating it: stamp the agentrun.dev/claim
+	// label under an OPTIMISTIC LOCK. This is the mutual-exclusion commit. Two
+	// concurrent claims may both select the same dormant pod, but the
+	// resourceVersion-guarded patch lets exactly one win; the loser gets a 409
+	// Conflict and must NOT activate this pod (a second tenant on the same VM).
+	// Winning the label patch is the gate to Activate, so a pod is activated by
+	// exactly one claim. On conflict we requeue so the next reconcile picks a
+	// different dormant pod.
+	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
+		if apierrors.IsConflict(err) {
+			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+			claim.Status.Phase = v1alpha1.SandboxPending
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(r.now()),
+				Reason:             "HuskPodRaced",
+				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
+			})
+			_ = r.Status().Update(ctx, claim)
+			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		}
+		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
+		return ctrl.Result{}, err
+	}
+
+	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
+	req := husk.ActivateRequest{
+		SnapshotDir: HuskSnapshotDir,
+		Env:         env,
+		Secrets:     secretVals,
+		Network:     huskNotifyNetwork(template),
+		Token:       apiToken,
+	}
+	res, err := activate(ctx, addr, r.HuskTLS, req)
+	if err != nil || !res.OK {
+		// FAIL CLOSED: do not go Ready. Pend so a transient husk can recover.
+		msg := "husk activation did not complete"
+		if err != nil {
+			msg = fmt.Sprintf("husk activation transport error: %v", err)
+		} else if res.Error != "" {
+			msg = "husk activation failed: " + res.Error
+		}
+		logger.Info("husk activation failed, pending", "pod", pod.Name, "node", pod.Spec.NodeName, "detail", msg)
+		recordClaimError(claim.Spec.PoolRef.Name, "activate")
+		claim.Status.Phase = v1alpha1.SandboxPending
+		setCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.NewTime(r.now()),
+			Reason:             "ActivateFailed",
+			Message:            msg + "; the claim will retry",
+		})
+		_ = r.Status().Update(ctx, claim)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+
+	endpoint := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(sandboxPort))
+
+	// The pod was already claimed (optimistic-lock label patch) BEFORE activation,
+	// so this VM belongs to exactly this claim. Hand the token to the claim's
+	// consumer via an owned Secret BEFORE the Ready
+	// write (same ordering as the forkd path).
+	if err := ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, endpoint); err != nil {
+		logger.Error(err, "token secret write failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "token")
+		now := metav1.Now()
+		claim.Status.Phase = v1alpha1.SandboxFailed
+		claim.Status.FinishedAt = &now
+		_ = r.Status().Update(ctx, claim)
+		return ctrl.Result{}, err
+	}
+
+	now := metav1.Now()
+	claim.Status.Phase = v1alpha1.SandboxReady
+	claim.Status.Endpoint = endpoint
+	claim.Status.Node = pod.Spec.NodeName
+	claim.Status.SandboxID = pod.Name
+	claim.Status.StartedAt = &now
+	setCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             "HuskActivated",
+		Message:            fmt.Sprintf("activated husk pod %s on node %s in %.2fms", pod.Name, pod.Spec.NodeName, res.LatencyMs),
+	})
+	if err := r.Status().Update(ctx, claim); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("sandbox claimed via husk activation", "sandbox", claim.Name, "pod", pod.Name, "node", pod.Spec.NodeName)
+	return ctrl.Result{}, nil
+}
+
+// huskNotifyNetwork maps the template's network policy to the guest
+// NotifyForkedNetwork delivered in the activate handshake. The husk slice
+// threads the template network through for parity with the engine fork path; the
+// detailed mapping is a follow-up, so this returns nil (no overrides) until the
+// guest networking slice lands.
+func huskNotifyNetwork(_ *v1alpha1.SandboxTemplate) *vsock.NotifyForkedNetwork {
+	return nil
 }
 
 // reconcileNoCapacity handles a placement that no node admits under the
@@ -556,7 +792,15 @@ func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace s
 }
 
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.SandboxClaim{}).
-		Complete(r)
+	b := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.SandboxClaim{})
+	if r.eventFilter != nil {
+		b = b.WithEventFilter(r.eventFilter)
+	}
+	// A name lets the test harness run a raw and a husk claim reconciler on one
+	// manager (controller-runtime auto-names by kind and would collide). The
+	// production default (controllerName empty) keeps the kind-derived name.
+	if r.controllerName != "" {
+		b = b.Named(r.controllerName)
+	}
+	return b.Complete(r)
 }

@@ -413,6 +413,114 @@ object-lifecycle slice.
 
 The default is still raw-forkd (flag off). The pod-native default is slice 3.
 
+## 6b. Claim activation (slice 2)
+
+Slice 1 (section 6) builds the warm pool of pre-scheduled DORMANT husk pod
+objects. Slice 2 is the claim side: when a `SandboxClaim` binds to a pool with
+`--enable-husk-pods`, the controller picks a dormant warm husk pod and ACTIVATES
+it in place over the husk pod's mTLS control channel, instead of asking forkd to
+fork a node-local VM. The activated VM runs inside the Kubernetes pod; the
+claim's `Status.Endpoint` is set to the in-pod sandbox (the pod IP and the
+in-pod sandbox port).
+
+The activation path:
+
+- the claim reconciler selects a `Running` + `Ready`, unclaimed husk pod for the
+  pool (the pod the slice-1 lifecycle pre-scheduled), and dials its control
+  server at `podIP:HuskControlPort`;
+- it CLAIMS that pod BEFORE activating it, stamping the `agentrun.dev/claim`
+  label under an OPTIMISTIC LOCK (`client.MergeFromWithOptimisticLock`): the
+  patch carries the pod's `resourceVersion`, so two concurrent claims that both
+  select the same dormant pod both attempt the patch but exactly ONE wins; the
+  loser gets a `409 Conflict` and does NOT activate the pod, it requeues and
+  picks a different dormant slot. Winning the label patch is the gate to
+  Activate, so a dormant pod is claimed and activated by EXACTLY one claim: there
+  is no double-assignment (two tenants on one VM);
+- it activates over the NETWORK mTLS control channel (`internal/husk`
+  `ServeTLS`), authorized to the controller identity: the husk server requires
+  and verifies a client certificate and `AuthorizeControllerIdentity` accepts
+  only a verified peer presenting the `pki.ControllerName` SAN. An
+  UNAUTHENTICATED or wrong-CA activate is rejected by the handshake before any
+  request is read, so a non-controller peer can never drive the secret-bearing
+  activate path;
+- it delivers the claim-time env and secrets through the SAME fork-correctness
+  handshake the engine fork path uses (`NotifyForked` reseed + clock-step, then
+  `Configure` for env/secrets), FAIL-CLOSED: a VM that did not reseed or whose
+  secret delivery failed is reported as an error and never served. The controller
+  refuses to send activation secrets over a nil (unauthenticated) TLS config
+  (`ActivateHuskPod`), so secrets are never put on an unauthenticated wire;
+- it delivers the per-sandbox bearer token the controller mints for the claim in
+  the same `ActivateRequest` (a SECRET, riding the mTLS control channel, never
+  logged). After a successful activate the husk stub SERVES THE IN-POD SANDBOX
+  HTTP API (exec/files) on the sandbox port, reusing the same
+  `internal/daemon` `SandboxAPI` forkd serves: it registers the activated VM (by
+  its host vsock path) and the delivered token, then serves the bearer-gated
+  exec/files Handler on `--sandbox-listen` (default `:9091`). Every request is
+  gated on the per-sandbox token (constant-time compare; a request with no token
+  or the wrong token is `401`), exactly as forkd does. This makes the endpoint
+  the claim advertises (`Status.Endpoint = podIP:sandboxPort`) actually reachable
+  and token-gated: the exec/files path is `SDK -> podIP:sandboxPort -> vsock ->
+  guest agent`.
+
+The snapshot the pod activates is mounted READ-ONLY from the node (the
+node-local template the pool built). This is a PLACEMENT requirement for now: a
+husk pod can only activate a template present on its node. Fully pod-native
+snapshot delivery (the pod pulling the template into itself over the CAS wire
+rather than relying on a node read-only mount) is a refinement, not done here.
+
+### Proven vs open for slice 2
+
+**PROVEN:**
+
+- the mTLS network control TRANSPORT and AUTH: `internal/husk` `ServeTLS`
+  requires and verifies the controller client cert and authorizes the
+  `pki.ControllerName` identity; `ActivateHuskPod` dials it with the controller
+  client config and refuses a nil config (unit-tested in
+  `internal/husk` and `internal/controller`);
+- the claim-activation WIRING: the claim reconciler selects a dormant Running +
+  Ready husk pod and activates it over the control channel, sets the endpoint to
+  the in-pod sandbox, pends when no dormant pod is available, and stays not-Ready
+  when the activate fails (envtest, `internal/controller/husk_activation_test.go`:
+  `TestHuskClaimActivatesDormantPod`, `TestHuskClaimNoDormantPodPends`,
+  `TestHuskClaimActivateFailureNotReady`);
+- the dormant-pod NO-DOUBLE-ASSIGN guarantee: the reconciler claims the pod under
+  an optimistic lock BEFORE activating it, so two claims racing for one dormant
+  pod resolve to exactly one activation; the loser gets a `409 Conflict` and
+  requeues (envtest, `TestHuskClaimSingleDormantPodNoDoubleAssign`: one dormant
+  pod + two claims yields exactly one Ready claim, the pod's `agentrun.dev/claim`
+  label names only that winner, and the activator was called exactly once);
+- the in-pod SANDBOX API is served and token-gated: after a successful activate
+  the husk stub registers the activated VM and the delivered per-sandbox bearer
+  token with `internal/daemon` `SandboxAPI` and serves the exec/files Handler on
+  the sandbox port; a tokened HTTP exec reaches the guest over vsock and an
+  untokened / wrong-token request is rejected (`internal/husk`
+  `TestActivateServesTokenGatedSandboxAPI`), and the token value is never logged;
+- a REAL network activate end to end on KVM: the KVM CI husk network-activation
+  phase issues `internal/pki` certs (server leaf `pki.ServerName`, controller
+  leaf `pki.ControllerName`), starts a dormant husk pod serving mTLS network
+  control, activates it via `ActivateHuskPod` over the wire with a claim-time env
+  var + secret + the per-sandbox bearer token, execs through the activated guest
+  over vsock, asserts the secret is readable in the guest and absent from
+  host-side logs, asserts a WRONG-CA controller cert is REJECTED by the mTLS gate,
+  and ALSO execs over the in-pod SANDBOX HTTP API on the sandbox port (the
+  `Status.Endpoint` wire) using the bearer token, asserting the tokened exec
+  reaches the guest and an untokened / wrong-token request is rejected (401/403)
+  with the token value absent from host-side logs. This proves the network
+  transport + auth + the real activate + vsock exec + secret delivery + auth
+  rejection + the advertised endpoint reachable and token-gated.
+
+**OPEN (later slices):**
+
+- raw-forkd is still the DEFAULT; the husk-pod claim path runs only under
+  `--enable-husk-pods`. The full kind claim -> pod -> exec as the DEFAULT
+  (flipping pod-native on, raw-forkd behind the flag) is slice 3;
+- fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
+  read-only mount.
+
+Sandboxes are pods ONLY on the husk path, which is opt-in (`--enable-husk-pods`)
+until the default flips (slice 3). With the flag off the controller is unchanged
+raw-forkd and sandboxes are forkd-owned VMs, not pods.
+
 ## 7. Proven vs remaining
 
 ### Proven so far
@@ -449,6 +557,26 @@ The default is still raw-forkd (flag off). The pod-native default is slice 3.
   This is the PSA-restricted device-access path proven end to end. The assertion
   is adaptive: on a no-KVM runner it asserts Pending instead. The forkd-DaemonSet
   migration off its privileged hostPath remains a follow-up.
+- Claim activation over the mTLS network control channel (slice 2, section 6b):
+  with `--enable-husk-pods` the claim picks a dormant warm husk pod, CLAIMS it
+  under an optimistic lock (exactly one claim per pod, no double-assign), and
+  activates it in place over the mTLS control channel (`internal/husk`
+  `ServeTLS`, `internal/controller` `ActivateHuskPod`) authorized to the
+  controller identity, delivering claim-time secrets AND the per-sandbox bearer
+  token through the fork-correctness handshake (fail-closed) and setting
+  `Status.Endpoint` to the in-pod sandbox. An unauthenticated/wrong-CA activate
+  is rejected by the mTLS gate. After activation the husk stub SERVES the in-pod
+  sandbox HTTP API (exec/files) on the sandbox port, reusing `internal/daemon`
+  `SandboxAPI`, gated by the per-sandbox bearer token, so `Status.Endpoint` is
+  reachable and token-gated. The claim-activation WIRING, the no-double-assign
+  guarantee, and the token-gated sandbox API are proven in envtest +
+  `internal/husk` (`husk_activation_test.go`,
+  `TestActivateServesTokenGatedSandboxAPI`); a REAL network activate + vsock exec
+  + secret delivery + auth rejection + token-gated HTTP exec over the sandbox
+  endpoint is proven on KVM (the husk network-activation CI phase, certs via
+  `internal/pki` so the SANs match). The snapshot is mounted read-only from the
+  node (a placement requirement). The DEFAULT is still raw-forkd; the default
+  flip is slice 3.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
@@ -460,11 +588,13 @@ full husk-pods epic still needs:
   husk pod OBJECTS behind `--enable-husk-pods` with the device-plugin resource
   request and the locked-down securityContext, proven in envtest, but kind-e2e
   has not yet run the pod;
-- wiring claim activation to a husk pod (the claim picks a dormant husk pod and
-  activates it via the stub control channel, sourcing the claim-time env and
-  secrets from the controller; the stub can already apply them per activation,
-  proven above) and flipping pod-native to the default with raw-forkd behind the
-  flag;
+- flipping pod-native to the DEFAULT with raw-forkd behind the flag (slice 3).
+  Claim activation itself (the claim picks a dormant husk pod and activates it
+  over the mTLS control channel, delivering the claim-time env and secrets) is
+  DONE as slice 2 (section 6b): the transport + auth + the real network
+  activate + exec + secret are proven on KVM and the claim-activation wiring is
+  proven in envtest. What remains is making it the default and running the full
+  kind claim -> pod -> exec path as the default;
 - the conformance suite, each acceptance criterion a test: scheduler truth,
   ResourceQuota/LimitRange, NetworkPolicy/Cilium over the pod netns, PSA
   `restricted` minus the documented device-plugin exception, `kubectl get pods`,

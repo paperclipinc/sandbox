@@ -17,25 +17,48 @@
 // an already-serving stub's --control-socket, sends one ActivateRequest for
 // --snapshot-dir, prints the ActivateResult as JSON on stdout, and exits 0 only
 // when the result is OK. This is the in-CI driver for the activation-latency
-// proof; it spawns no VMM of its own.
+// proof; it spawns no VMM of its own. With --control-addr (plus the TLS flags)
+// instead of --control-socket the activate client drives the NETWORK mTLS
+// control channel via the controller's ActivateHuskPod, the slice-2 transport.
+//
+// With --emit-certs DIR the binary issues a fresh internal/pki test CA and the
+// two control plane leaves (the husk server leaf with the pki.ServerName SAN,
+// the controller client leaf with the pki.ControllerName SAN) plus an
+// independent wrong-CA controller leaf for negative mTLS tests, writes them as
+// PEM files under DIR, and exits. It spawns no VMM. This keeps the CI cert SANs
+// in lockstep with the names the husk control channel pins and authorizes.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/husk"
+	"github.com/paperclipinc/sandbox/internal/pki"
 )
+
+// huskSandboxID is the stable sandbox id the husk-stub registers its single
+// activated VM under in the daemon.SandboxAPI. The husk pod owns exactly one VM,
+// so one fixed id is sufficient; the controller addresses the in-pod API by
+// podIP:port, and the per-sandbox bearer token (not the id) is the auth gate.
+const huskSandboxID = "husk"
 
 // kvFlag collects repeatable KEY=VALUE flags into a map. It is used for --env
 // and --secret. The String method NEVER renders the values: a --secret flag's
@@ -119,16 +142,28 @@ func run() error {
 		kernel         = flag.String("kernel", "", "path to the guest kernel image")
 		workdir        = flag.String("workdir", "", "per-VM working directory (firecracker cmd.Dir; vsock UDS is bound relative to it)")
 		controlSocket  = flag.String("control-socket", "", "path to the control Unix socket to listen on for activate requests")
+		controlListen  = flag.String("control-listen", "", "TCP address (host:port) to serve the mTLS NETWORK control on for activate requests; the husk pod uses this. Requires --tls-cert/--tls-key/--tls-ca; refuses to serve without them")
+		sandboxListen  = flag.String("sandbox-listen", ":9091", "TCP address (host:port) to serve the in-pod sandbox HTTP API (exec/files) on after activation; gated by the per-sandbox bearer token delivered over the control channel. The claim's Status.Endpoint is podIP:this port")
+		tlsCert        = flag.String("tls-cert", "", "path to the husk server certificate PEM (mTLS); the forkd server leaf identity")
+		tlsKey         = flag.String("tls-key", "", "path to the husk server key PEM (mTLS)")
+		tlsCA          = flag.String("tls-ca", "", "path to the control plane CA certificate PEM (mTLS); used to verify the controller client certificate")
 		vcpus          = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB         = flag.Int("mem-mib", 512, "guest memory in MiB")
-		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket, send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		activate       = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket (or --control-addr over mTLS), send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		controlAddr    = flag.String("control-addr", "", "activate client mode: TCP address (host:port) of a husk pod's mTLS NETWORK control to activate over; uses ActivateHuskPod and requires --tls-cert/--tls-key/--tls-ca. Mutually exclusive with --control-socket")
 		snapshotDir    = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
 		secretFile     = flag.String("secret-file", "", "activate client mode: path to a KEY=VALUE secret file (one per line) delivered to the guest; values are never logged")
+		tokenFile      = flag.String("token-file", "", "activate client mode: path to a file holding the per-sandbox bearer token delivered over the control channel; the stub gates the in-pod sandbox API on it. The value is a secret and is never logged")
+		emitCerts      = flag.String("emit-certs", "", "issue an internal/pki test CA and control plane leaves into this directory, then exit (spawns no VMM): ca.crt, server.{crt,key} (pki.ServerName SAN), controller.{crt,key} (pki.ControllerName SAN), wrong-ca.crt + wrong-controller.{crt,key} (a different CA, for negative mTLS tests)")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
 	flag.Var(&secretFlag, "secret", "activate client mode: repeatable KEY=VALUE guest secret; values are never logged")
 	flag.Parse()
+
+	if *emitCerts != "" {
+		return emitTestCerts(*emitCerts)
+	}
 
 	if *activate {
 		secrets := secretFlag.orNil()
@@ -139,14 +174,48 @@ func run() error {
 				return err
 			}
 		}
-		return runActivateClient(*controlSocket, *snapshotDir, envFlag.orNil(), secrets)
+		// The per-sandbox bearer token is read from a FILE, not a flag, so the
+		// secret never appears in the process argv. Its value is never logged.
+		token := ""
+		if *tokenFile != "" {
+			raw, err := os.ReadFile(*tokenFile) //nolint:gosec // operator-supplied token file path
+			if err != nil {
+				return fmt.Errorf("read token file: %w", err)
+			}
+			token = strings.TrimSpace(string(raw))
+		}
+		if *controlAddr != "" {
+			if *controlSocket != "" {
+				return fmt.Errorf("--control-addr and --control-socket are mutually exclusive")
+			}
+			return runNetworkActivateClient(*controlAddr, *snapshotDir, *tlsCert, *tlsKey, *tlsCA, envFlag.orNil(), secrets, token)
+		}
+		return runActivateClient(*controlSocket, *snapshotDir, envFlag.orNil(), secrets, token)
 	}
 
 	if *workdir == "" {
 		return fmt.Errorf("--workdir is required")
 	}
-	if *controlSocket == "" {
-		return fmt.Errorf("--control-socket is required")
+	if *controlSocket == "" && *controlListen == "" {
+		return fmt.Errorf("one of --control-socket or --control-listen is required")
+	}
+
+	// Fail closed: the network control channel activates a VM with tenant
+	// secrets, so it MUST be mTLS-authenticated. Refuse to serve --control-listen
+	// unless all three TLS flags are set, mirroring forkd's encryption guard. An
+	// unauthenticated activate channel that delivers secrets is unacceptable.
+	tlsConfigured := *tlsCert != "" && *tlsKey != "" && *tlsCA != ""
+	if *controlListen != "" && !tlsConfigured {
+		return fmt.Errorf("--control-listen requires --tls-cert, --tls-key, and --tls-ca: refusing to serve an unauthenticated network control channel that delivers secrets")
+	}
+
+	var controlTLS *tls.Config
+	if *controlListen != "" {
+		var err error
+		controlTLS, err = buildControlTLS(*tlsCert, *tlsKey, *tlsCA)
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(*workdir, 0o755); err != nil {
@@ -166,7 +235,19 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stub := husk.New(cfg, husk.Options{})
+	// The in-pod sandbox HTTP API (exec/files), reusing the SAME daemon.SandboxAPI
+	// forkd serves. After a successful activate the OnActivated hook registers the
+	// activated VM (by its host vsock path) and its per-sandbox bearer token, then
+	// serves the API on --sandbox-listen, bridging exec/files to the VM's guest
+	// agent over vsock and gating every request on the bearer token. This makes
+	// the endpoint the claim advertises (podIP:sandboxPort) actually reachable and
+	// token-gated, exactly as forkd does. The token is a secret and is never
+	// logged. The vsock UDS dir is the per-VM workdir (the agent UDS lives there);
+	// EnableUnixFallback is deliberately NOT set, matching forkd.
+	sandboxAPI := daemon.NewSandboxAPI(*workdir)
+	onActivated := makeSandboxServer(ctx, sandboxAPI, *sandboxListen)
+
+	stub := husk.New(cfg, husk.Options{OnActivated: onActivated})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")
 	if err := stub.Prepare(ctx); err != nil {
@@ -185,6 +266,25 @@ func run() error {
 		}
 	}()
 
+	// The husk pod uses the mTLS NETWORK control: when --control-listen is set
+	// (with TLS, enforced above), serve ServeTLS authorized to the controller
+	// identity. The unix --control-socket path remains for the in-CI driver and
+	// local use. Both Serve variants block, holding the active VM and returning
+	// only on a signal (SIGINT/SIGTERM) or ctx cancel; the deferred Close then
+	// kills the VM. The VM is alive and usable for the whole serving lifetime.
+	if *controlListen != "" {
+		ln, err := net.Listen("tcp", *controlListen)
+		if err != nil {
+			return fmt.Errorf("listen on control address %s: %w", *controlListen, err)
+		}
+		fmt.Fprintf(os.Stderr, "husk-stub: serving mTLS network control %s\n", *controlListen)
+		if err := husk.ServeTLS(ctx, ln, stub, controlTLS, husk.AuthorizeControllerIdentity); err != nil {
+			return fmt.Errorf("serve network control: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
+		return nil
+	}
+
 	// Fresh control socket; a stale file from a prior run would block bind.
 	_ = os.Remove(*controlSocket)
 	ln, err := net.Listen("unix", *controlSocket)
@@ -193,15 +293,86 @@ func run() error {
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: serving control socket %s\n", *controlSocket)
 
-	// Serve blocks: it handles the activate and then keeps holding the active
-	// VM, returning only on a signal (SIGINT/SIGTERM) or ctx cancel. The
-	// deferred Close above then kills the VM. The VM is alive and usable for
-	// the whole serving lifetime.
 	if err := stub.Serve(ctx, ln); err != nil {
 		return fmt.Errorf("serve control socket: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "husk-stub: shutting down, state=%s\n", stub.State())
 	return nil
+}
+
+// makeSandboxServer returns the husk Stub OnActivated hook. On the first
+// successful activate it registers the activated VM (by its host vsock UDS path)
+// and its per-sandbox bearer token with the daemon.SandboxAPI, then starts the
+// token-gated sandbox HTTP API (exec/files) on listenAddr in a background
+// goroutine. Registration runs on every activate (a husk pod activates once, but
+// keeping it idempotent is cheap); the listener is started exactly once.
+//
+// The hook FAILS the activate (returns an error, so Activate reports OK=false)
+// when the VM cannot be registered (the guest agent vsock did not come up) or
+// when the listener cannot bind, because a VM whose sandbox API is not reachable
+// is not usable by a tenant. The bearer token is a SECRET: it is registered with
+// the API but NEVER logged here.
+func makeSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr string) func(vsockPath, token string) error {
+	var once sync.Once
+	var serveErr error
+	return func(vsockPath, token string) error {
+		// Register the activated VM and its bearer token. RegisterToken with an
+		// empty token is a no-op: the API then fails closed (401) because
+		// EnableUnixFallback/AllowTokenless are NOT set, so an activate that
+		// delivered no token yields an unreachable-but-safe sandbox rather than an
+		// open one.
+		if err := api.RegisterSandbox(huskSandboxID, vsockPath); err != nil {
+			return fmt.Errorf("register activated sandbox with in-pod API: %w", err)
+		}
+		api.RegisterToken(huskSandboxID, token)
+
+		once.Do(func() {
+			ln, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				serveErr = fmt.Errorf("listen on sandbox address %s: %w", listenAddr, err)
+				return
+			}
+			srv := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second}
+			fmt.Fprintf(os.Stderr, "husk-stub: serving token-gated sandbox API %s\n", listenAddr)
+			go func() {
+				if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					fmt.Fprintf(os.Stderr, "husk-stub: sandbox API server: %v\n", err)
+				}
+			}()
+			// Shut the sandbox API down on stub shutdown (signal / ctx cancel),
+			// mirroring how the control server returns and the VM is torn down.
+			go func() {
+				<-ctx.Done()
+				_ = srv.Close()
+			}()
+		})
+		return serveErr
+	}
+}
+
+// buildControlTLS reads the husk server certificate, key, and the control plane
+// CA, and builds the mTLS server config that requires and verifies the
+// controller client certificate (pki.ServerTLSConfig). Secret material (the
+// private key bytes) is never logged: errors name the flag and the underlying
+// read/parse error only.
+func buildControlTLS(certPath, keyPath, caPath string) (*tls.Config, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("read --tls-ca: %w", err)
+	}
+	cfg, err := pki.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return nil, fmt.Errorf("build husk control TLS config: %w", err)
+	}
+	return cfg, nil
 }
 
 // runActivateClient connects to an already-serving stub's control socket, sends
@@ -214,7 +385,7 @@ func run() error {
 // env and secrets are delivered to the guest by the stub after the restore
 // handshake. Their VALUES are never logged here: only the result (OK, latency,
 // vsock path, and any error, none of which carries a secret) is printed.
-func runActivateClient(controlSocket, snapshotDir string, env, secrets map[string]string) error {
+func runActivateClient(controlSocket, snapshotDir string, env, secrets map[string]string, token string) error {
 	if controlSocket == "" {
 		return fmt.Errorf("--activate requires --control-socket")
 	}
@@ -232,6 +403,7 @@ func runActivateClient(controlSocket, snapshotDir string, env, secrets map[strin
 		SnapshotDir: snapshotDir,
 		Env:         env,
 		Secrets:     secrets,
+		Token:       token,
 	}); err != nil {
 		return fmt.Errorf("send activate request: %w", err)
 	}
@@ -250,5 +422,126 @@ func runActivateClient(controlSocket, snapshotDir string, env, secrets map[strin
 	if !res.OK {
 		return fmt.Errorf("activate failed: %s", res.Error)
 	}
+	return nil
+}
+
+// runNetworkActivateClient drives the NETWORK mTLS control channel: it builds
+// the controller client TLS config (pki.ClientTLSConfig, which pins the husk
+// server identity and presents the controller client certificate), then calls
+// the controller's ActivateHuskPod against addr. This is the in-CI driver for
+// the slice-2 network-activation proof; it exercises the exact reconcile path
+// the claim controller uses (ActivateHuskPod), not a bespoke client. It owns no
+// VMM.
+//
+// The TLS flags are REQUIRED here: ActivateHuskPod refuses a nil tlsConf so the
+// activation secrets are never sent over an unauthenticated channel. Secret and
+// env VALUES are never logged: only the result (OK, latency, vsock path, and
+// any error, none of which carries a secret) is printed.
+func runNetworkActivateClient(addr, snapshotDir, certPath, keyPath, caPath string, env, secrets map[string]string, token string) error {
+	if snapshotDir == "" {
+		return fmt.Errorf("--activate requires --snapshot-dir")
+	}
+	if certPath == "" || keyPath == "" || caPath == "" {
+		return fmt.Errorf("--control-addr requires --tls-cert, --tls-key, and --tls-ca: refusing to send activation secrets over an unauthenticated channel")
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("read --tls-ca: %w", err)
+	}
+	tlsConf, err := pki.ClientTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return fmt.Errorf("build controller client TLS config: %w", err)
+	}
+
+	res, err := controller.ActivateHuskPod(context.Background(), addr, tlsConf, husk.ActivateRequest{
+		SnapshotDir: snapshotDir,
+		Env:         env,
+		Secrets:     secrets,
+		Token:       token,
+	})
+	if err != nil {
+		return fmt.Errorf("activate over network control: %w", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(res); err != nil {
+		return fmt.Errorf("encode activate result: %w", err)
+	}
+	if !res.OK {
+		return fmt.Errorf("activate failed: %s", res.Error)
+	}
+	return nil
+}
+
+// emitTestCerts issues a fresh internal/pki test CA and the control plane leaves
+// into dir so the CI can stand up the mTLS network control channel with SANs
+// that match exactly what the husk server pins and authorizes. Reusing
+// internal/pki (not openssl) guarantees the husk server leaf carries
+// pki.ServerName and the controller client leaf carries pki.ControllerName, the
+// two names ServerTLSConfig/ClientTLSConfig and AuthorizeControllerIdentity
+// depend on. It also emits an INDEPENDENT second CA and a controller leaf signed
+// by it (wrong-ca.crt + wrong-controller.{crt,key}) so the negative mTLS test
+// can prove a wrong-CA client is rejected. No secret material beyond these test
+// keys is in scope; this command is for CI/test only.
+func emitTestCerts(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+
+	ca, err := pki.NewCA("husk-stub-test")
+	if err != nil {
+		return fmt.Errorf("create test CA: %w", err)
+	}
+	server, err := ca.Issue(pki.ServerName)
+	if err != nil {
+		return fmt.Errorf("issue server leaf: %w", err)
+	}
+	clientLeaf, err := ca.Issue(pki.ControllerName)
+	if err != nil {
+		return fmt.Errorf("issue controller leaf: %w", err)
+	}
+
+	// An INDEPENDENT CA and a controller leaf signed by it: the negative test
+	// presents this leaf, whose SAN is correct but whose chain does not verify
+	// against the husk server's trusted CA, so the mTLS handshake must reject it.
+	wrongCA, err := pki.NewCA("husk-stub-test-wrong")
+	if err != nil {
+		return fmt.Errorf("create wrong test CA: %w", err)
+	}
+	wrongClient, err := wrongCA.Issue(pki.ControllerName)
+	if err != nil {
+		return fmt.Errorf("issue wrong-CA controller leaf: %w", err)
+	}
+
+	files := map[string][]byte{
+		"ca.crt":               ca.CertPEM(),
+		"server.crt":           server.CertPEM,
+		"server.key":           server.KeyPEM,
+		"controller.crt":       clientLeaf.CertPEM,
+		"controller.key":       clientLeaf.KeyPEM,
+		"wrong-ca.crt":         wrongCA.CertPEM(),
+		"wrong-controller.crt": wrongClient.CertPEM,
+		"wrong-controller.key": wrongClient.KeyPEM,
+	}
+	for name, pemBytes := range files {
+		// Key material is 0o600; certificates and the CA cert are world-readable.
+		mode := os.FileMode(0o644)
+		if strings.HasSuffix(name, ".key") {
+			mode = 0o600
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), pemBytes, mode); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk-stub: wrote %d test cert files to %s\n", len(files), dir)
 	return nil
 }

@@ -15,6 +15,7 @@ package controller_test
 //     is documented in huskpod.go).
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,101 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("SeccompProfile = %+v, want RuntimeDefault", sc.SeccompProfile)
+	}
+}
+
+func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ctl-pool", Namespace: "default", UID: "pool-uid-9"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "ctl-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "ctl-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:     "agent-run-husk-stub:test",
+		SnapshotID:    "ctl-tmpl",
+		DataDir:       "/var/lib/agent-run",
+		TLSSecretName: "forkd-tls",
+		CASecretName:  "agent-run-ca",
+	})
+
+	ctr := pod.Spec.Containers[0]
+	args := strings.Join(ctr.Args, " ")
+
+	// mTLS network control: the control-listen port + the three TLS PEM args.
+	if !strings.Contains(args, "--control-listen") {
+		t.Errorf("args missing --control-listen: %v", ctr.Args)
+	}
+	// The in-pod sandbox HTTP API is served on the sandbox port so the endpoint
+	// the claim advertises (podIP:9091) is reachable and token-gated.
+	if !strings.Contains(args, "--sandbox-listen :9091") {
+		t.Errorf("args missing --sandbox-listen :9091: %v", ctr.Args)
+	}
+	for _, flag := range []string{"--tls-cert", "--tls-key", "--tls-ca"} {
+		if !strings.Contains(args, flag) {
+			t.Errorf("args missing %s: %v", flag, ctr.Args)
+		}
+	}
+
+	// The sandbox endpoint port is exposed as a container port so the claim's
+	// Status.Endpoint (podIP:port) is reachable.
+	var hasSandboxPort bool
+	for _, p := range ctr.Ports {
+		if p.ContainerPort == 9091 {
+			hasSandboxPort = true
+		}
+	}
+	if !hasSandboxPort {
+		t.Errorf("container ports = %+v, want one with 9091 (sandbox endpoint)", ctr.Ports)
+	}
+
+	// A read-only mount of the node's template snapshot dir and the kernel, plus
+	// the TLS Secret mount.
+	mounts := map[string]corev1.VolumeMount{}
+	for _, m := range ctr.VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if m, ok := mounts["snapshot"]; !ok || !m.ReadOnly {
+		t.Errorf("snapshot mount missing or not read-only: %+v", mounts)
+	}
+	if m, ok := mounts["kernel"]; !ok || !m.ReadOnly {
+		t.Errorf("kernel mount missing or not read-only: %+v", mounts)
+	}
+	if m, ok := mounts["husk-tls"]; !ok || !m.ReadOnly {
+		t.Errorf("husk-tls mount missing or not read-only: %+v", mounts)
+	}
+	if m, ok := mounts["husk-ca"]; !ok || !m.ReadOnly {
+		t.Errorf("husk-ca mount missing or not read-only: %+v", mounts)
+	}
+
+	// The snapshot hostPath points at <dataDir>/templates/<snapshotID>/snapshot.
+	var snapVol *corev1.Volume
+	var tlsVol *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		switch pod.Spec.Volumes[i].Name {
+		case "snapshot":
+			snapVol = &pod.Spec.Volumes[i]
+		case "husk-tls":
+			tlsVol = &pod.Spec.Volumes[i]
+		}
+	}
+	if snapVol == nil || snapVol.HostPath == nil {
+		t.Fatalf("snapshot volume is not a hostPath: %+v", snapVol)
+	}
+	if snapVol.HostPath.Path != "/var/lib/agent-run/templates/ctl-tmpl/snapshot" {
+		t.Errorf("snapshot hostPath = %q, want /var/lib/agent-run/templates/ctl-tmpl/snapshot", snapVol.HostPath.Path)
+	}
+	if tlsVol == nil || tlsVol.Secret == nil || tlsVol.Secret.SecretName != "forkd-tls" {
+		t.Errorf("husk-tls volume should mount the forkd-tls Secret: %+v", tlsVol)
+	}
+
+	// Placement: the pod must land on a KVM node.
+	if pod.Spec.NodeSelector["agentrun.dev/kvm"] != "true" {
+		t.Errorf("nodeSelector = %+v, want agentrun.dev/kvm=true", pod.Spec.NodeSelector)
 	}
 }
 
