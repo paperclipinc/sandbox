@@ -54,6 +54,15 @@ func NftDeleteSandboxChainArgs(tap string) []string {
 	return []string{"nft", "delete", "chain", "inet", SharedTableName(), SandboxChainName(tap)}
 }
 
+// NftDeleteSandboxAllowSetArgs builds the argv to remove this sandbox's dynamic
+// allow set from the shared table: nft delete set inet <table> sb_<tap>_dyn.
+// This must run after the per-sandbox chain is deleted, because the chain's
+// accept rule references the set. Deleting it ensures a tap reused for a later
+// sandbox starts with no stale pinned (ip . port) elements.
+func NftDeleteSandboxAllowSetArgs(tap string) []string {
+	return []string{"nft", "delete", "set", "inet", SharedTableName(), SandboxAllowSetName(tap)}
+}
+
 // MasqueradeAddArgs builds the argv to add a MASQUERADE rule for the sandbox
 // subnet on the uplink interface. This is optional (the node may already NAT
 // the subnet); callers gate it behind a flag.

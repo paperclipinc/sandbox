@@ -79,6 +79,14 @@ type NotifyForkedNetwork struct {
 	GuestIP   string `json:"guest_ip"`
 	GatewayIP string `json:"gateway_ip"`
 	PrefixLen int    `json:"prefix_len"`
+	// ResolverIP, when non-empty, is the node-wide DNS resolver the guest must
+	// query for name-based egress. The guest agent writes it as the sole
+	// nameserver in /etc/resolv.conf so every name lookup goes through the
+	// controlled resolver (which is the only address the egress chain allows on
+	// port 53). Empty means name-based egress is disabled and the guest's
+	// existing resolv.conf is left untouched. The address is config, not a
+	// secret, and is safe to log.
+	ResolverIP string `json:"resolver_ip,omitempty"`
 }
 
 // ConfigureRequest delivers claim-time environment and secrets to the guest

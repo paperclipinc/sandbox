@@ -112,5 +112,11 @@ func teardown(ctx context.Context, run runner, id netconf.Identity, opts applyOp
 	if err := run(ctx, netconf.NftDeleteSandboxChainArgs(id.TapName), ""); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("delete egress chain for tap %s: %w", id.TapName, err)
 	}
+	// Delete the dynamic allow set after its chain: the chain's accept rule
+	// references the set, so the set delete must follow the chain delete. This
+	// stops a reused tap from inheriting stale pinned (ip . port) elements.
+	if err := run(ctx, netconf.NftDeleteSandboxAllowSetArgs(id.TapName), ""); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete egress allow set for tap %s: %w", id.TapName, err)
+	}
 	return firstErr
 }

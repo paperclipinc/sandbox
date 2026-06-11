@@ -122,6 +122,25 @@ func (a *Allocator) Acquire(sandboxID string) (Identity, error) {
 	return Identity{}, &ErrSubnetExhausted{CIDR: a.cidr}
 }
 
+// TapForGuestIP returns the tap device name of the live sandbox whose guest IP
+// matches ip, or "" when no live sandbox holds that guest IP. The DNS proxy
+// uses it to find the nftables set to pin into, given the source IP of a query.
+// It is safe for concurrent use.
+func (a *Allocator) TapForGuestIP(ip net.IP) string {
+	want := ip.To4()
+	if want == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, id := range a.byID {
+		if id.GuestIP.Equal(want) {
+			return id.TapName
+		}
+	}
+	return ""
+}
+
 // Release frees the identity held by sandboxID. Releasing an unknown id is a
 // no-op.
 func (a *Allocator) Release(sandboxID string) {

@@ -181,6 +181,65 @@ func TestRenderSandboxChainsIndependent(t *testing.T) {
 	}
 }
 
+// TestRenderSandboxChainDynamicSet asserts the per-sandbox dynamic allow set is
+// declared and that an accept rule matching (ip daddr . tcp dport) against it
+// is present, placed after the static IP:port allows and the DNS-to-resolver
+// rules but before the final verdict, and still saddr anti-spoof pinned.
+func TestRenderSandboxChainDynamicSet(t *testing.T) {
+	allow := []HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 443}}
+	out := RenderSandboxChain("sbabcd1234", net.ParseIP("10.200.0.2"),
+		v1alpha1.EgressDeny, allow, net.ParseIP("10.200.0.1"))
+
+	table := SharedTableName()
+	chain := SandboxChainName("sbabcd1234")
+	set := SandboxAllowSetName("sbabcd1234")
+
+	setDecl := "add set inet " + table + " " + set + " { type ipv4_addr . inet_service ; flags timeout ; }"
+	if !strings.Contains(out, setDecl) {
+		t.Errorf("missing dynamic set declaration %q\n---\n%s", setDecl, out)
+	}
+	acceptRule := "ip saddr 10.200.0.2 ip daddr . tcp dport @" + set + " accept"
+	if !strings.Contains(out, acceptRule) {
+		t.Errorf("missing dynamic set accept rule %q\n---\n%s", acceptRule, out)
+	}
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	idx := func(substr string) int {
+		for i, l := range lines {
+			if strings.Contains(l, substr) {
+				return i
+			}
+		}
+		return -1
+	}
+	rulePrefix := "add rule inet " + table + " " + chain
+	staticAllow := idx("ip daddr 10.0.0.5 tcp dport 443 accept")
+	dnsRule := idx("udp dport 53 accept")
+	dynAccept := idx("@" + set + " accept")
+	// The final verdict is the last add rule line for this chain.
+	finalVerdict := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, rulePrefix) {
+			finalVerdict = i
+		}
+	}
+	if staticAllow == -1 || dnsRule == -1 || dynAccept == -1 || finalVerdict == -1 {
+		t.Fatalf("could not locate ordered rules\n%s", out)
+	}
+	if !(dynAccept > staticAllow && dynAccept > dnsRule) {
+		t.Errorf("dynamic accept must come after static allows and DNS rules\n%s", out)
+	}
+	if dynAccept >= finalVerdict {
+		t.Errorf("dynamic accept must come before the final verdict\n%s", out)
+	}
+	// Every accept (including the dynamic one) must be saddr-pinned.
+	for _, l := range lines {
+		if strings.HasPrefix(l, rulePrefix) && !strings.Contains(l, "ip saddr 10.200.0.2") {
+			t.Errorf("rule not saddr-pinned: %q", l)
+		}
+	}
+}
+
 func TestRenderSandboxChainDeterministic(t *testing.T) {
 	allow := []HostPort{
 		{IP: net.ParseIP("10.0.0.5"), Port: 443},
@@ -225,5 +284,46 @@ func TestRenderSandboxChainAllowPolicy(t *testing.T) {
 	out := RenderSandboxChain("sbx", net.ParseIP("10.200.0.2"), v1alpha1.EgressAllow, nil, nil)
 	if !strings.HasSuffix(lastChainRule(t, out, SandboxChainName("sbx")), " accept") {
 		t.Errorf("EgressAllow chain must end in accept\n%s", out)
+	}
+}
+
+func TestParseNameAllowList(t *testing.T) {
+	names, err := ParseNameAllowList([]string{
+		"10.0.0.5:443",         // IP:port, ignored (statically enforced)
+		"API.Example.com:443",  // mixed case + dedup target
+		"api.example.com.:443", // trailing dot + same port, deduped
+		"api.example.com:8443", // second port for same name
+		"docs.example.com:443", // distinct name
+	})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("names = %v, want 2 distinct names", names)
+	}
+	got := names["api.example.com"]
+	if len(got) != 2 || got[0] != 443 || got[1] != 8443 {
+		t.Errorf("api.example.com ports = %v, want [443 8443]", got)
+	}
+	if docs := names["docs.example.com"]; len(docs) != 1 || docs[0] != 443 {
+		t.Errorf("docs.example.com ports = %v, want [443]", docs)
+	}
+}
+
+func TestParseNameAllowListOnlyIPs(t *testing.T) {
+	names, err := ParseNameAllowList([]string{"10.0.0.5:443", "192.0.2.1:80"})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected no name entries for an IP-only allowlist, got %v", names)
+	}
+}
+
+func TestParseNameAllowListInvalid(t *testing.T) {
+	for _, s := range []string{"api.example.com", "api.example.com:0", "api.example.com:bad", ":443"} {
+		if _, err := ParseNameAllowList([]string{s}); err == nil {
+			t.Errorf("ParseNameAllowList(%q) expected error, got nil", s)
+		}
 	}
 }

@@ -94,6 +94,46 @@ runner). The Go unit tests assert command order and idempotency with a fake
 runner; the darwin gap (no `nft` to accept the rendered syntax) is closed by the
 KVM CI phases below.
 
+## Name-based egress: the controlled DNS resolver
+
+A literal `ip daddr . tcp dport` rule cannot enforce a NAME, because nftables
+matches on the resolved IP and never sees the name the guest looked up. The
+`--enable-dns-egress` path closes this with a controlled per-node resolver
+(`internal/dnsproxy`, #47). The design:
+
+- **Single node resolver IP.** forkd binds the controlled resolver on a node-wide
+  address (`--dns-resolver`, default `169.254.1.1`) on `udp/tcp 53`. Every
+  sandbox chain allows DNS to exactly that IP and no other, so a guest cannot
+  reach any external resolver (no DoH/DoT bypass: an external resolver's IP:port
+  is not allowlisted and was never pinned).
+- **Guest points at it.** The guest agent writes `/etc/resolv.conf` with
+  `nameserver <resolverIP>` on configure, so the guest's only resolver is the one
+  we control.
+- **Source-IP attribution.** The resolver maps each query to a sandbox by its
+  source guest IP (each sandbox has a unique /30 from the identity allocator) and
+  consults THAT sandbox's name allowlist. A query whose source has no live tap
+  mapping is REFUSED and pins nothing.
+- **Resolve-then-pin.** For an allowlisted name, the resolver forwards the query
+  to the configured upstream (`--dns-upstream`), and for each A record it pins
+  `(recordIP . allowedPort)` into that sandbox's per-sandbox nftables timeout set
+  (`ipv4_addr . inet_service`, `flags timeout`) with a timeout of
+  `max(recordTTL, 30s floor)`, then returns the SAME answer to the guest. Because
+  the guest connects to exactly the IP the resolver pinned, the guest and the
+  firewall always agree on the address with no resolve-and-pin race. A name NOT
+  on the allowlist gets REFUSED; nothing is pinned.
+- **Port-scoped, saddr-pinned.** Only the allowed ports are pinned, and the
+  dynamic-set accept rule (like every other accept) is `ip saddr <guestIP>`
+  pinned, so a spoofed-source query cannot land a pin the spoofing guest can use.
+- **TTL window.** A pinned `(ip . port)` stays reachable for the timeout above
+  even after the name stops resolving to it; the set evicts the element when the
+  timeout lapses. The 30s floor keeps a very short TTL from expiring a pin before
+  the guest connects.
+
+v1 is exact-match FQDNs and A/IPv4 only (AAAA returns empty NOERROR so a
+dual-stack guest falls back to IPv4 rather than hanging). The residual risks
+(upstream-resolver trust, the bounded TTL window, the shared-CDN-IP caveat) are
+documented per row in `docs/threat-model.md`.
+
 ## Enforced vs open
 
 **ENFORCED (proven in KVM CI):**
@@ -109,15 +149,24 @@ KVM CI phases below.
   (the denied connect times out), driven from inside the guest over the guest
   agent. The destination lives in a separate netns reached over a veth, so the
   traffic is genuinely forwarded through the host's nftables forward hook.
+- **Name-based egress** (exact-match FQDNs, behind `--enable-dns-egress`). A
+  sandbox allowed the NAME `egress.test:8080` resolves it through the controlled
+  resolver and reaches the resolved IP on that port; the right name on a wrong
+  port, a name not on the allowlist (REFUSED), and a direct dial to the
+  destination IP without first resolving the name are all BLOCKED. Proven from
+  inside the guest in KVM CI against a stub upstream that maps the allowlisted
+  and a denied name to the SAME IP, so the proof is by NAME, not by IP.
 
 **OPEN (not enforced; documented, not pretended):**
 
-- **Name-based allowlists** (e.g. `api.example.com:443`). They are accepted by
-  the CRD and plumbed through to forkd, but forkd logs them as NOT enforced and
-  omits them from the ruleset. Enforcing them safely needs a forkd-controlled
-  DNS resolver that pins resolved IPs with TTL-bounded validity (otherwise
-  attacker-controlled DNS bypasses the rule). Tracked as a follow-up (PR2, #47).
-  **No claim name-based rule is enforced today.**
+- **Suffix/wildcard name matching** (e.g. `*.anthropic.com`). v1 is exact-match
+  FQDN only; a wildcard allow entry is not expanded.
+- **AAAA/IPv6 name egress.** v1 is A/IPv4 only; the resolver answers AAAA with an
+  empty NOERROR and pins no IPv6. IPv6 egress is a follow-up.
+- **Upstream-resolver trust, per-name rate limiting, DNSSEC.** The proxy pins
+  whatever its configured upstream returns; a malicious upstream can point an
+  allowlisted name at an attacker IP. There is no per-name rate limit and no
+  DNSSEC validation in v1 (see `docs/threat-model.md`).
 - **Snapshot-fork networking under a per-VM netns.** Live-fork fails closed;
   per-VM netns isolation lands with husk pods (#18).
 - **Per-fork conntrack flush**, parent-connection-death semantics beyond
@@ -135,7 +184,7 @@ policy boundary; the per-VM netns is the containment boundary.
 
 ## CI proof
 
-`.github/workflows/kvm-test.yaml` runs two REQUIRED (gating) phases on a root
+`.github/workflows/kvm-test.yaml` runs three REQUIRED (gating) phases on a root
 Linux runner with `nft` + `iproute2`:
 
 1. **Host nftables two-sandbox install validation against real nft.** Builds and
@@ -147,3 +196,12 @@ Linux runner with `nft` + `iproute2`:
    the existing agent rootfs, then via the guest agent (`test-agent --mode
    egress`) configures eth0 and asserts the allowed destination is reachable and
    the denied destination is blocked.
+3. **Name-based egress enforcement.** Brings up one tap whose allowlist is the
+   NAME `egress.test:8080`, binds the controlled resolver on `169.254.1.1`, runs
+   it via `cmd/net-smoke setup-name-egress` with a stub upstream (`cmd/dns-stub`)
+   that maps both `egress.test` and `denied.test` to the same test IP, boots a VM
+   behind the tap, then via the guest agent (`test-agent --mode name-egress`)
+   asserts: an un-resolved direct dial to the IP is blocked; resolve+connect to
+   `egress.test:8080` succeeds; `egress.test:9090` (wrong port) is blocked; and
+   `denied.test` is refused by the resolver (so it is unreachable even though it
+   maps to the same IP), proving allowlisting is by name, not by IP.

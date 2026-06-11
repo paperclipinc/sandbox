@@ -35,6 +35,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -42,6 +43,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/dnsproxy"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
 )
@@ -59,8 +61,10 @@ func main() {
 		err = runSetupOne(os.Args[2:])
 	case "teardown-one":
 		err = runTeardownOne(os.Args[2:])
+	case "setup-name-egress":
+		err = runSetupNameEgress(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown subcommand %q (want validate|setup-one|teardown-one)", os.Args[1])
+		err = fmt.Errorf("unknown subcommand %q (want validate|setup-one|teardown-one|setup-name-egress)", os.Args[1])
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "net-smoke: %v\n", err)
@@ -239,6 +243,114 @@ func runTeardownOne(args []string) error {
 		return fmt.Errorf("teardown single identity: %w", err)
 	}
 	fmt.Printf("net-smoke: teardown-one tap=%s\n", id.TapName)
+	return nil
+}
+
+// runSetupNameEgress installs a single sandbox identity whose egress is governed
+// by NAME, then runs the controlled DNS resolver in the foreground so the
+// name-egress KVM phase can boot a VM behind it and probe from inside the guest.
+//
+// It mirrors exactly what forkd does with --enable-dns-egress, but for one
+// explicitly addressed sandbox:
+//   - Manager.Setup is called WITH a resolver IP, so the rendered chain allows
+//     udp/tcp 53 to that resolver and declares the per-sandbox dynamic
+//     (ip . port) allow set. No static IP allow is installed: the allowlist is a
+//     NAME (for example egress.test:8080), enforced only by the resolver pinning
+//     the resolved address as it answers.
+//   - A dnsproxy.Registry is populated with the guest's name allowlist and a
+//     dnsproxy.Server is bound to the resolver IP. The proxy forwards allowed
+//     queries to --upstream (the CI stub) and pins each resolved (ip . port)
+//     into this guest's set via real nft, so the guest can reach exactly the
+//     address it resolved for an allowlisted name and nothing else.
+//
+// The resolver IP must already be bound and reachable from the guest tap; the
+// workflow binds it on the host before invoking this. This call BLOCKS in
+// ListenAndServe, so the workflow runs it in the background.
+func runSetupNameEgress(args []string) error {
+	fs := newFlagSet()
+	tap := fs.String("tap")
+	hostIP := fs.String("host-ip")
+	guestIP := fs.String("guest-ip")
+	guestMAC := fs.String("guest-mac")
+	resolverIPStr := fs.String("resolver-ip")
+	upstream := fs.String("upstream")
+	nameAllow := fs.String("name-allow")
+	if err := fs.parse(args); err != nil {
+		return err
+	}
+	if *tap == "" || *hostIP == "" || *guestIP == "" || *resolverIPStr == "" || *upstream == "" || *nameAllow == "" {
+		return fmt.Errorf("setup-name-egress requires --tap, --host-ip, --guest-ip, --resolver-ip, --upstream, --name-allow")
+	}
+
+	resolverIP := net.ParseIP(*resolverIPStr)
+	if resolverIP == nil {
+		return fmt.Errorf("--resolver-ip must be a valid IP address")
+	}
+
+	// The allow entry must be a NAME, not an IP: the whole point of this phase is
+	// that allowlisting is by name. A literal IP would be enforced statically and
+	// would not prove the resolver path.
+	if _, isName, err := netconf.ParseAllowEntry(*nameAllow); err != nil {
+		return fmt.Errorf("parse --name-allow: %w", err)
+	} else if !isName {
+		return fmt.Errorf("--name-allow must be a NAME:port, not an IP:port (%s)", *nameAllow)
+	}
+	names, err := netconf.ParseNameAllowList([]string{*nameAllow})
+	if err != nil {
+		return fmt.Errorf("parse --name-allow: %w", err)
+	}
+
+	id := netconf.Identity{
+		TapName:  *tap,
+		GuestMAC: *guestMAC,
+		HostIP:   net.ParseIP(*hostIP),
+		GuestIP:  net.ParseIP(*guestIP),
+	}
+	if id.HostIP == nil || id.GuestIP == nil {
+		return fmt.Errorf("host-ip/guest-ip must be valid IPv4 addresses")
+	}
+
+	// Setup with the resolver IP and NO static IP allows. The chain now allows
+	// DNS to the resolver and consults the dynamic set; egress to any concrete
+	// IP:port is allowed only once the proxy pins it for a resolved name.
+	mgr := network.NewManager(network.Options{EnableForwarding: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := mgr.Setup(ctx, id, v1alpha1.EgressDeny, nil, resolverIP); err != nil {
+		return fmt.Errorf("setup name-egress identity: %w", err)
+	}
+	fmt.Printf("net-smoke: setup-name-egress tap=%s host=%s guest=%s resolver=%s name-allow=%s upstream=%s\n",
+		id.TapName, id.HostIP, id.GuestIP, resolverIP, *nameAllow, *upstream)
+
+	// Register the guest's name allowlist and build the controlled resolver. The
+	// pinner runs real nft (same exec path forkd uses); tapFor maps this single
+	// guest IP to its tap so the proxy pins into the right set.
+	registry := dnsproxy.NewRegistry()
+	registry.Register(id.GuestIP, names)
+	pinner := dnsproxy.NewNftPinner(func(argv []string) error {
+		if len(argv) == 0 {
+			return fmt.Errorf("empty nft command")
+		}
+		out, runErr := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed nft argv from validated addresses/ports
+		if runErr != nil {
+			return fmt.Errorf("%s: %w: %s", argv[0], runErr, string(out))
+		}
+		return nil
+	})
+	tapFor := func(ip net.IP) string {
+		if ip.Equal(id.GuestIP) {
+			return id.TapName
+		}
+		return ""
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server := dnsproxy.NewServer(registry, pinner, *upstream, 30*time.Second, tapFor, logger)
+
+	addr := net.JoinHostPort(resolverIP.String(), "53")
+	fmt.Printf("net-smoke: controlled resolver listening on %s (upstream %s)\n", addr, *upstream)
+	if err := server.ListenAndServe(addr); err != nil {
+		return fmt.Errorf("controlled resolver on %s: %w", addr, err)
+	}
 	return nil
 }
 

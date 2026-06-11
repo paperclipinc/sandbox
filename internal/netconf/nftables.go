@@ -3,6 +3,7 @@ package netconf
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,17 @@ func DispatchMapName() string {
 // sandbox's packets only and cannot affect other sandboxes.
 func SandboxChainName(tap string) string {
 	return "sb_" + tap
+}
+
+// SandboxAllowSetName returns the per-sandbox dynamic allow set name for a tap.
+// The set holds (ipv4_addr . inet_service) elements with a timeout flag and is
+// populated at runtime by the DNS proxy as it resolves allowlisted names. The
+// per-sandbox chain accepts traffic whose (daddr . dport) is present in this
+// set, so a resolved name's address is reachable only until its TTL expires.
+// It is named the same way as SandboxChainName so a tap's chain and set share a
+// stable, collision-free identity.
+func SandboxAllowSetName(tap string) string {
+	return "sb_" + tap + "_dyn"
 }
 
 // ParseAllowEntry parses a single allowlist entry of the form host:port. When
@@ -94,6 +106,49 @@ func SplitAllowList(entries []string) (enforceable []HostPort, skipped []string,
 		enforceable = append(enforceable, hp)
 	}
 	return enforceable, skipped, nil
+}
+
+// ParseNameAllowList parses a raw allowlist into the name-based entries the DNS
+// proxy enforces: a map from a lowercased DNS name to the sorted, de-duplicated
+// set of TCP ports allowed for it. IP:port entries are ignored (they are
+// enforced statically by the chain, not by the resolver). A malformed entry
+// fails the whole call. The result is the map the dnsproxy Registry.Register
+// takes; an empty map (no name entries) means the sandbox has no name egress.
+func ParseNameAllowList(entries []string) (map[string][]int, error) {
+	names := make(map[string][]int)
+	seen := make(map[string]map[int]bool)
+	for _, e := range entries {
+		host, portStr, splitErr := net.SplitHostPort(e)
+		if splitErr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: %w", e, splitErr)
+		}
+		if host == "" {
+			return nil, fmt.Errorf("parse allow entry %q: empty host", e)
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: invalid port: %w", e, perr)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("parse allow entry %q: port %d out of range", e, port)
+		}
+		if net.ParseIP(host) != nil {
+			// An IP:port entry: enforced statically by the chain, not the resolver.
+			continue
+		}
+		key := strings.ToLower(strings.TrimSuffix(host, "."))
+		if seen[key] == nil {
+			seen[key] = make(map[int]bool)
+		}
+		if !seen[key][port] {
+			seen[key][port] = true
+			names[key] = append(names[key], port)
+		}
+	}
+	for _, ports := range names {
+		sort.Ints(ports)
+	}
+	return names, nil
 }
 
 // RenderSharedTable renders the idempotent skeleton every sandbox shares: one
@@ -175,6 +230,18 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 		fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr %s tcp dport 53 accept\n",
 			table, chain, saddr, resolverIP.String())
 	}
+
+	// Dynamic allow set: the DNS proxy pins (resolved ip . port) elements with a
+	// timeout here as it answers allowlisted name queries. Declare the set, then
+	// accept traffic whose (daddr . dport) is currently present in it. The set
+	// is declared before its accept rule so the rule's reference resolves, and
+	// the accept is placed after the static IP:port allows and the
+	// DNS-to-resolver rules but before the final verdict, so a pinned name is
+	// reachable only while its element lives and only on its allowed port. Like
+	// every other accept it is saddr-pinned to stop source spoofing on this tap.
+	set := SandboxAllowSetName(tap)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service ; flags timeout ; }\n", table, set)
+	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr . tcp dport @%s accept\n", table, chain, saddr, set)
 
 	// Final verdict for this sandbox's packets: drop under EgressDeny, accept
 	// under EgressAllow. Terminal within this regular chain for this packet

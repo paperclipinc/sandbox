@@ -214,11 +214,16 @@ or spoof.
   denied one, and a two-sandbox `nft` install validates against real nft. The
   controller plumbs `template.Spec.networkPolicy` (egress + allow) through the
   Fork RPC. See docs/networking.md.
-- ⬜ Controlled DNS resolver for name-based allowlists (PR2): names are accepted
-  by the CRD and plumbed to forkd but logged as NOT enforced and omitted from
-  the ruleset; a forkd-controlled per-node resolver that pins resolved IPs with
-  TTL-bounded validity is required before name rules can be enforced. Tracked in
-  #47.
+- ✅ Controlled DNS resolver for name-based allowlists (#47, behind
+  `forkd --enable-dns-egress`): a per-node resolver (`internal/dnsproxy`) that
+  resolves ONLY allowlisted names and pins each resolved `(ip . port)` into that
+  sandbox's nftables timeout set with `max(recordTTL, 30s)` validity; the guest's
+  only resolver is the node resolver IP (`169.254.1.1`). Exact-match FQDNs,
+  CI-proven: a resolved allowlisted name:port is reachable while an unlisted name
+  (refused), the right name on a wrong port, and an un-resolved direct IP are
+  blocked, against a stub upstream mapping the allowlisted and a denied name to
+  the same IP (allowlisting is by name, not IP). Open follow-ups: suffix/wildcard
+  names (`*.anthropic.com`) and AAAA/IPv6 (A-only in v1).
 - ⬜ Snapshot-fork networking under per-VM netns (lands with husk pods #18):
   live-fork (`ForkRunning`) of a networked sandbox fails closed today because it
   would restore the source's baked NIC and collide on tap/MAC/IP.

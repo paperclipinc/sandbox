@@ -180,7 +180,37 @@ func configureNetwork(cfg *vsock.NotifyForkedNetwork) {
 			fmt.Fprintf(os.Stderr, "sandbox-agent: net config %v failed: %v: %s\n", argv, err, out)
 		}
 	}
-	fmt.Printf("sandbox-agent: configured %s addr=%s gateway=%s\n", guestNetIface, addr, cfg.GatewayIP)
+	// Point the guest at the controlled resolver so every name lookup goes
+	// through the proxy that enforces the name allowlist. Only when the host
+	// delivered a resolver IP (DNS egress on); otherwise resolv.conf is left
+	// untouched. This runs before the guest resolves anything (the agent
+	// applies it on the post-restore notification, ahead of exec traffic).
+	if err := writeResolvConf(resolvConfPath, cfg.ResolverIP); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox-agent: write resolv.conf: %v\n", err)
+	}
+	fmt.Printf("sandbox-agent: configured %s addr=%s gateway=%s resolver=%s\n", guestNetIface, addr, cfg.GatewayIP, cfg.ResolverIP)
+}
+
+// resolvConfPath is the guest resolver configuration file. It is a package var
+// so the write is unit-testable against a temp path.
+const resolvConfPath = "/etc/resolv.conf"
+
+// writeResolvConf points the guest's resolver at resolverIP by writing a single
+// `nameserver <resolverIP>` line, so every name lookup goes through the
+// controlled DNS proxy (the only address the egress chain allows on port 53).
+// The write replaces the file in full, so it is idempotent: re-delivery of the
+// same resolver yields identical content rather than appended lines. An empty
+// resolverIP is a no-op so the feature-off path never clobbers an existing
+// resolv.conf. The address is config, not a secret.
+func writeResolvConf(path, resolverIP string) error {
+	if resolverIP == "" {
+		return nil
+	}
+	content := fmt.Sprintf("nameserver %s\n", resolverIP)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // volumeFSType is the filesystem the host formats every volume backing with.
