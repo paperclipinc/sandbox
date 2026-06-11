@@ -94,6 +94,18 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	// Resolve the source's tap before forwarding. An empty tap means a
+	// registry/allocator desync, or a query from an IP that has already been
+	// released: there is no set to pin into, so any answer would be unreachable
+	// for the guest. Refuse rather than forward upstream and pin a bogus set.
+	tap := s.tapFor(clientIP)
+	if tap == "" {
+		s.logger.Debug("dns refused: source guest has no tap mapping",
+			"guest", clientIP.String(), "name", q.Name)
+		s.refuse(w, r)
+		return
+	}
+
 	resp, _, err := s.client.Exchange(r, s.upstream)
 	if err != nil || resp == nil {
 		s.logger.Debug("dns upstream failure",
@@ -104,7 +116,6 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	tap := s.tapFor(clientIP)
 	for _, ans := range resp.Answer {
 		a, isA := ans.(*dns.A)
 		if !isA {

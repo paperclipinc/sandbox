@@ -212,6 +212,33 @@ func TestServeDNSTwoGuestsDistinctVerdicts(t *testing.T) {
 	}
 }
 
+func TestServeDNSEmptyTapRefusedNoPin(t *testing.T) {
+	upstream, stop := startUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"egress.test": {8080}})
+	pinner := NewFakePinner()
+	// tapFor returns "" for this guest: a registry/allocator desync, or a query
+	// from an IP that has already been released. The proxy must not pin into a
+	// bogus set and must not hand the guest an answer it cannot use.
+	s := NewServer(reg, pinner, upstream, 60*time.Second, func(net.IP) string {
+		return ""
+	}, nil)
+
+	rw := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rw, queryFor("egress.test", dns.TypeA))
+
+	out := rw.written()
+	if out == nil || out.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED when tap is empty, got %#v", out)
+	}
+	if got := len(pinner.Pins()); got != 0 {
+		t.Errorf("expected no pins when tap is empty, got %d", got)
+	}
+}
+
 func TestServeDNSUpstreamFailureServfailNoPin(t *testing.T) {
 	reg := NewRegistry()
 	guest := net.ParseIP("10.200.0.2")
