@@ -18,6 +18,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
 	"github.com/paperclipinc/sandbox/internal/snapcompat"
+	"github.com/paperclipinc/sandbox/internal/storecrypt"
 	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -97,6 +98,21 @@ type Engine struct {
 	// OCI image (see EngineOpts). Unused for file-path rootfs templates.
 	agentBinPath string
 	busyboxPath  string
+
+	// Encryption at rest is opt-in. When enableEncryption is set and both crypt
+	// and keyProvider are present, each template's snapshot is built inside a
+	// per-template LUKS container (mounted at the template dir) and crypto-shred
+	// at template delete. Off (the default) means the engine behaves exactly as
+	// before: plaintext snapshots on disk. crypt is an interface so engine tests
+	// inject a fake that uses a plain temp dir as the mount; the real
+	// storecrypt.Manager satisfies it. encOpen tracks which template containers
+	// are currently open+mounted so the container is opened once and kept open
+	// across all forks of that template (closed/shredded only at template
+	// delete), keeping the hot fork path free of per-fork open+mount.
+	enableEncryption bool
+	crypt            containerManager
+	keyProvider      KeyProvider
+	encOpen          map[string]struct{}
 
 	// buildRootfsFromImage turns an OCI image ref into a bootable rootfs.ext4
 	// at outPath. It is a seam so CreateTemplate can be tested without a
@@ -412,6 +428,19 @@ type EngineOpts struct {
 	// volumes disabled; when EnableVolumes is true NewEngine constructs a
 	// default backend rooted at <dataDir> if this is nil.
 	VolumeBackend *volume.Backend
+	// EnableEncryption turns on at-rest encryption: every template snapshot is
+	// built inside a per-template LUKS container and crypto-shred at delete.
+	// Default false leaves snapshots plaintext on disk (existing behavior).
+	// KeyProvider must be set when true; NewEngine constructs a default
+	// storecrypt.Manager (real cryptsetup) when enabled and CryptManager is nil.
+	EnableEncryption bool
+	// KeyProvider supplies the per-template encryption key. Required when
+	// EnableEncryption is true. PR1 uses an in-memory provider (keys in node
+	// memory only); PR2 swaps in a Secret/KMS-backed provider.
+	KeyProvider KeyProvider
+	// CryptManager is the container manager seam. Nil with EnableEncryption true
+	// makes NewEngine build the real storecrypt.Manager; tests inject a fake.
+	CryptManager containerManager
 }
 
 type Template struct {
@@ -533,6 +562,24 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		env = detected
 	}
 
+	// At-rest encryption is opt-in. When enabled, a key provider is mandatory
+	// (the engine will not silently fall back to plaintext), and the container
+	// manager defaults to the real storecrypt.Manager driving cryptsetup unless
+	// a seam is injected (tests). Disabled leaves crypt/keyProvider nil and the
+	// engine behaves exactly as before.
+	var crypt containerManager
+	var keyProvider KeyProvider
+	if opts.EnableEncryption {
+		if opts.KeyProvider == nil {
+			return nil, fmt.Errorf("encryption enabled but no KeyProvider configured")
+		}
+		keyProvider = opts.KeyProvider
+		crypt = opts.CryptManager
+		if crypt == nil {
+			crypt = storecrypt.New(dataDir, filepath.Join(dataDir, "templates"), storecrypt.DefaultRunner)
+		}
+	}
+
 	tmplMgr := firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer)
 	e := &Engine{
 		dataDir:              dataDir,
@@ -559,6 +606,10 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		busyboxPath:          opts.BusyboxPath,
 		enableVolumes:        opts.EnableVolumes,
 		volBackend:           volBackend,
+		enableEncryption:     opts.EnableEncryption,
+		crypt:                crypt,
+		keyProvider:          keyProvider,
+		encOpen:              make(map[string]struct{}),
 		buildRootfsFromImage: buildRootfsFromImage,
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
@@ -618,6 +669,16 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 	// Runs AFTER the digest verify and BEFORE any Firecracker launch, so an
 	// incompatible snapshot is refused without starting a VM.
 	if err := e.ensureCompatible(snapshotID); err != nil {
+		return nil, err
+	}
+	// At-rest encryption: ensure the template's LUKS container is open and
+	// mounted at the template dir before reading the snapshot. The container is
+	// opened once and kept open across all forks (closed/shredded only at
+	// template delete), so this is a cheap map check on the hot path once the
+	// first fork has opened it. No-op for plaintext templates. Encryption is
+	// below the page cache: the mem mmap CoW restore below reads decrypted pages
+	// from the mounted device, so cross-fork page sharing is preserved.
+	if err := e.ensureTemplateOpen(snapshotID); err != nil {
 		return nil, err
 	}
 	// The drive path embedded in the snapshot points at the template's
@@ -1163,6 +1224,22 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		}
 	}
 
+	// At-rest encryption (opt-in): create and mount a per-template LUKS
+	// container at the template dir BEFORE any seed volume or snapshot is written
+	// so every file the build produces (rootfs copy, seed volumes, mem, vmstate)
+	// lands inside the encrypted container. Sized to the template footprint
+	// (rootfs + seed volumes + headroom, with a floor). No-op when encryption is
+	// disabled, leaving the plaintext path untouched.
+	if e.encryptionEnabled() {
+		volSizes := make([]volSize, 0, len(volumes))
+		for _, spec := range volumes {
+			volSizes = append(volSizes, volSize{sizeBytes: int64(spec.SizeMB) << 20})
+		}
+		if err := e.createTemplateContainer(id, cfg.RootfsPath, volSizes); err != nil {
+			return err
+		}
+	}
+
 	// When volumes are enabled, create one seed backing per template volume and
 	// bake a placeholder drive for it into the snapshot. The seed is an empty
 	// ext4 of the spec size at <dataDir>/templates/<id>/volumes/<name>.ext4; it
@@ -1212,6 +1289,28 @@ func (e *Engine) VerifyTemplate(id string) error {
 	}
 	e.mu.Lock()
 	e.templateDigests[id] = d
+	e.mu.Unlock()
+	return nil
+}
+
+// DeleteTemplate tears a template down. When the template is encrypted it
+// crypto-shreds the container (umount + luksClose + luksErase + remove image),
+// rendering the snapshot bytes unrecoverable; individual fork Terminate never
+// shreds (sibling forks may share the open container). It then removes the
+// template's on-disk directory and drops the cached digest. The shred is
+// idempotent, so deleting a plaintext template (or one already shredded) is
+// safe.
+func (e *Engine) DeleteTemplate(id string) error {
+	if e.encryptionEnabled() {
+		if err := e.shredTemplateContainer(id); err != nil {
+			return err
+		}
+	}
+	if err := e.templateMgr.DeleteTemplate(id); err != nil {
+		return fmt.Errorf("delete template %s: %w", id, err)
+	}
+	e.mu.Lock()
+	delete(e.templateDigests, id)
 	e.mu.Unlock()
 	return nil
 }
