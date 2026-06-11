@@ -108,16 +108,28 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     `kvm-test.yaml`. Sandboxes ARE pods by default. See `docs/husk-pods.md`
     section 6c and `docs/threat-model.md` section 0 (the default execution surface
     is now the unprivileged husk pod).
+  - ✅ Kubernetes conformance proven OBJECT-LEVEL on kind (`kind-e2e-husk`):
+    scheduler truth (the husk pod carries cpu/memory requests, the scheduler binds
+    it, and an over-allocatable probe pod stays Pending: no double-booking);
+    ResourceQuota + LimitRange bounding husk-shaped pods with ZERO custom code (the
+    over-quota pod is rejected by the Kubernetes quota admission); a NetworkPolicy
+    selecting the husk pod (the husk-mode governing egress layer, section 6d); the
+    EXACT PSA level, empirically verified (the husk pod is rejected by a restricted
+    namespace on EXACTLY the documented read-only-snapshot-hostPath +
+    runAsNonRoot-false (`/dev/kvm`) exceptions, the same securityContext minus those
+    exceptions IS admitted into restricted, and a privileged pod IS rejected so PSA
+    is enforcing); and `kubectl get pods` + `kubectl logs` showing the sandboxes.
+    See `docs/husk-pods.md` section 6e.
   - ⬜ Still open (rest of #18): the nested dormant Firecracker VMM coming up
     reliably INSIDE a kind pod so the full claim -> pod -> exec tail GATES on kind
     too (today best-effort in `kind-e2e-husk`, gated in `kvm-test.yaml` with FC on
-    the host); the conformance suite (scheduler truth, ResourceQuota/LimitRange,
-    NetworkPolicy/PSA-restricted, `kubectl get pods`, eviction/preemption/PDB/drain);
-    the BARE-METAL P99 claim-to-first-exec <= 10ms warm-pool benchmark (the
-    shared-CI activation latency is not that target); the full re-derived threat
-    model for the unprivileged-stub escape surface; and fully pod-native snapshot
-    delivery (CAS pull into the pod) plus removing forkd entirely (it stays the
-    builder).
+    the host); the IN-VM enforcement of a NetworkPolicy over the VM tap (needs a
+    KVM-capable kubelet, a bare-metal reference node); eviction / preemption / PDB /
+    drain with checkpoint-or-kill per pool policy (slice 4b); the BARE-METAL P99
+    claim-to-first-exec <= 10ms warm-pool benchmark (slice 5; the shared-CI
+    activation latency is not that target); the full re-derived threat model for the
+    unprivileged-stub escape surface; and fully pod-native snapshot delivery (CAS
+    pull into the pod) plus removing forkd entirely (it stays the builder).
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in
