@@ -60,6 +60,19 @@ func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context,
 	r.Activate = fn
 }
 
+// SetCheckpointForTest injects a fake live-VM checkpointer (the drain seam).
+// The fake records whether the Checkpoint drain policy routed through it and
+// returns the scripted captured/error. nil restores the default.
+func (r *SandboxClaimReconciler) SetCheckpointForTest(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)) {
+	r.Checkpoint = fn
+}
+
+// EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test
+// package so the PDB create-or-update can be envtested directly.
+func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *v1alpha1.SandboxPool) error {
+	return r.ensureHuskPDB(ctx, pool)
+}
+
 // ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
 // controller_test package so the warm-pool lifecycle can be envtested.
 func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {

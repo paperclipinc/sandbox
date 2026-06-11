@@ -90,3 +90,19 @@ rules:
       - list
       - update
       - watch
+  # The husk warm pool is bounded against voluntary disruption (node drain,
+  # eviction) by a PodDisruptionBudget the pool reconciler creates-or-updates
+  # per pool (issue #18, slice 4b), so a drain disrupts at most a bounded number
+  # of warm husk pods at once. Owner-referenced to the pool (GC'd with it).
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch

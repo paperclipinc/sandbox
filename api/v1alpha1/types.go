@@ -141,6 +141,29 @@ const (
 	SnapshotAfterReady SnapshotTrigger = "Ready"
 )
 
+// HuskDrainPolicy governs what happens to an ACTIVE sandbox (a claim that has
+// activated a husk pod) when that husk pod is lost: a node drain, an eviction,
+// or any pod deletion that removes the backing VM. It does not change the
+// warm-pool self-heal (the pool always recreates a deleted dormant slot); it
+// only governs the active sandbox on top of a lost pod.
+type HuskDrainPolicy string
+
+const (
+	// DrainKill is the default: when an active claim's husk pod is lost, the
+	// claim re-pends (Phase Pending, Endpoint/Node cleared) and re-activates on
+	// a replacement dormant slot. The in-VM state of the lost pod is gone; the
+	// agent reconnects to a fresh fork from the template snapshot. This is the
+	// boring, always-available behavior.
+	DrainKill HuskDrainPolicy = "Kill"
+	// DrainCheckpoint asks the controller to checkpoint the live VM (forkd
+	// ForkRunning/CreateSnapshot) BEFORE re-pending, so the agent can resume
+	// from the captured state. The live snapshot only runs where the VMM still
+	// runs (a graceful drain on a KVM-capable kubelet); on an already-deleted
+	// pod there is nothing left to checkpoint, so Checkpoint degrades to the
+	// same re-pend as Kill, with a logged note.
+	DrainCheckpoint HuskDrainPolicy = "Checkpoint"
+)
+
 type SandboxPoolSpec struct {
 	TemplateRef   LocalObjectReference `json:"templateRef"`
 	Replicas      int32                `json:"replicas"`
@@ -155,6 +178,16 @@ type SandboxPoolSpec struct {
 
 	// Where to store snapshot artifacts on the node.
 	SnapshotStorage string `json:"snapshotStorage,omitempty"`
+
+	// DrainPolicy governs an active sandbox (a claim that activated a husk pod)
+	// when that husk pod is lost (drain, eviction, deletion). Kill (the default)
+	// re-pends the claim onto a replacement dormant slot. Checkpoint attempts a
+	// live-VM snapshot first where the VMM still runs, then re-pends. Only used
+	// in husk mode.
+	// +kubebuilder:validation:Enum=Kill;Checkpoint
+	// +kubebuilder:default=Kill
+	// +optional
+	DrainPolicy HuskDrainPolicy `json:"drainPolicy,omitempty"`
 }
 
 type SandboxPoolStatus struct {

@@ -47,6 +47,18 @@ spec:
             type: object
           spec:
             properties:
+              drainPolicy:
+                default: Kill
+                description: |-
+                  DrainPolicy governs an active sandbox (a claim that activated a husk pod)
+                  when that husk pod is lost (drain, eviction, deletion). Kill (the default)
+                  re-pends the claim onto a replacement dormant slot. Checkpoint attempts a
+                  live-VM snapshot first where the VMM still runs, then re-pends. Only used
+                  in husk mode.
+                enum:
+                - Kill
+                - Checkpoint
+                type: string
               replicas:
                 format: int32
                 type: integer

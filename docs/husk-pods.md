@@ -711,9 +711,121 @@ securityContext admitted, a privileged pod rejected); `kubectl get pods` +
 **OPEN:** the IN-VM enforcement of the VM tap by the pod netns (a NetworkPolicy
 actually dropping the VM's egress) needs a KVM-capable kubelet running the husk
 pod's VMM, a bare-metal reference node, not the shared kind runner where the
-nested VMM does not reliably come up; eviction / preemption / PDB / drain with
-checkpoint-or-kill per pool policy (slice 4b); the bare-metal P99
+nested VMM does not reliably come up; the live-VM checkpoint on a Checkpoint
+drain actually surviving end to end (slice 4b is PROVEN object-level, see section
+6f below; the live snapshot itself is bare metal); the bare-metal P99
 claim-to-first-exec benchmark (slice 5).
+
+## 6f. Eviction, disruption, and drain (slice 4b)
+
+A husk pod is an ordinary Kubernetes pod, so it is subject to the ordinary
+disruption surface: a node drain (`kubectl drain`, a cluster-autoscaler
+scale-down, a spot reclaim), an eviction, a preemption, or an operator deleting
+the pod. This slice makes that surface BOUNDED and SELF-HEALING, and lets a pool
+choose what happens to an active sandbox when its backing pod is lost.
+
+### The PodDisruptionBudget (bounded disruption)
+
+The husk-mode pool reconcile creates a `policy/v1` PodDisruptionBudget named
+`<pool>-husk`, owner-referenced to the pool, selecting the pool's husk pods
+(`agentrun.dev/pool=<name>,agentrun.dev/husk=true`). Its `minAvailable` is
+`max(1, Replicas-1)`.
+
+BUDGET CHOICE (documented): `minAvailable = max(1, Replicas-1)` means a VOLUNTARY
+drain disrupts AT MOST ONE husk pod at a time for a pool of two or more, so the
+warm pool stays usable while a node drains one slot at a time; for a
+single-replica pool the floor of 1 means the lone warm slot is not voluntarily
+evicted (the operator must `--force` or wait, an explicit choice). This trades
+drain speed for warm-pool availability, the right default for a latency-sensitive
+warm pool: a claim should almost always find a dormant slot even mid-drain. The
+bound is VOLUNTARY-disruption only: a node hard-crash still takes its husk pods,
+and the self-heal below recreates them.
+
+### Self-heal (Owns(pods) + the deficit logic)
+
+Each husk pod is owner-referenced to its pool, and the pool reconciler watches
+its pods (`Owns(&corev1.Pod{})`). A husk pod delete (drain, eviction, crash,
+`kubectl delete`) therefore enqueues the owning pool, and `reconcileHuskPods`
+recreates the replacement so the warm pool count returns to `Replicas` without
+waiting for the periodic requeue. The warm pool self-heals a lost dormant
+slot with no operator action.
+
+The warm pool is maintained INDEPENDENT of the snapshot build. The husk-mode
+reconcile runs `reconcileHuskPods` FIRST and unconditionally, then attempts the
+template snapshot build best-effort; a build that does not produce a ready
+snapshot (or errors) is logged and reported in status but NEVER short-circuits
+the warm-pool maintenance. The husk pods schedule DORMANT and cannot ACTIVATE
+until the snapshot is present on their node, but the pool of pod objects exists
+and self-heals regardless of build state. This decoupling is what lets the
+warm pool come up and self-heal on kind, where forkd cannot boot a VM to build
+the snapshot (the nested-VMM boundary) so a ready snapshot never appears. The
+reconcile also requeues on a bounded interval (a shorter cadence while the
+snapshot is not yet built, the steady 30s once ready), so the warm pool
+re-converges to `Replicas` even if a pod delete event is missed, and a later
+reconcile tightens each husk pod's nodeAffinity onto the snapshot-holding node
+once a holder appears.
+
+### Claim re-pend on husk pod loss (resilience)
+
+When the husk pod backing an ACTIVE claim is lost, the claim must not keep
+advertising a dead endpoint. Two triggers drive the re-pend, both implemented:
+
+1. Every claim reconcile of a Ready (active) claim first runs `checkHuskPodLost`:
+   if the claim's backing husk pod (`Status.SandboxID` = the pod name, labeled
+   `agentrun.dev/claim=<claim>`) is missing or terminating, the claim re-pends.
+2. The husk claim reconciler watches pods (`Watches(&corev1.Pod{})`) and maps a
+   pod event to the claim named in the pod's `agentrun.dev/claim` label, so a pod
+   delete promptly reconciles the active claim instead of waiting for its own
+   requeue.
+
+Re-pend sets `Phase Pending`, clears `Status.Endpoint`/`Node`/`SandboxID`,
+records the claim-pending metric, and requeues. The next reconcile re-activates
+the claim on a replacement dormant slot (the self-heal above produced one), so a
+lost sandbox transparently re-activates from the template snapshot.
+
+### drainPolicy (Kill default vs Checkpoint)
+
+`SandboxPoolSpec.drainPolicy` governs the active sandbox on a lost pod:
+
+- `Kill` (the default): re-pend as above. The lost pod's in-VM state is gone; the
+  agent reconnects to a fresh fork from the template snapshot. Boring and always
+  available.
+- `Checkpoint`: before re-pending, the controller attempts a live-VM snapshot
+  through the checkpointer seam (forkd `ForkRunning`/`CreateSnapshot`), so the
+  agent can resume from captured state. The live snapshot ONLY runs where the VMM
+  still runs, a graceful drain on a KVM-capable kubelet. On an already-deleted
+  pod there is nothing left to checkpoint, so Checkpoint degrades to the same
+  re-pend as Kill, with a logged note. The controller plumbs the decision and
+  calls the seam where the pod is still reachable; the live snapshot SURVIVING a
+  drain end to end is bare-metal work (it needs the VMM running in the husk pod).
+
+### The unschedulable-husk autoscaler signal
+
+A husk pod carries real cpu/memory requests (scheduler truth, section 6e). A
+pending husk pod whose requests exceed node allocatable stays `Pending` with a
+`PodScheduled` condition of reason `Unschedulable`. This is the NATIVE
+cluster-autoscaler scale-up signal: a cluster-autoscaler (or Karpenter) watches
+for exactly this Pending+Unschedulable pod and provisions a node group, after
+which the husk pod schedules. No custom controller code produces the signal; it
+is the stock scheduler.
+
+### PROVEN vs OPEN for slice 4b
+
+**PROVEN (object-level on kind, `kind-e2e-husk`):** the pool's
+PodDisruptionBudget exists with the right selector and `minAvailable`; the warm
+pool self-heals a deleted husk pod back to `Replicas` with a new pool-owned pod;
+a claim re-pends (Phase Pending, endpoint cleared) when its husk pod is deleted
+and the pool recreates a replacement; an over-allocatable husk-shaped pod stays
+Pending+Unschedulable (the autoscaler signal). The drainPolicy default (Kill) and
+the Checkpoint seam routing are proven in the controller envtest suite.
+
+**OPEN (bare metal / follow-up):** the live-VM Checkpoint snapshot actually
+surviving a drain end to end (needs the VMM running in the husk pod on a
+KVM-capable kubelet); the FULL re-activate onto a Ready dormant pod after a
+re-pend (the nested-VMM boundary on kind, gated in `kvm-test.yaml` where
+Firecracker runs on the host); preemption priority-class tuning and
+Karpenter-specific provisioner hints; the re-derived threat model for the
+drain/checkpoint surface; a drain/re-pend latency benchmark.
 
 ## 7. Proven vs remaining
 

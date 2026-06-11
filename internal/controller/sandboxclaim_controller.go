@@ -19,8 +19,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -86,6 +88,12 @@ type SandboxClaimReconciler struct {
 	// Activate is the husk-activation seam. Nil defaults to ActivateHuskPod.
 	// Tests inject a fake.
 	Activate huskActivator
+
+	// Checkpoint is the live-VM checkpoint seam used under a Checkpoint
+	// DrainPolicy when an active claim's husk pod is lost. Nil defaults to
+	// defaultHuskCheckpointer. Tests inject a fake to record the call. Only used
+	// when EnableHuskPods is true.
+	Checkpoint huskCheckpointer
 
 	// eventFilter optionally restricts which claims this reconciler watches. Nil
 	// watches all claims (the production default: a deployment runs exactly one
@@ -155,8 +163,31 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, &claim)
 	}
 
-	// Already assigned; drive maxLifetime / idleTimeout reaping.
+	// Already assigned. In husk mode, FIRST check whether the backing husk pod
+	// was lost (a node drain, an eviction, a deletion): a Ready claim must not
+	// keep advertising a dead endpoint. A lost pod re-pends the claim per the
+	// pool's DrainPolicy (Kill re-pends; Checkpoint snapshots the live VM first
+	// where reachable, then re-pends). This runs before the lifetime path so an
+	// enqueued pod-delete event promptly re-pends. When the pod is still healthy,
+	// fall through to the normal lifetime reaping.
 	if claim.Status.Phase == v1alpha1.SandboxReady {
+		if r.EnableHuskPods {
+			lost, lostPod, err := r.checkHuskPodLost(ctx, &claim)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if lost {
+				var pool v1alpha1.SandboxPool
+				if perr := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.PoolRef.Name}, &pool); perr != nil {
+					// The pool is gone too: re-pend with Kill semantics (an empty
+					// DrainPolicy defaults to Kill in rependOnHuskPodLost).
+					if client.IgnoreNotFound(perr) != nil {
+						return ctrl.Result{}, perr
+					}
+				}
+				return r.rependOnHuskPodLost(ctx, &claim, &pool, lostPod)
+			}
+		}
 		return r.reconcileLifetime(ctx, &claim)
 	}
 
@@ -792,9 +823,30 @@ func (r *SandboxClaimReconciler) resolveSecrets(ctx context.Context, namespace s
 }
 
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	b := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.SandboxClaim{})
+	b := ctrl.NewControllerManagedBy(mgr)
+	// The claim event filter is scoped to the PRIMARY claim source only (not the
+	// pod Watches below), so the test harness can run a raw and a husk reconciler
+	// on one manager: each filters the CLAIMS it owns, while the husk pod watch
+	// stays unfiltered (a pod carries no claim label, so a global filter would
+	// drop every mapped pod event and break the re-pend trigger).
 	if r.eventFilter != nil {
-		b = b.WithEventFilter(r.eventFilter)
+		b = b.For(&v1alpha1.SandboxClaim{}, builder.WithPredicates(r.eventFilter))
+	} else {
+		b = b.For(&v1alpha1.SandboxClaim{})
+	}
+	// In husk mode, watch husk pods and map a pod event to the claim named in its
+	// agentrun.dev/claim label. A husk pod delete (drain, eviction, kubectl
+	// delete) then promptly reconciles the active claim, which re-pends per the
+	// pool's DrainPolicy instead of waiting for the claim's own periodic requeue.
+	// The mapped reconcile re-Gets the claim and routes through checkHuskPodLost,
+	// so a claim the husk reconciler does not own (no husk-test label, in the
+	// test harness) is simply a no-op reconcile for it. The raw reconciler does
+	// not register this watch (no husk pods).
+	if r.EnableHuskPods {
+		b = b.Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(huskPodToClaim),
+		)
 	}
 	// A name lets the test harness run a raw and a husk claim reconciler on one
 	// manager (controller-runtime auto-names by kind and would collide). The

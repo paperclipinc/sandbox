@@ -14,6 +14,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/controller"
 	"github.com/paperclipinc/sandbox/internal/husk"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -42,7 +43,28 @@ var (
 	// setHuskTestActivator before creating their claim.
 	huskTestActivatorMu sync.Mutex
 	huskTestActivator   func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
+
+	// huskTestCheckpointerMu guards the swappable live-VM checkpointer the
+	// suite's husk reconciler routes a Checkpoint drain policy through.
+	huskTestCheckpointerMu sync.Mutex
+	huskTestCheckpointer   func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)
 )
+
+// setHuskTestCheckpointer installs the checkpointer the suite reconciler uses
+// for the Checkpoint drain policy; nil falls back to the default.
+func setHuskTestCheckpointer(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)) {
+	huskTestCheckpointerMu.Lock()
+	defer huskTestCheckpointerMu.Unlock()
+	huskTestCheckpointer = fn
+}
+
+// currentHuskTestCheckpointer returns the installed checkpointer, or nil so the
+// reconciler uses its default (re-pend without a captured snapshot).
+func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error) {
+	huskTestCheckpointerMu.Lock()
+	defer huskTestCheckpointerMu.Unlock()
+	return huskTestCheckpointer
+}
 
 // setHuskTestActivator installs the husk activator the suite reconciler uses.
 func setHuskTestActivator(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
@@ -163,6 +185,12 @@ func TestMain(m *testing.M) {
 	huskClaim.OnlyLabel(controller.HuskTestClaimLabel)
 	huskClaim.SetActivateForTest(func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
 		return currentHuskTestActivator()(ctx, addr, tlsConf, req)
+	})
+	huskClaim.SetCheckpointForTest(func(c context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error) {
+		if fn := currentHuskTestCheckpointer(); fn != nil {
+			return fn(c, claim, pod)
+		}
+		return false, nil
 	})
 	if err := huskClaim.SetupWithManager(mgr); err != nil {
 		panic(err)

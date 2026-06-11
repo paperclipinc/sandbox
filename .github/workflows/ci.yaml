@@ -1018,6 +1018,218 @@ jobs:
           else
             echo "HUSK-KIND-VMM: the husk stub console did not yet show the dormant/serving line (the nested VMM bring-up is the documented kind boundary). kubectl get pods + the logs path itself are proven above; the stub console line is gated in kvm-test.yaml."
           fi
+      - name: Eviction 1, the pool's PodDisruptionBudget bounds drain disruption
+        # OBJECT-LEVEL (the VMM need not boot): the husk-mode pool reconcile
+        # creates a policy/v1 PodDisruptionBudget named <pool>-husk that selects
+        # the pool's husk pods and pins minAvailable = max(1, Replicas-1), so a
+        # node drain disrupts AT MOST ONE warm slot at a time. Assert the PDB
+        # exists with the right selector and minAvailable. A missing PDB is an
+        # EVICTION conformance failure (the prior steps already gated the pool
+        # creating husk pods), not a SETUP issue.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== PDB diagnostics ==="
+            kubectl get pdb -A || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=80 || true
+          }
+          trap dump ERR
+
+          # The pool is husk-e2e (replicas: 2), so minAvailable = max(1, 2-1) = 1.
+          found=0
+          for i in $(seq 1 30); do
+            if kubectl -n default get pdb husk-e2e-husk >/dev/null 2>&1; then found=1; break; fi
+            echo "  [${i}/30] waiting for PodDisruptionBudget husk-e2e-husk"
+            sleep 5
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "EVICTION-FAILED: the pool created no PodDisruptionBudget (husk-e2e-husk); a node drain would not be bounded"
+            kubectl get pdb -A || true
+            exit 1
+          fi
+          sel_pool=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.agentrun\.dev/pool}')
+          sel_husk=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.agentrun\.dev/husk}')
+          minavail=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.minAvailable}')
+          echo "PDB selector: pool='${sel_pool}' husk='${sel_husk}', minAvailable='${minavail}'"
+          [ "$sel_pool" = "husk-e2e" ] || { echo "EVICTION-FAILED: PDB pool selector is not husk-e2e"; exit 1; }
+          [ "$sel_husk" = "true" ] || { echo "EVICTION-FAILED: PDB husk selector is not true"; exit 1; }
+          [ "$minavail" = "1" ] || { echo "EVICTION-FAILED: PDB minAvailable='${minavail}', want 1 (max(1, Replicas-1) for replicas: 2)"; exit 1; }
+          echo "PASS: the pool's PodDisruptionBudget exists, selects the husk pods, and bounds drain to minAvailable=1"
+      - name: Eviction 2, the warm pool self-heals a deleted husk pod
+        # OBJECT-LEVEL self-heal: a husk pod is owner-referenced to its pool, so
+        # deleting one enqueues the pool (Owns(pods)) and the deficit logic
+        # recreates the replacement. Record a husk pod name, delete it, and assert
+        # the husk pod count returns to Replicas with a NEW pod (a different name)
+        # owned by the pool. This proves the warm pool recovers a lost dormant
+        # slot without an operator. A failure here is an EVICTION conformance
+        # failure (the self-heal regressed), not a SETUP issue.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== self-heal diagnostics ==="
+            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
+          }
+          trap dump ERR
+
+          before=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+            --field-selector=status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | grep . | sort)
+          echo "husk pods before delete:"; printf '%s\n' "$before"
+          victim=$(printf '%s\n' "$before" | head -1)
+          [ -n "$victim" ] || { echo "EVICTION-FAILED: no husk pod to delete (self-heal precondition)"; exit 1; }
+          echo "deleting victim husk pod: $victim"
+          kubectl -n default delete pod "$victim" --wait=false
+
+          # The pool recreates the replacement: the count returns to 2 (Replicas)
+          # AND a name not in the before-set appears (a genuinely new pod).
+          healed=0
+          for i in $(seq 1 36); do
+            now=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+              --field-selector=status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+              | grep . | sort)
+            count=$(printf '%s\n' "$now" | grep -c . || true)
+            newpods=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$now") | grep . || true)
+            echo "  [${i}/36] husk pod count: ${count}, new pods: '$(printf '%s' "$newpods" | tr '\n' ' ')'"
+            if [ "$count" -ge 2 ] && [ -n "$newpods" ]; then healed=1; break; fi
+            sleep 5
+          done
+          if [ "$healed" -ne 1 ]; then
+            echo "EVICTION-FAILED: the warm pool did not self-heal the deleted husk pod back to Replicas with a new pod"
+            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            exit 1
+          fi
+          # The new pod is owned by the pool (owner-reference, the GC + self-heal edge).
+          newpod=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$now") | grep . | head -1)
+          owner=$(kubectl -n default get pod "$newpod" -o jsonpath='{.metadata.ownerReferences[0].name}')
+          [ "$owner" = "husk-e2e" ] || { echo "EVICTION-FAILED: the replacement husk pod $newpod is not owned by the pool (owner='${owner}')"; exit 1; }
+          echo "PASS: the warm pool self-healed; new husk pod $newpod owned by the pool replaced the deleted $victim"
+      - name: Eviction 3, a claim re-pends when its husk pod is deleted (object-level)
+        # OBJECT-LEVEL re-pend (the full re-activate needs a Ready dormant pod,
+        # the nested-VMM boundary). We drive a claim to point at a husk pod at the
+        # object level: stamp a husk pod with agentrun.dev/claim and set the
+        # claim's Status.Node/Endpoint/SandboxID, then delete that pod and assert
+        # the claim goes Pending (re-pend) and the pool recreates a replacement
+        # husk pod. The Watches(pod)->claim mapping + checkHuskPodLost drive this.
+        # The full re-activate onto a Ready replacement completes where the VMM
+        # runs (kvm-test.yaml / bare metal), documented in docs/husk-pods.md.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== re-pend diagnostics ==="
+            kubectl -n default get sandboxclaim repend-probe -o yaml 2>/dev/null || true
+            kubectl get pods -n default -l agentrun.dev/husk=true -o wide || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
+          }
+          trap dump ERR
+
+          # Pick a husk pod to back the probe claim.
+          backing=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+            --field-selector=status.phase!=Failed -o jsonpath='{.items[0].metadata.name}')
+          [ -n "$backing" ] || { echo "EVICTION-FAILED: no husk pod to back the re-pend probe"; exit 1; }
+          podip=$(kubectl -n default get pod "$backing" -o jsonpath='{.status.podIP}')
+          podnode=$(kubectl -n default get pod "$backing" -o jsonpath='{.spec.nodeName}')
+          echo "backing husk pod $backing on node '${podnode}' ip '${podip}'"
+
+          # Create the probe claim, then stamp it active on the backing pod at the
+          # object level (label the pod claimed; set the claim status). This is the
+          # object-level stand-in for a real husk activation (which needs the VMM).
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: agentrun.dev/v1alpha1
+          kind: SandboxClaim
+          metadata:
+            name: repend-probe
+            namespace: default
+          spec:
+            poolRef:
+              name: husk-e2e
+          YAML
+          kubectl -n default label pod "$backing" agentrun.dev/claim=repend-probe --overwrite
+          # Patch the claim status to "active on the backing pod" via the status
+          # subresource so checkHuskPodLost sees it as Ready on that pod.
+          kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
+            -p "{\"status\":{\"phase\":\"Ready\",\"node\":\"${podnode}\",\"endpoint\":\"${podip}:9091\",\"sandboxID\":\"${backing}\"}}"
+
+          # Delete the backing pod: the claim must re-pend (Phase Pending) and the
+          # pool must recreate a replacement husk pod.
+          kubectl -n default delete pod "$backing" --wait=false
+
+          repended=0
+          for i in $(seq 1 36); do
+            phase=$(kubectl -n default get sandboxclaim repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            echo "  [${i}/36] repend-probe phase: '${phase}'"
+            if [ "$phase" = "Pending" ]; then repended=1; break; fi
+            sleep 5
+          done
+          if [ "$repended" -ne 1 ]; then
+            echo "EVICTION-FAILED: the claim did not re-pend after its husk pod was deleted (HuskPodLost trigger regressed)"
+            exit 1
+          fi
+          # Endpoint/Node cleared on re-pend.
+          ep=$(kubectl -n default get sandboxclaim repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
+          [ -z "$ep" ] || { echo "EVICTION-FAILED: re-pended claim still advertises endpoint '${ep}'"; exit 1; }
+          # The pool recreates a replacement husk pod (warm pool restored).
+          poolcount=0
+          for i in $(seq 1 24); do
+            n=$(kubectl get pods -n default -l agentrun.dev/husk=true --field-selector=status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            echo "  [${i}/24] husk pod count after re-pend: $n"
+            if [ "$n" -ge 2 ]; then poolcount=1; break; fi
+            sleep 5
+          done
+          [ "$poolcount" -eq 1 ] || { echo "EVICTION-FAILED: the pool did not recreate a replacement husk pod after the re-pend"; exit 1; }
+          echo "PASS: the claim re-pended (Pending, endpoint cleared) on husk pod loss and the pool recreated a replacement. The full re-activate onto a Ready dormant pod completes where the VMM runs (kvm-test.yaml / bare metal)."
+          kubectl -n default delete sandboxclaim repend-probe --ignore-not-found=true --wait=false || true
+      - name: Eviction 4, an over-allocatable husk-shaped pod is Unschedulable (autoscaler signal)
+        # The native cluster-autoscaler pending signal: a husk-shaped pod whose
+        # requests exceed node allocatable stays Pending with an Unschedulable
+        # condition. This is the same scheduler-truth probe pattern as Conformance
+        # 1, asserted here with the EXPLICIT Unschedulable condition so the
+        # autoscaler-trigger narrative is gated (a cluster-autoscaler watches for
+        # exactly this Pending+Unschedulable to scale a node group up).
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== unschedulable diagnostics ==="
+            kubectl -n default describe pod husk-unsched-probe 2>/dev/null || true
+          }
+          trap dump ERR
+
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: husk-unsched-probe
+            namespace: default
+            labels:
+              agentrun.dev/husk: "true"
+          spec:
+            restartPolicy: Always
+            containers:
+              - name: husk-stub
+                image: busybox:stable
+                command: ["sleep", "3600"]
+                resources:
+                  requests:
+                    cpu: "1000"
+                    memory: 512Mi
+          YAML
+
+          unsched=0
+          for i in $(seq 1 18); do
+            phase=$(kubectl -n default get pod husk-unsched-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            reason=$(kubectl -n default get pod husk-unsched-probe \
+              -o jsonpath='{range .status.conditions[?(@.type=="PodScheduled")]}{.reason}{end}' 2>/dev/null || true)
+            echo "  [${i}/18] husk-unsched-probe phase='${phase}' PodScheduled.reason='${reason}'"
+            if [ "$phase" = "Pending" ] && [ "$reason" = "Unschedulable" ]; then unsched=1; break; fi
+            sleep 3
+          done
+          probe_node=$(kubectl -n default get pod husk-unsched-probe -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+          kubectl -n default delete pod husk-unsched-probe --ignore-not-found=true --wait=false || true
+          if [ "$unsched" -ne 1 ] || [ -n "$probe_node" ]; then
+            echo "EVICTION-FAILED: the over-allocatable husk-shaped pod was not Pending+Unschedulable (nodeName='${probe_node}'); the native autoscaler signal regressed"
+            exit 1
+          fi
+          echo "PASS: an over-allocatable husk-shaped pod stays Pending with an Unschedulable condition (the native cluster-autoscaler scale-up signal)"
       - name: Best effort, husk pods reach Ready and a claim activates one (full claim -> exec tail)
         # The husk pod becomes Ready ONLY when its dormant Firecracker VMM comes
         # up INSIDE the kind pod (Firecracker nested in a kind-node container).

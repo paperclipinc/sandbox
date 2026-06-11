@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,9 +61,13 @@ type SandboxPoolReconciler struct {
 // husk pod warm-pool path (issue #18) creates and deletes Pods, so the
 // reconciler needs create;delete on pods on top of the get;list;watch the forkd
 // discovery already declares.
+// The husk warm pool is bounded against voluntary disruption (node drain,
+// eviction) by a PodDisruptionBudget the reconciler creates-or-updates per pool
+// (issue #18, slice 4b), so it needs the policy/poddisruptionbudgets verbs.
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -84,33 +89,57 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	desired := pool.Spec.Replicas
 
 	// Husk pod warm-pool path (issue #18, the pod-native default). When enabled,
-	// the pool does BOTH: it FIRST ensures the template snapshot is built on the
-	// target nodes (the same createSnapshotsOnNodes build path raw-forkd uses, so
-	// <dataDir>/templates/<id>/snapshot exists on those nodes), THEN maintains a
-	// warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes so
-	// their read-only snapshot hostPath resolves.
+	// the pool does TWO INDEPENDENT things: it maintains a warm pool of
+	// pre-scheduled DORMANT husk pods, AND it builds the template snapshot on the
+	// target nodes the pods activate against. These two are DECOUPLED: the warm
+	// pool of husk pods is maintained to Replicas REGARDLESS of whether the
+	// snapshot is built yet. The husk pods schedule dormant and cannot ACTIVATE
+	// until the snapshot is present on their node, but the pool of pod objects
+	// must exist and self-heal independent of the build (a deleted husk pod is
+	// recreated even while the build is incomplete or failing).
 	//
-	// ORDERING + PLACEMENT COUPLING: the snapshot build runs before the husk pods
-	// so reconcileHuskPods can read the snapshot-holding node set
-	// (NodesWithTemplate) and pin each husk pod to it via nodeAffinity. The first
-	// reconcile of a fresh pool may build the snapshot but find no holder yet (the
-	// build registers the node in the same pass); the husk pods then fall back to
-	// the kvm nodeSelector and a later reconcile tightens the affinity once the
-	// registry reports the holders. The raw-forkd path below (flag off, behind
-	// --enable-raw-forkd) is the fork-per-claim fallback and does NOT create husk
-	// pods.
+	// ORDERING: reconcileHuskPods runs FIRST and is NEVER gated by the build, so a
+	// build that cannot complete (for example a node that cannot boot a VM to
+	// snapshot) does not stall warm-pool maintenance or self-heal. The build then
+	// runs best-effort: its result is reported in status and a failure only
+	// requeues to keep trying; it never short-circuits before the warm pool is
+	// maintained.
+	//
+	// PLACEMENT COUPLING: when a snapshot-holding node is known (NodesWithTemplate),
+	// each husk pod is pinned to it via nodeAffinity; when no holder exists yet
+	// (build incomplete), the husk pods fall back to the kvm nodeSelector and a
+	// later reconcile tightens the affinity once the registry reports the holders.
+	// The raw-forkd path below (flag off, behind --enable-raw-forkd) is the
+	// fork-per-claim fallback and does NOT create husk pods.
 	if r.EnableHuskPods {
-		// Build the snapshot on the target nodes first. A build error is logged
-		// and we requeue; we still attempt the husk pods with whatever holders
-		// exist so a transient build hiccup does not stall the warm pool forever.
-		if err := r.ensureTemplateBuilt(ctx, &pool, &template); err != nil {
-			logger.Error(err, "failed to build template snapshot for husk pool")
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-
+		// Warm pool FIRST, unconditionally: maintain the husk pod count to
+		// Replicas and self-heal a deleted slot. This is decoupled from the
+		// snapshot build so a build that does not complete never blocks the warm
+		// pool. A reconcileHuskPods error (an API failure listing/creating pods)
+		// requeues; the build is then skipped this pass and retried on the requeue.
 		warm, err := r.reconcileHuskPods(ctx, &pool, &template)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
+		// Build the snapshot the husk pods activate against, BEST-EFFORT. A build
+		// error is logged and reported in status, and we requeue to keep trying,
+		// but it does NOT return before the warm pool was maintained above. On a
+		// node that cannot snapshot (the documented nested-VMM boundary on kind)
+		// the build never completes, yet the warm pool above is still maintained
+		// and self-heals.
+		buildErr := r.ensureTemplateBuilt(ctx, &pool, &template)
+		if buildErr != nil {
+			logger.Error(buildErr, "failed to build template snapshot for husk pool (warm pool still maintained)")
+		}
+
+		// Bound voluntary disruption of the warm pool: a PodDisruptionBudget so a
+		// node drain evicts husk pods one at a time instead of collapsing the pool.
+		// A PDB error is logged and we requeue; it does not block the warm-pool
+		// status update (the pool is still functional, just unbounded on drain).
+		if err := r.ensureHuskPDB(ctx, &pool); err != nil {
+			logger.Error(err, "failed to ensure husk PDB")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		readySnapshots := r.readySnapshotCount(templateID)
@@ -132,6 +161,16 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		})
 		if err := r.Status().Update(ctx, &pool); err != nil {
 			return ctrl.Result{}, err
+		}
+		// Bounded periodic requeue so the warm pool re-converges to Replicas even
+		// if a husk pod DELETE event is somehow missed (Owns(pods) normally
+		// enqueues the pool on delete, but the requeue is the belt-and-suspenders
+		// guarantee that self-heal is not event-dependent). When the snapshot is
+		// not built yet (no holder, or the build errored) requeue sooner to keep
+		// driving the build AND to tighten the husk pod nodeAffinity once a holder
+		// appears; once everything is ready, fall back to the slower steady cadence.
+		if buildErr != nil || readySnapshots < desired {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -336,8 +375,16 @@ func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]i
 }
 
 func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Owns(pods): a husk pod is owner-referenced to its pool, so a husk pod
+	// delete (a node drain, an eviction, an operator kubectl delete) enqueues the
+	// owning pool. The deficit logic in reconcileHuskPods then recreates the
+	// replacement, so the warm pool SELF-HEALS a lost dormant slot without
+	// waiting for the periodic 30s requeue. Owns(pods) also covers the
+	// owner-referenced husk PodDisruptionBudget for free via the same ownership
+	// edge for pods; the PDB itself is reconciled on the pool's own events.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.SandboxPool{}).
+		Owns(&corev1.Pod{}).
 		Complete(r)
 }
 
