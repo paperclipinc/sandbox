@@ -108,6 +108,38 @@ NOT bare-metal figures.
 > harness exists to eliminate. The aggregation rules and what is exact vs
 > approximate are documented in [`docs/metering.md`](docs/metering.md).
 
+## Husk-stub activation latency datapoint
+
+A separate datapoint measures the claim-time cost of the husk-pods prepare/
+activate split (issue #18; see [`docs/husk-pods.md`](docs/husk-pods.md)). In that
+model the Firecracker VMM is pre-started DORMANT before a claim arrives
+(prepare), so the only cost paid at claim time is activating it: loading the
+template snapshot in place, resuming, and waiting for the guest agent to answer
+over vsock. This datapoint is that activation latency, NOT a full VMM spawn.
+
+It is produced by the **husk-stub CI phase** in the `KVM Integration Test`
+workflow. The phase reuses the bench template snapshot and, for each iteration,
+starts a fresh dormant `cmd/husk-stub` (prepare), runs `husk-stub --activate`
+to activate the snapshot in place, asserts the `ActivateResult` is `OK`, and on
+the first iteration execs a real command through the guest agent over the
+returned vsock path. The gate is activate OK AND a working exec. It publishes
+nearest-rank P50/P99 of the stub-measured `LatencyMs` (load-start to
+guest-ready) to the run's job summary.
+
+These are **SHARED-CI-CLASS** (noisy `ubuntu-latest`), reproducible per run, and
+NOT bare-metal figures. The **<= 10ms warm activation figure is the bare-metal
+reference-node TARGET (#18/#15), not a shared-CI claim**: this phase does not
+assert it and the shared-CI activation latency must not be quoted as achieving
+it.
+
+> Populated from the CI run. The min/P50/P99/max activation latency table is
+> appended to the run's job summary, and the per-iteration result JSON plus the
+> raw latencies are uploaded as the `husk-stub-activation` workflow artifact. See
+> the most recent `KVM Integration Test` run summary for the current shared-CI-
+> class activation latency. As with the other tables we do not paste numbers
+> here: a hand-copied number would be exactly the kind of unverifiable claim this
+> harness exists to eliminate.
+
 ## Open (not yet measured)
 
 These are explicitly out of scope for the current harness and tracked in
@@ -115,7 +147,9 @@ These are explicitly out of scope for the current harness and tracked in
 
 - **Bare-metal reference numbers** on the Hetzner + Talos reference node. The
   CI numbers above are shared-runner-class; the representative numbers need the
-  reference hardware to exist.
+  reference hardware to exist. This includes the **<= 10ms warm husk-pod
+  activation TARGET** (#18/#15): the husk-stub activation latency datapoint above
+  is shared-CI-class and is explicitly not that bare-metal target.
 - **Claim to first-exec end to end through the controller** on a real cluster
   (claim a `Sandbox` CRD, wait for the pool to hand back a forked VM, exec):
   the current harness measures the engine data path, not the controller +

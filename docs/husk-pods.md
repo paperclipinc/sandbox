@@ -147,7 +147,67 @@ would mean CoW does NOT survive the per-pod memcg boundary and the husk-pods
 density argument would need rethinking; this document would be updated to report
 that.
 
-## 3. The honest nuance: first-faulter charging is not fair per-tenant accounting
+## 3. Prepare and activate: the dormant-VMM stub
+
+The husk-pods model splits a sandbox's bring-up into two phases with very
+different costs. `internal/husk` (driven by `cmd/husk-stub`) is the stub that
+implements that split today, ahead of the controller migration.
+
+- **Prepare (pre-claim, off the hot path).** The stub brings up a DORMANT
+  Firecracker VMM: the `firecracker` process and its API socket are up, but no
+  snapshot is loaded and no guest is running (`internal/husk` `StateDormant`).
+  In production this happens when a husk pod is pre-scheduled into the warm pool,
+  so the expensive work, scheduling, admission, netns and cgroup creation, and
+  spawning the VMM process itself, is already paid for before any claim arrives.
+- **Activate (claim time, the only cost paid on the hot path).** A claim sends
+  one `ActivateRequest{SnapshotDir, NetworkOverrides}` over the stub's control
+  socket (a line-delimited JSON protocol). The stub does
+  `LoadSnapshotWithOverrides` against the already-running VMM, remapping the
+  baked NIC to this husk's tap, resumes the VM in place, and waits for the guest
+  agent to answer over vsock before replying `ActivateResult{OK, VsockPath,
+  LatencyMs}`. Because the VMM process was pre-started, the claim-time cost is
+  the in-place snapshot load + resume + guest-ready handshake, NOT a VMM spawn.
+
+The stub FAILS CLOSED: a snapshot-load or guest-readiness failure returns
+`OK=false` with actionable error text and leaves the husk NOT active. It never
+reports a usable VM it could not verify over vsock. One stub owns exactly one
+VM, so a successful activate is terminal for that stub.
+
+### Measured activation latency (CI husk-stub phase)
+
+The KVM integration workflow runs a `husk-stub` phase that proves the split and
+measures the activation cost. It reuses the bench template snapshot, then for
+each iteration: starts a fresh dormant stub (prepare), runs the
+`husk-stub --activate` control client to activate that snapshot in place,
+asserts the `ActivateResult` is `OK`, and on the first iteration execs a real
+command through the guest agent over the returned `VsockPath`. The gate is
+**activate OK AND exec works through the activated VM**, not merely a control
+reply. The phase publishes nearest-rank P50/P99 of the stub-measured
+`LatencyMs` (load-start to guest-ready) to that run's `$GITHUB_STEP_SUMMARY`.
+
+These are SHARED-CI-CLASS numbers: `ubuntu-latest` is a noisy, oversubscribed,
+often nested-virt runner, so the absolute values are reproducible per run but
+are NOT bare-metal figures. The **<= 10ms warm activation figure is the
+bare-metal reference-node TARGET (#18/#15), not a shared-CI claim**; the CI
+phase does not assert it and it must not be quoted as achieved. The honest claim
+this phase supports is narrow: the prepare/activate split works, an in-place
+snapshot load activates a usable VM, and the claim-time cost is the activation
+alone (the measured latency, with its shared-CI caveat), not a VMM spawn.
+
+### Fork-correctness is NOT yet wired into activate
+
+A correct fork delivers fresh per-activation entropy (RNG reseed), resyncs the
+guest wall clock, and delivers per-claim secrets. That is the engine's
+`NotifyForked` handshake (see [docs/fork-correctness.md](fork-correctness.md));
+the fork/daemon path drives it today. The husk stub's `Activate` is the RESTORE
+mechanism only: it loads and resumes the snapshot and confirms the guest
+answers. It does NOT yet send `NotifyForked`, so it does not yet reseed the RNG,
+resync the clock, or deliver secrets per activation. Wiring the fork-correctness
+handshake into the stub's activate path is an integration follow-up and is
+REQUIRED before pod-native bring-up can become the default; this PR does not
+silently handle it, and the gap is tracked under "Remaining" below.
+
+## 4. The honest nuance: first-faulter charging is not fair per-tenant accounting
 
 CoW sharing surviving the memcg boundary is what the density argument needs, but
 it does NOT by itself give fair per-tenant memory accounting. Raw cgroup v2
@@ -174,15 +234,22 @@ that metering: the per-pod memcg is the right enforcement boundary
 (`memory.max` per pod) and a useful signal, but the per-tenant BILL comes from
 the CoW-aware metering, not the first-faulter `memory.current`.
 
-## 4. Proven vs remaining
+## 5. Proven vs remaining
 
-### Proven by this PR
+### Proven so far
 
-CoW page sharing survives cgroup v2 memory-controller boundaries: forks of one
-snapshot in separate per-pod memcgs share the clean snapshot set physically
-(counted once, not once per memcg) while each fork's private dirty is charged to
-its own memcg. This is the precondition issue #18 demanded be verified FIRST,
-measured by a real KVM probe in CI and gated on `CoWSurvives`.
+- CoW page sharing survives cgroup v2 memory-controller boundaries: forks of one
+  snapshot in separate per-pod memcgs share the clean snapshot set physically
+  (counted once, not once per memcg) while each fork's private dirty is charged
+  to its own memcg. This is the precondition issue #18 demanded be verified
+  FIRST, measured by a real KVM probe in CI and gated on `CoWSurvives`.
+- The prepare/activate split: the dormant-VMM stub (`internal/husk`,
+  `cmd/husk-stub`) and its line-delimited JSON control protocol pre-start a
+  Firecracker VMM and activate it in place via snapshot-load + resume +
+  guest-ready on a control message. The KVM CI husk-stub phase measures the
+  activation latency (load-start to first exec, shared-CI-class) and gates on
+  activate OK plus a working exec through the activated VM. Fail-closed on a
+  failed load.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
@@ -191,14 +258,21 @@ full husk-pods epic still needs:
 
 - the `/dev/kvm` device plugin (exposing KVM to the pod instead of
   `privileged: true`);
-- the dormant-VMM stub binary and its vsock/unix control channel;
-- migrating the pool/claim/fork controllers to create husk pods (with raw-forkd
-  mode kept behind a flag and pod-native as the default);
+- running the stub INSIDE a real husk pod (the pod spec, the device-plugin
+  resource request, the cgroup/netns placement); the stub binary and its control
+  protocol exist, but nothing runs it in a pod yet;
+- wiring the fork-correctness handshake into the stub's activate path
+  (per-activation RNG reseed, clock resync, secret delivery via `NotifyForked`);
+  the stub's `Activate` is the restore mechanism only and does NOT yet do this,
+  and it is REQUIRED before pod-native bring-up becomes the default;
+- migrating the pool/claim/fork controllers to create + activate husk pods (with
+  raw-forkd mode kept behind a flag and pod-native as the default);
 - the conformance suite, each acceptance criterion a test: scheduler truth,
   ResourceQuota/LimitRange, NetworkPolicy/Cilium over the pod netns, PSA
   `restricted` minus the documented device-plugin exception, `kubectl get pods`,
   and eviction/preemption/PDB/drain behavior;
-- the P99 claim-to-first-exec <= 10ms warm-pool benchmark delta (before/after);
+- the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark
+  (before/after); the shared-CI activation latency is not this number;
 - the re-derived threat model for the unprivileged-stub escape surface (the
   dormant VMM activating a VM inside the pod is a new boundary;
   [docs/threat-model.md](threat-model.md) must be re-derived in the migration

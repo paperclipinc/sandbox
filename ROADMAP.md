@@ -33,13 +33,26 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     the cgroup v2 charging model, the measured numbers, and the honest
     first-faulter nuance (fair per-tenant accounting uses the CoW-aware metering
     #33, not raw `memory.current`).
-  - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged),
-    the dormant-VMM stub binary + control channel, migrating the pool/claim/fork
-    controllers to husk pods, the conformance suite (scheduler truth,
-    ResourceQuota/LimitRange, NetworkPolicy/PSA-restricted, `kubectl get pods`,
-    eviction/preemption/PDB/drain), and the P99 claim-to-first-exec <= 10ms
-    warm-pool benchmark delta. Sandboxes are NOT pods today; this milestone
-    verified the precondition for the migration, it did not perform it.
+  - ✅ Dormant-VMM stub + in-place activation: the prepare/activate split is
+    implemented and proven. `internal/husk` + `cmd/husk-stub` pre-start a DORMANT
+    Firecracker VMM (prepare) and activate it in place via snapshot-load + resume
+    + guest-ready on a line-delimited JSON control message (claim = activate),
+    failing closed on a failed load. The KVM CI `husk-stub` phase measures the
+    activation latency (load-start to first exec, shared-CI-class) and gates on
+    activate OK plus a real exec through the activated VM. `docs/husk-pods.md`
+    records the prepare/activate model and the honest target-vs-measured framing.
+  - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged);
+    running the stub INSIDE a real husk pod (pod spec, device-plugin resource
+    request, cgroup/netns placement); wiring the fork-correctness handshake
+    (per-activation RNG reseed / clock resync / secret delivery via
+    `NotifyForked`) into the stub's activate, REQUIRED before pod-native default;
+    migrating the pool/claim/fork controllers to create + activate husk pods; the
+    conformance suite (scheduler truth, ResourceQuota/LimitRange,
+    NetworkPolicy/PSA-restricted, `kubectl get pods`,
+    eviction/preemption/PDB/drain); and the BARE-METAL P99 claim-to-first-exec
+    <= 10ms warm-pool benchmark (the shared-CI activation latency is not that
+    target). Sandboxes are NOT pods today; these milestones verified preconditions
+    and built the activation mechanism, they did not perform the migration.
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in
