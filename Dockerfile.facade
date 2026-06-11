@@ -5,8 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o controller ./cmd/controller/
+RUN CGO_ENABLED=0 go build -o facade ./cmd/facade/
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=builder /build/controller /controller
-ENTRYPOINT ["/controller"]
+COPY --from=builder /build/facade /facade
+ENTRYPOINT ["/facade"]
