@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/dnsproxy"
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
@@ -201,5 +202,102 @@ func TestTeardownForkNetwork(t *testing.T) {
 	// Release freed the block: a new sandbox can now acquire it.
 	if _, err := alloc.Acquire("other"); err != nil {
 		t.Fatalf("expected block free after teardown, got %v", err)
+	}
+}
+
+// newDNSEngine builds an Engine with networking AND DNS-based name egress wired
+// to a real in-memory dnsproxy.Registry, without touching KVM or Firecracker.
+func newDNSEngine(t *testing.T) (*Engine, *network.FakeManager, *dnsproxy.Registry) {
+	t.Helper()
+	fm := &network.FakeManager{}
+	alloc, err := netconf.NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	reg := dnsproxy.NewRegistry()
+	e := &Engine{
+		netMgr:         fm,
+		netAlloc:       alloc,
+		resolverIP:     net.ParseIP("169.254.1.1"),
+		dnsRegistry:    reg,
+		enableDNSEgres: true,
+	}
+	return e, fm, reg
+}
+
+func TestPrepareForkNetworkRegistersNames(t *testing.T) {
+	e, _, reg := newDNSEngine(t)
+	opts := ForkOpts{Network: &NetworkOpts{
+		EgressPolicy: "deny",
+		AllowList:    []string{"10.0.0.5:443", "api.example.com:443", "api.example.com:8443"},
+	}}
+	fn, err := e.prepareForkNetwork("sb1", opts)
+	if err != nil {
+		t.Fatalf("prepareForkNetwork: %v", err)
+	}
+	if fn == nil {
+		t.Fatal("expected a forkNetwork")
+	}
+
+	// The sandbox's guest IP is registered with its name allowlist.
+	ports, ok := reg.Lookup(fn.identity.GuestIP, "api.example.com")
+	if !ok {
+		t.Fatal("expected api.example.com registered for the guest IP")
+	}
+	if len(ports) != 2 {
+		t.Errorf("api.example.com ports = %v, want 2 ports", ports)
+	}
+	// An unlisted name is not registered.
+	if _, ok := reg.Lookup(fn.identity.GuestIP, "evil.example.com"); ok {
+		t.Error("evil.example.com must not be registered")
+	}
+
+	// The resolver IP is delivered to the guest for resolv.conf.
+	if fn.guestNet.ResolverIP != "169.254.1.1" {
+		t.Errorf("guest resolver = %q, want 169.254.1.1", fn.guestNet.ResolverIP)
+	}
+
+	// Teardown deregisters the guest IP.
+	e.teardownForkNetwork("sb1", fn.identity)
+	if _, ok := reg.Lookup(fn.identity.GuestIP, "api.example.com"); ok {
+		t.Error("expected guest deregistered after teardown")
+	}
+}
+
+func TestPrepareForkNetworkIPOnlyDoesNotRegister(t *testing.T) {
+	e, _, reg := newDNSEngine(t)
+	opts := ForkOpts{Network: &NetworkOpts{
+		EgressPolicy: "deny",
+		AllowList:    []string{"10.0.0.5:443"},
+	}}
+	fn, err := e.prepareForkNetwork("sb1", opts)
+	if err != nil {
+		t.Fatalf("prepareForkNetwork: %v", err)
+	}
+	// No name entries: nothing is registered for this guest.
+	if _, ok := reg.Lookup(fn.identity.GuestIP, "api.example.com"); ok {
+		t.Error("an IP-only allowlist must not register any name")
+	}
+	// The resolver IP is still delivered so the guest resolves through us.
+	if fn.guestNet.ResolverIP != "169.254.1.1" {
+		t.Errorf("guest resolver = %q, want 169.254.1.1", fn.guestNet.ResolverIP)
+	}
+}
+
+func TestPrepareForkNetworkDNSDisabledNoRegister(t *testing.T) {
+	// Networking on, DNS egress OFF: behavior is unchanged. No registry call,
+	// resolverIP nil, and the guest gets no resolver to point at.
+	e, _, _ := newNetEngine(t)
+	e.resolverIP = nil
+	opts := ForkOpts{Network: &NetworkOpts{
+		EgressPolicy: "deny",
+		AllowList:    []string{"api.example.com:443"},
+	}}
+	fn, err := e.prepareForkNetwork("sb1", opts)
+	if err != nil {
+		t.Fatalf("prepareForkNetwork: %v", err)
+	}
+	if fn.guestNet.ResolverIP != "" {
+		t.Errorf("guest resolver = %q, want empty when DNS egress disabled", fn.guestNet.ResolverIP)
 	}
 }

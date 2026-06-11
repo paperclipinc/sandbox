@@ -3,6 +3,7 @@ package netconf
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -105,6 +106,49 @@ func SplitAllowList(entries []string) (enforceable []HostPort, skipped []string,
 		enforceable = append(enforceable, hp)
 	}
 	return enforceable, skipped, nil
+}
+
+// ParseNameAllowList parses a raw allowlist into the name-based entries the DNS
+// proxy enforces: a map from a lowercased DNS name to the sorted, de-duplicated
+// set of TCP ports allowed for it. IP:port entries are ignored (they are
+// enforced statically by the chain, not by the resolver). A malformed entry
+// fails the whole call. The result is the map the dnsproxy Registry.Register
+// takes; an empty map (no name entries) means the sandbox has no name egress.
+func ParseNameAllowList(entries []string) (map[string][]int, error) {
+	names := make(map[string][]int)
+	seen := make(map[string]map[int]bool)
+	for _, e := range entries {
+		host, portStr, splitErr := net.SplitHostPort(e)
+		if splitErr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: %w", e, splitErr)
+		}
+		if host == "" {
+			return nil, fmt.Errorf("parse allow entry %q: empty host", e)
+		}
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			return nil, fmt.Errorf("parse allow entry %q: invalid port: %w", e, perr)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("parse allow entry %q: port %d out of range", e, port)
+		}
+		if net.ParseIP(host) != nil {
+			// An IP:port entry: enforced statically by the chain, not the resolver.
+			continue
+		}
+		key := strings.ToLower(strings.TrimSuffix(host, "."))
+		if seen[key] == nil {
+			seen[key] = make(map[int]bool)
+		}
+		if !seen[key][port] {
+			seen[key][port] = true
+			names[key] = append(names[key], port)
+		}
+	}
+	for _, ports := range names {
+		sort.Ints(ports)
+	}
+	return names, nil
 }
 
 // RenderSharedTable renders the idempotent skeleton every sandbox shares: one

@@ -286,3 +286,44 @@ func TestRenderSandboxChainAllowPolicy(t *testing.T) {
 		t.Errorf("EgressAllow chain must end in accept\n%s", out)
 	}
 }
+
+func TestParseNameAllowList(t *testing.T) {
+	names, err := ParseNameAllowList([]string{
+		"10.0.0.5:443",         // IP:port, ignored (statically enforced)
+		"API.Example.com:443",  // mixed case + dedup target
+		"api.example.com.:443", // trailing dot + same port, deduped
+		"api.example.com:8443", // second port for same name
+		"docs.example.com:443", // distinct name
+	})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("names = %v, want 2 distinct names", names)
+	}
+	got := names["api.example.com"]
+	if len(got) != 2 || got[0] != 443 || got[1] != 8443 {
+		t.Errorf("api.example.com ports = %v, want [443 8443]", got)
+	}
+	if docs := names["docs.example.com"]; len(docs) != 1 || docs[0] != 443 {
+		t.Errorf("docs.example.com ports = %v, want [443]", docs)
+	}
+}
+
+func TestParseNameAllowListOnlyIPs(t *testing.T) {
+	names, err := ParseNameAllowList([]string{"10.0.0.5:443", "192.0.2.1:80"})
+	if err != nil {
+		t.Fatalf("ParseNameAllowList: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected no name entries for an IP-only allowlist, got %v", names)
+	}
+}
+
+func TestParseNameAllowListInvalid(t *testing.T) {
+	for _, s := range []string{"api.example.com", "api.example.com:0", "api.example.com:bad", ":443"} {
+		if _, err := ParseNameAllowList([]string{s}); err == nil {
+			t.Errorf("ParseNameAllowList(%q) expected error, got nil", s)
+		}
+	}
+}

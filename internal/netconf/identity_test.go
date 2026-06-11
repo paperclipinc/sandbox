@@ -140,3 +140,26 @@ func TestIPsWithinSubnet(t *testing.T) {
 		t.Errorf("guest IP %v outside subnet", id.GuestIP)
 	}
 }
+
+func TestTapForGuestIP(t *testing.T) {
+	a, err := NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	id, err := a.Acquire("sb1")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if got := a.TapForGuestIP(id.GuestIP); got != id.TapName {
+		t.Errorf("TapForGuestIP(%v) = %q, want %q", id.GuestIP, got, id.TapName)
+	}
+	// An IP no sandbox holds maps to no tap.
+	if got := a.TapForGuestIP(net.ParseIP("10.99.99.99")); got != "" {
+		t.Errorf("TapForGuestIP(unknown) = %q, want empty", got)
+	}
+	// After release the mapping is gone.
+	a.Release("sb1")
+	if got := a.TapForGuestIP(id.GuestIP); got != "" {
+		t.Errorf("TapForGuestIP after release = %q, want empty", got)
+	}
+}

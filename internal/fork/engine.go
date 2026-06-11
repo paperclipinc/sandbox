@@ -59,6 +59,17 @@ type Engine struct {
 	netAlloc   *netconf.Allocator
 	resolverIP net.IP
 
+	// DNS-based name egress is opt-in on top of networking. When
+	// enableDNSEgres is set and dnsRegistry is non-nil, a fork whose egress
+	// allowlist carries DNS-name entries registers them (keyed by its unique
+	// guest IP) with the node-wide DNS proxy, and every fork is pointed at the
+	// resolver IP via its guest network config so name lookups go through the
+	// controlled resolver. When off (the default) name entries stay
+	// unenforced, nothing is registered, and the guest's resolv.conf is left
+	// untouched: behavior is exactly as before.
+	dnsRegistry    DNSRegistry
+	enableDNSEgres bool
+
 	// Volumes are opt-in. When enableVolumes is set and volBackend is non-nil,
 	// the template build bakes one placeholder drive per template volume into
 	// the snapshot, and every fork prepares its OWN backing per fork policy and
@@ -96,10 +107,27 @@ var (
 	placeholderGuestIP = net.IPv4(10, 200, 255, 254).To4()
 )
 
+// DNSRegistry is the subset of the dnsproxy registry the engine drives: it maps
+// a sandbox's unique guest IP to the DNS names (and ports) it may resolve, and
+// removes the mapping on teardown. The real *dnsproxy.Registry satisfies it;
+// tests use an in-memory registry. It is a seam so the engine package does not
+// depend on the proxy server, only on this narrow contract.
+type DNSRegistry interface {
+	Register(guestIP net.IP, names map[string][]int)
+	Deregister(guestIP net.IP)
+}
+
 // networkEnabled reports whether per-fork networking is wired. Both the
 // manager and allocator must be present.
 func (e *Engine) networkEnabled() bool {
 	return e.netMgr != nil && e.netAlloc != nil
+}
+
+// dnsEgressEnabled reports whether DNS-based name egress is wired: the flag is
+// set, a registry is present, and a resolver IP exists for the guest to query.
+// Networking must also be on (the registry keys on the per-fork guest IP).
+func (e *Engine) dnsEgressEnabled() bool {
+	return e.enableDNSEgres && e.dnsRegistry != nil && e.resolverIP != nil && e.networkEnabled()
 }
 
 // volumesEnabled reports whether per-fork volumes are wired. Both the flag and
@@ -238,12 +266,14 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 	if err != nil {
 		return nil, fmt.Errorf("parse egress allowlist for %s: %w", sandboxID, err)
 	}
-	// Name-based allow entries cannot be enforced without a controlled DNS
-	// resolver (PR2); they are parsed but dropped from the ruleset. Warn loudly
-	// so an operator is not misled into thinking a name rule is in effect. The
-	// entries are config (host:port), safe to log.
-	if len(skipped) > 0 {
-		fmt.Fprintf(os.Stderr, "forkd: WARNING egress allowlist for %s has %d name-based entries that are NOT enforced (no controlled resolver yet): %v\n", sandboxID, len(skipped), skipped)
+	dnsOn := e.dnsEgressEnabled()
+	// Name-based allow entries are enforced through the controlled DNS resolver
+	// only when DNS egress is enabled; otherwise they are parsed but dropped
+	// from the ruleset, and we warn loudly so an operator is not misled into
+	// thinking a name rule is in effect. The entries are config (host:port),
+	// safe to log.
+	if len(skipped) > 0 && !dnsOn {
+		fmt.Fprintf(os.Stderr, "forkd: WARNING egress allowlist for %s has %d name-based entries that are NOT enforced (DNS egress disabled): %v\n", sandboxID, len(skipped), skipped)
 	}
 	policy := v1alpha1.EgressPolicy(opts.Network.EgressPolicy)
 
@@ -252,9 +282,34 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 		return nil, fmt.Errorf("acquire network identity for %s: %w", sandboxID, err)
 	}
 
+	// The chain's udp/tcp 53 accept to resolverIP is wired whenever a resolver
+	// IP is configured (the standalone --dns-resolver allow rule), independent
+	// of DNS egress. The guest is only pointed at the resolver (resolv.conf)
+	// when DNS egress is on; otherwise it keeps its existing resolv.conf,
+	// preserving the prior behavior.
+	var guestResolver string
+	if dnsOn {
+		guestResolver = e.resolverIP.String()
+	}
+
 	if err := e.netMgr.Setup(context.Background(), id, policy, allow, e.resolverIP); err != nil {
 		e.netAlloc.Release(sandboxID)
 		return nil, fmt.Errorf("set up network for %s (tap %s): %w", sandboxID, id.TapName, err)
+	}
+
+	// Register this sandbox's DNS-name allowlist with the proxy, keyed by its
+	// unique guest IP (the proxy attributes queries by source IP). Only when
+	// DNS egress is on AND the allowlist actually carries name entries; an
+	// IP-only allowlist registers nothing.
+	if dnsOn && len(skipped) > 0 {
+		names, perr := netconf.ParseNameAllowList(opts.Network.AllowList)
+		if perr != nil {
+			e.netAlloc.Release(sandboxID)
+			return nil, fmt.Errorf("parse name allowlist for %s: %w", sandboxID, perr)
+		}
+		if len(names) > 0 {
+			e.dnsRegistry.Register(id.GuestIP, names)
+		}
 	}
 
 	return &forkNetwork{
@@ -264,9 +319,10 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 			HostDevName: id.TapName,
 		}},
 		guestNet: &vsock.NotifyForkedNetwork{
-			GuestIP:   id.GuestIP.String(),
-			GatewayIP: id.HostIP.String(),
-			PrefixLen: 30,
+			GuestIP:    id.GuestIP.String(),
+			GatewayIP:  id.HostIP.String(),
+			PrefixLen:  30,
+			ResolverIP: guestResolver,
 		},
 	}, nil
 }
@@ -277,6 +333,13 @@ func (e *Engine) prepareForkNetwork(sandboxID string, opts ForkOpts) (*forkNetwo
 func (e *Engine) teardownForkNetwork(sandboxID string, id netconf.Identity) {
 	if !e.networkEnabled() {
 		return
+	}
+	// Drop the sandbox's DNS-name registration so its guest IP can no longer
+	// resolve allowlisted names (and a reused guest IP does not inherit a stale
+	// allowlist). The per-tap nft timeout set is flushed by the manager's
+	// Teardown. Safe to call for a guest that was never registered.
+	if e.enableDNSEgres && e.dnsRegistry != nil {
+		e.dnsRegistry.Deregister(id.GuestIP)
 	}
 	if err := e.netMgr.Teardown(context.Background(), id); err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: teardown network for %s (tap %s): %v\n", sandboxID, id.TapName, err)
@@ -301,6 +364,16 @@ type EngineOpts struct {
 	// ResolverIP is the optional DNS resolver guests may reach. Nil omits the
 	// DNS allow rule from each fork's egress ruleset.
 	ResolverIP net.IP
+	// EnableDNSEgress turns on name-based egress: a fork's DNS-name allow
+	// entries are registered with DNSRegistry (keyed by its guest IP) and each
+	// fork is pointed at ResolverIP. Default false leaves name entries
+	// unenforced and the guest's resolv.conf untouched (prior behavior).
+	// DNSRegistry and ResolverIP and networking must all be set for it to take
+	// effect.
+	EnableDNSEgress bool
+	// DNSRegistry is the dnsproxy registry the engine registers/deregisters
+	// per-fork name allowlists with. Nil leaves DNS egress disabled.
+	DNSRegistry DNSRegistry
 	// AgentBinPath is the host path of the guest agent binary injected as
 	// /init when CreateTemplate builds a rootfs from an OCI image. It is
 	// REQUIRED for image builds and unused for file-path rootfs templates.
@@ -437,6 +510,8 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		netMgr:               opts.NetManager,
 		netAlloc:             opts.NetAllocator,
 		resolverIP:           opts.ResolverIP,
+		dnsRegistry:          opts.DNSRegistry,
+		enableDNSEgres:       opts.EnableDNSEgress,
 		agentBinPath:         opts.AgentBinPath,
 		busyboxPath:          opts.BusyboxPath,
 		enableVolumes:        opts.EnableVolumes,
