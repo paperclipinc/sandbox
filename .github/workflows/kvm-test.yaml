@@ -1232,6 +1232,202 @@ jobs:
           path: /tmp/metering.json
           if-no-files-found: warn
 
+      # Husk-pods load-bearing proof (#18): CoW page sharing SURVIVES cgroup v2
+      # memcg boundaries. The husk-pods design pre-schedules pods, each running a
+      # dormant VMM that activates by restoring ONE template snapshot inside the
+      # POD's own cgroup. The entire density argument rests on a precondition the
+      # plan demands we verify FIRST: when N forks of one snapshot are placed in N
+      # SEPARATE cgroup v2 memory controllers, the shared (clean, MAP_PRIVATE)
+      # snapshot page set is still physically shared and counted ~ONCE across the
+      # memcgs, while each fork's private-dirty divergence is charged to its OWN
+      # memcg. If that did NOT hold (CoWSurvives=false), husk pods would cost a
+      # full VM per pod and the design would need rethinking.
+      #
+      # cmd/husk-probe forks 4 sandboxes from the bench template via the REAL
+      # KVM-backed engine, puts each Firecracker PID in <cgroup-root>/vm-<i>
+      # (a real cgroup v2 memcg), then samples per-process smaps_rollup +
+      # per-memcg memory.current/stat and emits internal/huskprobe.Analyze's
+      # CoW-aware Report. It exits 0 on a clean measurement (verdict is in the
+      # JSON, it never gates itself) and exits 1 with a "SETUP:"-prefixed stderr
+      # line for any precondition failure (no cgroup2, +memory not delegable,
+      # template missing, no /dev/kvm, fork failure). This phase reads the JSON
+      # and gates on the load-bearing properties.
+      #
+      # cgroup v2 on ubuntu-latest: the runner uses the unified hierarchy at
+      # /sys/fs/cgroup and we run the probe as root. Creating a child cgroup and
+      # enabling +memory in its subtree_control requires that +memory is ALSO
+      # enabled in the PARENT (root) subtree_control, so we enable it at the root
+      # first. The probe-root is created empty (no member processes), so the "no
+      # internal processes" rule is satisfied: PIDs only ever go into the leaf
+      # vm-<i> cgroups. If child-memcg creation is genuinely blocked on this
+      # runner this phase emits a clear "HUSK-SETUP-LIMITATION:" note and FAILS
+      # (it never silently passes), distinct from a real "HUSK-DESIGN-FAILED:"
+      # (CoWSurvives=false), which would mean CoW does NOT survive memcg
+      # boundaries and fails loudly. SHARED-CI-CLASS numbers (noisy
+      # ubuntu-latest); reproducible per run, not bare metal.
+      - name: Husk pods, CoW page sharing survives cgroup v2 memcg boundaries
+        timeout-minutes: 10
+        run: |
+          set -e
+          BENCH_DATA=/tmp/agent-run-test/bench-data
+          TPL=bench
+          TPL_DIR=$BENCH_DATA/templates/$TPL
+          CGROUP_ROOT=/sys/fs/cgroup/husk-probe
+
+          fail_setup() { echo "HUSK-SETUP-LIMITATION: $1"; exit 1; }
+          fail_design() { echo "HUSK-DESIGN-FAILED: $1"; exit 1; }
+          fail_assert() { echo "HUSK-ASSERTION-FAILED: $1"; exit 1; }
+
+          sudo chmod 666 /dev/kvm
+
+          # Setup precondition: the bench phase laid out the template. Missing
+          # template is a SETUP problem, not a design result.
+          if [ ! -f "$TPL_DIR/snapshot/vmstate" ] || [ ! -f "$TPL_DIR/rootfs.ext4" ]; then
+            fail_setup "bench template not present at $TPL_DIR (snapshot build did not complete); cannot run husk-probe"
+          fi
+
+          # Confirm cgroup v2 (unified hierarchy) is what is mounted at
+          # /sys/fs/cgroup; the probe needs a cgroup2 mount to create child memcgs.
+          echo "cgroup mounts:"
+          mount | grep -E 'cgroup' || true
+          if ! mount | grep -q 'cgroup2 on /sys/fs/cgroup'; then
+            fail_setup "/sys/fs/cgroup is not a cgroup2 unified mount on this runner; child memcg creation needs cgroup v2"
+          fi
+
+          # Enable +memory at the ROOT subtree_control so a child cgroup may in
+          # turn delegate +memory. The probe enables +memory in its OWN
+          # subtree_control, but the kernel only allows that if the parent already
+          # offers the controller. The root cgroup has no member processes on a
+          # systemd v2 host (everything lives under user.slice/system.slice), so
+          # this write is permitted; if it is not, that is a SETUP limitation.
+          echo "root cgroup.subtree_control before: $(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || echo '<unreadable>')"
+          if ! grep -qw memory /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
+            if ! echo '+memory' | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null 2>&1; then
+              fail_setup "cannot enable +memory in the root cgroup.subtree_control on this runner; child memcgs cannot account memory"
+            fi
+          fi
+          echo "root cgroup.subtree_control after:  $(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || echo '<unreadable>')"
+
+          go build -o /tmp/husk-probe ./cmd/husk-probe/
+
+          # Run the probe as root (it creates the cgroup-root, enables +memory in
+          # the probe subtree, and writes PIDs into the per-VM memcgs). A
+          # "SETUP:"-prefixed failure here is a cgroup/KVM/template precondition,
+          # NOT a design result.
+          sudo rm -rf "$CGROUP_ROOT" 2>/dev/null || true
+          if ! sudo /tmp/husk-probe \
+              --template $TPL \
+              --data-dir $BENCH_DATA \
+              --firecracker /usr/local/bin/firecracker \
+              --kernel /tmp/agent-run-test/vmlinux \
+              --forks 4 \
+              --cgroup-root "$CGROUP_ROOT" \
+              --json /tmp/husk.json > /tmp/husk.out 2>&1; then
+            cat /tmp/husk.out || true
+            # A "SETUP:" line means a precondition (cgroup/KVM/template/fork)
+            # blocked the measurement: surface it as a SETUP limitation, NOT a
+            # design failure, so a runner-class cgroup restriction is never
+            # mistaken for CoW failing to survive memcg boundaries.
+            if grep -q '^SETUP:' /tmp/husk.out; then
+              fail_setup "husk-probe could not measure (cgroup/KVM/template precondition); see SETUP line above"
+            fi
+            fail_assert "husk-probe exited non-zero without a SETUP marker (unexpected probe failure)"
+          fi
+          cat /tmp/husk.out
+
+          # From here on, failures are REAL results read from the report JSON.
+          [ -f /tmp/husk.json ] || fail_assert "husk-probe produced no JSON report"
+
+          COW_SURVIVES=$(jq -r '.CoWSurvives' /tmp/husk.json)
+          DIRTY_PER_VM=$(jq -r '.DirtyPerVM' /tmp/husk.json)
+          NAIVE=$(jq -r '.NaiveSum' /tmp/husk.json)
+          AGG=$(jq -r '.AggregatePhysical' /tmp/husk.json)
+          SHARED=$(jq -r '.SharedResident' /tmp/husk.json)
+          TPD=$(jq -r '.TotalPrivateDirty' /tmp/husk.json)
+          SAVINGS=$(jq -r '.CoWSavings' /tmp/husk.json)
+          VM_COUNT=$(jq -r '.VMs | length' /tmp/husk.json)
+          MIN_DIRTY=$(jq -r '[.VMs[].PrivateDirty] | min // 0' /tmp/husk.json)
+
+          echo "husk: forks=$VM_COUNT CoWSurvives=$COW_SURVIVES DirtyPerVM=$DIRTY_PER_VM NaiveSum=$NAIVE AggregatePhysical=$AGG SharedResident=$SHARED TotalPrivateDirty=$TPD CoWSavings=$SAVINGS minForkDirty=$MIN_DIRTY"
+
+          # Sanity: 4 forks measured.
+          [ "$VM_COUNT" -eq 4 ] || fail_assert "expected 4 forks in report, got $VM_COUNT"
+
+          # (1) THE load-bearing claim: CoW survives the memcg boundaries. If the
+          # shared snapshot pages were re-charged per memcg (sharing destroyed by
+          # the cgroup boundary), Analyze would report CoWSurvives=false. That is
+          # a DESIGN failure for husk pods, not a CI flake: fail loudly.
+          if [ "$COW_SURVIVES" != "true" ]; then
+            fail_design "CoWSurvives=$COW_SURVIVES: the shared snapshot page set was NOT counted once across the 4 cgroup v2 memcgs. CoW page sharing did NOT survive the per-pod memcg boundary; the husk-pods density argument needs rethinking."
+          fi
+
+          # (2) AggregatePhysical materially below NaiveSum: the shared snapshot
+          # resident set is counted ~once across the 4 memcgs, not 4x. Analyze
+          # already requires AggregatePhysical <= NaiveSum - SharedResident for
+          # CoWSurvives; assert the integer relations directly here too.
+          if [ "$AGG" -ge "$NAIVE" ]; then
+            fail_assert "AggregatePhysical ($AGG) not < NaiveSum ($NAIVE); the shared snapshot set was not deduplicated across memcgs"
+          fi
+          if [ "$SHARED" -le 0 ]; then
+            fail_assert "SharedResident ($SHARED) not > 0; no shared snapshot resident set was observed"
+          fi
+          # Material margin: savings must be at least one whole shared set (the
+          # snapshot region counted once instead of, naively, once per fork).
+          if [ "$SAVINGS" -lt "$SHARED" ]; then
+            fail_assert "CoWSavings ($SAVINGS) < one SharedResident set ($SHARED); sharing did not save a material margin across the 4 memcgs"
+          fi
+
+          # (3) Private dirty is charged PER memcg: every fork has its own
+          # non-trivial private-dirty divergence (DirtyPerVM=true means every VM
+          # has PrivateDirty > 0), attributed to that fork's own memcg.
+          if [ "$DIRTY_PER_VM" != "true" ]; then
+            fail_assert "DirtyPerVM=$DIRTY_PER_VM: some fork had no private-dirty pages charged to its own memcg"
+          fi
+          if [ "$MIN_DIRTY" -le 0 ]; then
+            fail_assert "min per-fork PrivateDirty ($MIN_DIRTY) not > 0; per-VM dirty not charged to each memcg"
+          fi
+
+          echo "All husk-pods load-bearing assertions passed: CoW survives cgroup v2 memcg boundaries."
+
+          # Publish the measured numbers (real smaps + memcg) to the run summary.
+          to_mib() { awk "BEGIN { printf \"%.2f\", $1 / 1048576 }"; }
+          {
+            echo ""
+            echo "## Husk pods: CoW survives cgroup v2 memcg boundaries (shared-CI-class, NOT bare metal)"
+            echo ""
+            echo "4 real forks of ONE template, each Firecracker PID in its OWN cgroup v2 memory controller (\`$CGROUP_ROOT/vm-<i>\`) on \`ubuntu-latest\`. Per-VM memory from \`/proc/<pid>/smaps_rollup\`; per-memcg from \`memory.current\`/\`memory.stat\`. The shared snapshot resident set is counted ONCE across the 4 memcgs while each fork's private-dirty divergence is charged to its own memcg. These numbers are reproducible per run but are NOT bare metal."
+            echo ""
+            echo "**Verdict: CoWSurvives = ${COW_SURVIVES}** (the load-bearing precondition of husk pods #18)."
+            echo ""
+            echo "| metric | bytes | MiB |"
+            echo "| --- | --- | --- |"
+            echo "| NaiveSum (every VM charged its full RSS) | $NAIVE | $(to_mib "$NAIVE") |"
+            echo "| AggregatePhysical (SharedResident + per-VM dirty) | $AGG | $(to_mib "$AGG") |"
+            echo "| SharedResident (snapshot clean set, counted once) | $SHARED | $(to_mib "$SHARED") |"
+            echo "| TotalPrivateDirty (sum of per-VM dirty) | $TPD | $(to_mib "$TPD") |"
+            echo "| CoWSavings (NaiveSum - AggregatePhysical) | $SAVINGS | $(to_mib "$SAVINGS") |"
+            echo ""
+            echo "Per-fork private dirty (charged to that fork's own memcg):"
+            echo ""
+            echo "| pid | PrivateDirty (MiB) | Rss (MiB) | memory.current (MiB) |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.VMs[] | "| \(.PID) | \(.PrivateDirty/1048576*100|round/100) | \(.Rss/1048576*100|round/100) | \(.MemcgCurrent/1048576*100|round/100) |"' /tmp/husk.json
+            echo ""
+            echo "Reproducible from this husk-probe CI phase (\`cmd/husk-probe\`). See \`docs/husk-pods.md\` and \`docs/metering.md\` (#33)."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "================================"
+          echo "  Husk pods load-bearing claim proven: CoW survives cgroup v2 memcg boundaries"
+          echo "================================"
+
+      - name: Upload husk-probe report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: husk-probe-report
+          path: /tmp/husk.json
+          if-no-files-found: warn
+
       # Install the host networking tools the egress phases need. nftables and
       # iproute2 are what the real internal/network Linux Manager shells out to
       # (nft, ip); a stock ubuntu-latest runner has iproute2 but may lack nft.
