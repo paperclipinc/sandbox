@@ -1,0 +1,224 @@
+package controller_test
+
+import (
+	"bytes"
+	"testing"
+	"time"
+
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/controller"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+func encKeySecretName(templateID string) string { return templateID + "-enc-key" }
+
+// waitFor polls cond until it returns true or the deadline passes.
+func waitFor(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return cond()
+}
+
+// TestEncryptedPoolCreatesKeySecretAndDelivers proves that a pool whose template
+// is Encrypted causes the controller to create the <template>-enc-key Secret and
+// deliver a non-empty EncryptionKey to forkd's CreateTemplate.
+func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-tmpl"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	// The key Secret is created with a 256-bit key.
+	var keySecret corev1.Secret
+	ok := waitFor(15*time.Second, func() bool {
+		return k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("enc-tmpl"), Namespace: "default"}, &keySecret) == nil
+	})
+	if !ok {
+		t.Fatal("enc-key Secret was not created for the encrypted template")
+	}
+	if len(keySecret.Data["key"]) != 32 {
+		t.Fatalf("enc-key length = %d, want 32", len(keySecret.Data["key"]))
+	}
+	// Owner-referenced to the template so k8s GC crypto-shreds it on delete.
+	if len(keySecret.OwnerReferences) == 0 || keySecret.OwnerReferences[0].Kind != "SandboxTemplate" {
+		t.Fatalf("enc-key Secret is not owner-referenced to the template: %+v", keySecret.OwnerReferences)
+	}
+
+	// forkd's CreateTemplate received a non-empty key (presence/length, not value).
+	if !waitFor(15*time.Second, func() bool {
+		seen, n := rec.CreateTemplateKeyLen()
+		return seen && n == 32
+	}) {
+		seen, n := rec.CreateTemplateKeyLen()
+		t.Fatalf("CreateTemplate did not receive a 32-byte key (seen=%v len=%d)", seen, n)
+	}
+
+	// The key VALUE must never appear in the controller's logs. Scan the
+	// suite-wide log buffer for the generated key bytes (the key is random, so a
+	// hit would be unambiguous). Check both the raw bytes and a hex rendering in
+	// case a log path stringifies it.
+	logs := logBuf.Bytes()
+	if bytes.Contains(logs, keySecret.Data["key"]) {
+		t.Fatal("the encryption key value leaked into the controller logs")
+	}
+}
+
+// TestEncryptedClaimDeliversKeyOnFork proves that a claim against an encrypted
+// template delivers the key in the Fork RPC.
+func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-node-2", "enc-tmpl-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-tmpl-claim", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-pool-claim", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-tmpl-claim"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	claim := &v1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-claim", Namespace: "default"},
+		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "enc-pool-claim"}},
+	}
+	if err := k8sClient.Create(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, claim)
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	if !waitFor(20*time.Second, func() bool {
+		seen, n := rec.ForkKeyLen()
+		return seen && n == 32
+	}) {
+		seen, n := rec.ForkKeyLen()
+		t.Fatalf("Fork did not receive a 32-byte key (seen=%v len=%d)", seen, n)
+	}
+}
+
+// TestPlaintextPoolCreatesNoKeySecret proves a non-encrypted template creates no
+// key Secret and delivers no key to forkd.
+func TestPlaintextPoolCreatesNoKeySecret(t *testing.T) {
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "plain-node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "plain-tmpl"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	// Wait for the template to be built on the node (no key).
+	if !waitFor(15*time.Second, func() bool {
+		seen, n := rec.CreateTemplateKeyLen()
+		return seen && n == 0
+	}) {
+		seen, n := rec.CreateTemplateKeyLen()
+		t.Fatalf("plaintext CreateTemplate carried a key (seen=%v len=%d)", seen, n)
+	}
+	// No key Secret was created.
+	var keySecret corev1.Secret
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("plain-tmpl"), Namespace: "default"}, &keySecret)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no enc-key Secret for a plaintext template, got err=%v", err)
+	}
+}
+
+// TestDeleteEncKeyShredsSecret proves DeleteEncKey removes the key Secret
+// (crypto-shred) and is idempotent.
+func TestDeleteEncKeyShredsSecret(t *testing.T) {
+	// EnsureEncKey creates the Secret; DeleteEncKey removes it.
+	key, err := controller.EnsureEncKey(ctx, k8sClient, "default", "shred-tmpl", nil)
+	if err != nil {
+		t.Fatalf("EnsureEncKey: %v", err)
+	}
+	if len(key) != 32 {
+		t.Fatalf("key length = %d, want 32", len(key))
+	}
+	// Idempotent read returns the same key.
+	key2, err := controller.EnsureEncKey(ctx, k8sClient, "default", "shred-tmpl", nil)
+	if err != nil {
+		t.Fatalf("EnsureEncKey read: %v", err)
+	}
+	if !bytes.Equal(key, key2) {
+		t.Fatal("EnsureEncKey returned a different key on the idempotent read")
+	}
+
+	if err := controller.DeleteEncKey(ctx, k8sClient, "default", "shred-tmpl"); err != nil {
+		t.Fatalf("DeleteEncKey: %v", err)
+	}
+	var s corev1.Secret
+	gerr := k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("shred-tmpl"), Namespace: "default"}, &s)
+	if !apierrors.IsNotFound(gerr) {
+		t.Fatalf("enc-key Secret still present after DeleteEncKey: %v", gerr)
+	}
+	// Idempotent: deleting a missing Secret is not an error.
+	if err := controller.DeleteEncKey(ctx, k8sClient, "default", "shred-tmpl"); err != nil {
+		t.Fatalf("DeleteEncKey on missing secret should be a no-op, got %v", err)
+	}
+}

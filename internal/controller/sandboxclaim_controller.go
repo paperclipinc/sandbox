@@ -78,8 +78,10 @@ func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch
 // Secrets: get/list to read mounted secrets referenced by a sandbox and to
 // reconcile the per-sandbox token Secret; create/update to mint and heal that
-// token Secret (and the controller's PKI Secrets, see EnsurePKI).
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
+// token Secret (and the controller's PKI Secrets, see EnsurePKI); delete to
+// crypto-shred a template's at-rest encryption key Secret on teardown
+// (DeleteEncKey).
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -216,8 +218,26 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// When the source template is encrypted, read its at-rest key from the
+	// controller-owned Secret (idempotent read; created by the pool reconciler at
+	// build time) and deliver it so the node can open the encrypted container
+	// before restoring. The controller holds the key transiently; it is never
+	// logged. snapshotID equals the template id, so it names the key Secret.
+	var encKey []byte
+	if template.Spec.Encrypted {
+		encKey, err = EnsureEncKey(ctx, r.Client, claim.Namespace, snapshotID, &template)
+		if err != nil {
+			logger.Error(err, "read encryption key for template", "template", snapshotID)
+			now := metav1.Now()
+			claim.Status.Phase = v1alpha1.SandboxFailed
+			claim.Status.FinishedAt = &now
+			_ = r.Status().Update(ctx, &claim)
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Call forkd on the selected node: this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken)
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, encKey)
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.

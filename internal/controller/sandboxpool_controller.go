@@ -47,7 +47,21 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if readySnapshots < desired {
 		deficit := desired - readySnapshots
 		logger.Info("snapshot deficit", "ready", readySnapshots, "desired", desired, "creating", deficit)
-		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, deficit)
+		// When the template requests at-rest encryption, own and deliver its key.
+		// EnsureEncKey creates-or-reads the per-template Secret (owner-referenced
+		// to the template for GC); the key bytes go straight into the CreateTemplate
+		// RPC over mTLS and are never logged. A plaintext template passes no key.
+		var encKey []byte
+		if template.Spec.Encrypted {
+			var keyErr error
+			encKey, keyErr = EnsureEncKey(ctx, r.Client, pool.Namespace, templateID, &template)
+			if keyErr != nil {
+				// The error names only the Secret, never key bytes.
+				logger.Error(keyErr, "ensure encryption key for template", "template", templateID)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
+		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, encKey, deficit)
 		if err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -90,7 +104,7 @@ func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
 
 // createSnapshotsOnNodes asks up to deficit healthy nodes that lack the
 // template to build it. Returns how many builds were started.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, deficit int32) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, encKey []byte, deficit int32) (int32, error) {
 	var created int32
 	var errs []error
 	for _, node := range r.NodeRegistry.ListNodes() {
@@ -119,6 +133,10 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			Image:        image,
 			InitCommands: initCommands,
 			Volumes:      volumeMounts(templateVolumes, nil),
+			// EncryptionKey is the at-rest key for an Encrypted template, delivered
+			// over mTLS. Empty for a plaintext template. A secret value: never
+			// logged.
+			EncryptionKey: encKey,
 		})
 		cancel()
 		if err != nil {
