@@ -205,7 +205,7 @@ If an alternative beats us on an axis you care about and we have no roadmap line
 
 ## Monitoring
 
-Prometheus metrics exposed by forkd at `/metrics`:
+Node-level Prometheus metrics exposed by forkd at `/metrics`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -214,7 +214,16 @@ Prometheus metrics exposed by forkd at `/metrics`:
 | `agentrun_memory_shared_bytes` | gauge | CoW shared memory across forks |
 | `agentrun_memory_unique_bytes` | gauge | Per-fork unique memory at fork time |
 
-End-to-end claim traces (controller decision to first exec) are on the observability roadmap ([#29](https://github.com/paperclipinc/sandbox/issues/29)).
+Controller-level Prometheus metrics exposed by the controller at `/metrics`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `agentrun_claim_pending_total` | counter | Times a claim requeued for no node with a ready snapshot |
+| `agentrun_orphan_sweeps_total` | counter | Orphan sandbox VMs terminated by the garbage collector |
+| `agentrun_claim_errors_total{pool,reason}` | counter | Terminal claim failures by pool and reason |
+| `agentrun_pool_ready_snapshots{pool}` | gauge | Ready snapshots per pool at the last reconcile |
+
+Tracing: a per-claim OpenTelemetry trace (controller decision to forkd gRPC to KVM restore) exports to an OTLP collector when both the controller and forkd run with `--otlp-endpoint`; trace ids propagate across the gRPC boundary and spans carry no secrets. Audit log: forkd records a toggleable structured JSON line per exec or file operation with `--audit-log` (a path or `stderr`), logging command/path and byte counts but never content or secrets. Operators can list sandboxes and forks with the `kubectl-sandbox` plugin (`kubectl sandbox ls` / `ps`). See [docs/observability.md](docs/observability.md) for the full trace model, the audit record shape, the metric catalogue, and plugin install. End-to-end trace ids stamped across pods, logs, and Hubble remain on the roadmap ([#29](https://github.com/paperclipinc/sandbox/issues/29)).
 
 ## Project status
 

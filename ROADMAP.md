@@ -280,7 +280,9 @@ verified. In rough order of leverage:
   port forwarding, the daily-driver agent-harness needs
 - ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex
   sandbox integrations)
-- ⬜ `kubectl sandbox` plugin (claim/exec/cp/port-forward for operators)
+- ✅ `kubectl sandbox` plugin: ls (SandboxClaims) and ps (SandboxForks) are
+  done (pure table formatter unit-tested in CI; live listing over kubeconfig).
+  OPEN: top/tree/exec/cp/logs/port-forward for operators.
 - ⬜ TypeScript SDK (currently does not exist; README labels it planned)
   + shared Python/TS conformance suite; README samples executed in CI
 - ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
@@ -290,9 +292,19 @@ verified. In rough order of leverage:
 
 ## 8. Observability
 
-- ⬜ OpenTelemetry trace per claim/fork: controller decision → forkd gRPC →
-  KVM restore → guest-ready → first exec
-- ⬜ Metrics: pending-claims depth, snapshot distribution lag, orphan-sweep
-  counts, per-pool claim error rates (some specced metrics are not yet
-  exported; README lists only what is real)
-- ⬜ Toggleable structured audit log of every exec/file op
+- ✅ OpenTelemetry trace for the claim/fork path: controller.reconcileClaim →
+  controller.forkOnNode → forkd.Fork → engine.fork, with W3C trace-id
+  propagation over gRPC, enabled by --otlp-endpoint, no secrets in spans; PROVEN
+  by in-memory span tests in CI. OPEN: guest-ready and first-exec spans need the
+  guest-telemetry vsock bridge, and a single trace id stamped across
+  pod/logs/Hubble/Workspace revisions needs husk pods (#18) and the Workspace
+  (#21).
+- ✅ Metrics: orphan-sweep counts, pending-claim requeues, and per-pool claim
+  error rates are exported (agentrun_orphan_sweeps_total,
+  agentrun_claim_pending_total, agentrun_claim_errors_total{pool,reason},
+  agentrun_pool_ready_snapshots{pool}; increments asserted in CI). OPEN:
+  snapshot-distribution lag, plus Grafana dashboards and PrometheusRule alerts
+  with runbooks for 1.0.
+- ✅ Toggleable structured audit log of every exec/file op (forkd --audit-log;
+  records command/path and byte counts, never content or secrets;
+  content-safety asserted in CI)
