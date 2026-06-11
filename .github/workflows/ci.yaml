@@ -27,13 +27,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          # Pinned to the last v1 line: v1.64.8 is built with go 1.26 and reads
-          # our v1-format .golangci.yml. This is the same binary the faithful
-          # go 1.26 bump was verified against locally (ADR 0001).
-          version: v1.64.8
-          args: --timeout=5m
+      - name: golangci-lint
+        run: |
+          # Build golangci-lint from source with the job's go 1.26 toolchain.
+          # The prebuilt release binary (via golangci-lint-action) is built with
+          # go 1.24 and refuses a go 1.26 target ("built with go1.24 is lower
+          # than the targeted Go version 1.26"). A from-source install compiles
+          # with go 1.26 and analyzes the target cleanly, matching the local
+          # verification of the faithful go 1.26 bump (ADR 0001). v1.64.8 is the
+          # last v1 line and reads our v1-format .golangci.yml.
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
 
   manifests:
     # Validate the production deploy manifests: kubeconform schema-checks every
