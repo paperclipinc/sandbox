@@ -131,6 +131,24 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     signal). A pool `drainPolicy` governs the active sandbox on a lost pod: Kill
     (default) re-pends, Checkpoint snapshots the live VM first where the VMM runs.
     See `docs/husk-pods.md` section 6f.
+  - ✅ Threat model RE-DERIVED for the unprivileged-stub escape surface
+    (`docs/threat-model.md` section 0, "Unprivileged-stub escape surface (issue
+    #18 re-derivation)"): the surface is re-derived boundary by boundary (guest ->
+    husk-stub container, control channel, read-only snapshot hostPath, `/dev/kvm`
+    device, pod netns, in-pod sandbox API, enc key, eviction/drain) with a per-axis
+    tally vs old forkd, each claim backed by a CI-proven mechanism (slices 2/4/4b,
+    #9/#31/#32) or named as a residual. Honest verdict: the per-sandbox EXECUTION
+    surface is strictly improved (unprivileged, capability-dropped,
+    restricted-minus-two, pod-netns-governed) while the inherent
+    `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better, and
+    forkd-the-builder stays a smaller privileged control-plane surface. Residuals
+    ACCEPTED and TRACKED: the shared read-only snapshot mount (fully pod-native CAS
+    delivery is the follow-up), the `/dev/kvm` inherent host-escape surface
+    (unchanged from raw-forkd), the in-memory enc-key window (HSM custody is the
+    #31 follow-up), and the forkd-builder privilege (a builder redesign is out of
+    scope). The IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
+    survival are proven only on a KVM-capable kubelet, so they need the bare-metal
+    reference node (#16).
   - ⬜ Still open (rest of #18): the nested dormant Firecracker VMM coming up
     reliably INSIDE a kind pod so the full claim -> pod -> exec tail GATES on kind
     too (today best-effort in `kind-e2e-husk`, gated in `kvm-test.yaml` with FC on
@@ -140,11 +158,9 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     Ready dormant pod after a re-pend (both need the VMM running in the husk pod,
     bare metal; the object-level PDB / self-heal / re-pend / unschedulable signal
     are proven above); the BARE-METAL P99 claim-to-first-exec <= 10ms warm-pool
-    benchmark (slice 5; the shared-CI activation latency is not that target); the
-    full re-derived threat model for the unprivileged-stub escape surface
-    (including the drain/checkpoint surface); and fully pod-native snapshot
-    delivery (CAS pull into the pod) plus removing forkd entirely (it stays the
-    builder).
+    benchmark (slice 5; the shared-CI activation latency is not that target); and
+    fully pod-native snapshot delivery (CAS pull into the pod) plus removing forkd
+    entirely (it stays the builder).
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in

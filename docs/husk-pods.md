@@ -614,11 +614,17 @@ unprivileged husk pods. The husk pod never builds; it only activates.
   open is the IN-VM enforcement of a NetworkPolicy over the VM tap (bare-metal
   kubelet) and eviction/preemption/PDB/drain (slice 4b);
 - the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark;
-- the re-derived threat model for the unprivileged-stub escape surface
-  ([docs/threat-model.md](threat-model.md) records the default-surface change;
-  the full re-derivation is a later slice);
 - fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
   read-only mount; removing forkd entirely (it stays the builder).
+
+The threat model for the unprivileged-stub escape surface is RE-DERIVED in
+[docs/threat-model.md](threat-model.md) section 0 ("Unprivileged-stub escape
+surface (issue #18 re-derivation)"): the surface is re-derived boundary by
+boundary with a per-axis tally vs the old privileged forkd, each claim backed by
+a CI-proven mechanism (slices 2/4/4b, #9/#31/#32) or named as a residual. The
+honest verdict is that the per-sandbox EXECUTION surface is strictly improved
+while the inherent `/dev/kvm`-and-kernel host-escape axis is EQUAL, not better,
+and forkd-the-builder stays a smaller privileged control-plane surface.
 
 ## 6d. Networking reconciliation: which layer governs egress (per mode)
 
@@ -904,12 +910,13 @@ fallback behind `--enable-raw-forkd`. The full husk-pods epic still needs:
   eviction/preemption/PDB/drain behavior (slice 4b);
 - the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark
   (before/after); the shared-CI activation latency is not this number;
-- the re-derived threat model for the unprivileged-stub escape surface (the
-  dormant VMM activating a VM inside the pod is a new boundary;
-  [docs/threat-model.md](threat-model.md) records the default-surface change now;
-  the full re-derivation is a later slice);
 - fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
   read-only mount, and removing forkd entirely (it stays the builder).
+
+The threat model for the unprivileged-stub escape surface is RE-DERIVED in
+[docs/threat-model.md](threat-model.md) section 0 (boundary by boundary, with a
+per-axis tally vs the old privileged forkd and named residuals); it is no longer
+an open item.
 
 The default flip moves the epic forward by proving the full cluster object
 lifecycle (build the snapshot, place husk pods, activate one on a claim) on the
