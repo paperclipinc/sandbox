@@ -23,6 +23,12 @@ type NodeRegistry struct {
 	// every node that does not carry its own NodeInfo.TLS. Set once at
 	// startup before any dial; nil means insecure (tests, mock mode).
 	TLS *tls.Config
+
+	// overcommitFactor scales each node's reported memory budget when computing
+	// schedulable headroom: available = total*factor - used. 1.0 (the default)
+	// is no overcommit; a value above 1 leans on CoW sharing across forks of the
+	// same template to pack more sandboxes per node. Guarded by mu.
+	overcommitFactor float64
 }
 
 type NodeInfo struct {
@@ -67,8 +73,23 @@ type TemplateCapacity struct {
 
 func NewNodeRegistry() *NodeRegistry {
 	return &NodeRegistry{
-		nodes: make(map[string]*NodeInfo),
+		nodes:            make(map[string]*NodeInfo),
+		overcommitFactor: 1.0,
 	}
+}
+
+// SetOvercommitFactor sets the memory overcommit factor used when projecting
+// schedulable headroom. Values at or below zero are ignored (the factor stays
+// as it was). A factor above 1 leans on CoW sharing to pack more forks per
+// node; document the tradeoff (a node can be driven into reclaim/OOM if the
+// sharing assumption does not hold) before raising it in production.
+func (r *NodeRegistry) SetOvercommitFactor(f float64) {
+	if f <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.overcommitFactor = f
 }
 
 // Register adds or updates a node in the registry.
@@ -101,8 +122,15 @@ func (r *NodeRegistry) Unregister(name string) {
 	}
 }
 
-// SelectNode picks the best node for a fork operation.
-// Prefers nodes with: 1) the requested snapshot, 2) lowest active sandbox count.
+// SelectNode picks the node for a fork of snapshotID (the template id), packing
+// to maximize CoW sharing rather than spreading load. It admits only nodes
+// whose projected marginal cost fits their schedulable headroom (capacity-aware
+// bin-packing), then scores admitted nodes to PACK warm snapshot-holders dense.
+//
+// Errors are distinct: an empty registry and no healthy nodes are scheduling
+// preconditions; ErrNoCapacity means healthy nodes exist but none admit the
+// fork under the overcommit policy (a transient shortage, scale out or raise
+// the factor).
 func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*NodeInfo, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -111,48 +139,98 @@ func (r *NodeRegistry) SelectNode(snapshotID string, preferredNode string) (*Nod
 		return nil, fmt.Errorf("no forkd nodes registered")
 	}
 
-	// If preferred node is specified and available, use it
+	// Preferred node is honored only when healthy AND it admits the fork.
+	// Otherwise fall through to the general scoring so a full preferred node
+	// does not pin the claim.
 	if preferredNode != "" {
-		if node, ok := r.nodes[preferredNode]; ok {
-			if node.isHealthy() {
-				return node, nil
-			}
+		if node, ok := r.nodes[preferredNode]; ok && node.isHealthy() && r.admits(node, snapshotID) {
+			return node, nil
 		}
 	}
 
-	// Find nodes that have the requested snapshot
-	var candidates []*NodeInfo
+	healthy := false
+	var admitted []*NodeInfo
 	for _, node := range r.nodes {
 		if !node.isHealthy() {
 			continue
 		}
-		if snapshotID == "" || node.hasSnapshot(snapshotID) {
-			candidates = append(candidates, node)
+		healthy = true
+		if r.admits(node, snapshotID) {
+			admitted = append(admitted, node)
 		}
 	}
 
-	if len(candidates) == 0 {
-		// Fall back to any healthy node
-		for _, node := range r.nodes {
-			if node.isHealthy() {
-				candidates = append(candidates, node)
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
+	if !healthy {
 		return nil, fmt.Errorf("no healthy forkd nodes available")
 	}
+	if len(admitted) == 0 {
+		return nil, fmt.Errorf("%w: cluster memory exhausted under the overcommit policy (factor %.2f); scale out forkd nodes or raise the overcommit factor", ErrNoCapacity, r.overcommitFactor)
+	}
 
-	// Pick the node with the lowest load
-	best := candidates[0]
-	for _, node := range candidates[1:] {
-		if node.ActiveSandboxes < best.ActiveSandboxes {
+	return r.packBest(admitted, snapshotID), nil
+}
+
+// packBest scores admitted nodes to maximize density. Warm snapshot-holders
+// (they hold the snapshot and already run forks of it) win over cold nodes so
+// CoW sharing is reused; among warm holders the densest (most existing forks)
+// is packed first; among cold-only candidates the one with the most free memory
+// is chosen to spread cold starts. Ties break deterministically by node name.
+func (r *NodeRegistry) packBest(admitted []*NodeInfo, snapshotID string) *NodeInfo {
+	best := admitted[0]
+	for _, node := range admitted[1:] {
+		if r.denser(node, best, snapshotID) {
 			best = node
 		}
 	}
+	return best
+}
 
-	return best, nil
+// packTier ranks a node for the given snapshot: 2 = warm (holds the snapshot and
+// runs forks of it; reuses the resident CoW set), 1 = holder (holds the
+// snapshot but no recorded forks yet; still cheaper than a cold start), 0 =
+// cold (no snapshot). Higher packs first.
+func (n *NodeInfo) packTier(snapshotID string) int {
+	if snapshotID == "" || !n.hasSnapshot(snapshotID) {
+		return 0
+	}
+	if n.forkCountFor(snapshotID) > 0 {
+		return 2
+	}
+	return 1
+}
+
+// denser reports whether candidate c should beat the current best b under the
+// packing policy: a higher pack tier wins (warm over holder over cold); within
+// the warm/holder tiers the node running MORE forks of the snapshot packs
+// first; within the cold tier the node with the MOST free memory wins (spread
+// cold starts), with unknown-budget nodes ranked last. Ties break
+// deterministically by the lexicographically smaller node name.
+func (r *NodeRegistry) denser(c, b *NodeInfo, snapshotID string) bool {
+	cTier, bTier := c.packTier(snapshotID), b.packTier(snapshotID)
+	if cTier != bTier {
+		return cTier > bTier
+	}
+
+	if cTier > 0 { // both hold the snapshot: pack the denser holder
+		cForks, bForks := c.forkCountFor(snapshotID), b.forkCountFor(snapshotID)
+		if cForks != bForks {
+			return cForks > bForks
+		}
+		return c.Name < b.Name
+	}
+
+	// both cold: spread to the node with the most free memory. Unknown budgets
+	// (MemoryTotal 0) are comparable only by name and rank below any known
+	// budget so a real node with headroom is preferred over a dev node.
+	cAvail, cKnown := r.available(c)
+	bAvail, bKnown := r.available(b)
+	if cKnown != bKnown {
+		return cKnown
+	}
+	if cKnown && cAvail != bAvail {
+		return cAvail > bAvail
+	}
+	return c.Name < b.Name
 }
 
 // NodesWithTemplate returns healthy nodes that hold the given template snapshot.
