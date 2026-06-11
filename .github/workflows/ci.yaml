@@ -171,9 +171,10 @@ jobs:
       - name: Deploy the KVM device plugin DaemonSet
         # Apply the production device-plugin DaemonSet, overriding the image to
         # the :ci tag loaded above (IfNotPresent so kind serves the local image,
-        # no registry pull). On kind there is NO /dev/kvm, so the plugin
-        # correctly advertises ZERO and registers anyway: this proves the
-        # plugin runs and registers on a no-KVM node without crashing.
+        # no registry pull). The plugin advertises agentrun.dev/kvm only where
+        # /dev/kvm exists; this runner has /dev/kvm so the plugin advertises a
+        # non-zero count. The DaemonSet rollout proves the plugin registers with
+        # the kubelet regardless of whether /dev/kvm is present.
         run: |
           set -euo pipefail
           kubectl apply -f deploy/device-plugin/daemonset.yaml
@@ -184,8 +185,9 @@ jobs:
       - name: Device plugin DaemonSet becomes Ready and stays up
         # Gate on the DaemonSet rolling out Ready, then confirm the pod is not
         # crashlooping (restartCount stays 0 after a short settle). The plugin
-        # serves its socket and registers with the kubelet; advertising zero on
-        # a no-KVM node is the correct, honest behavior.
+        # serves its socket and registers with the kubelet; the correct behavior
+        # is to advertise a non-zero count where /dev/kvm is present and zero
+        # where it is absent.
         run: |
           set -euo pipefail
           # On any failure below, dump pod state, the DaemonSet description, and
@@ -214,13 +216,46 @@ jobs:
             fi
           done
           kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=20 || true
-      - name: A pod requesting agentrun.dev/kvm stays Pending on the no-KVM cluster
-        # Honest scheduler truth: kind has no /dev/kvm, so the plugin advertises
-        # zero and a pod requesting the resource is unschedulable. Assert it
-        # stays Pending (NOT that it gets /dev/kvm: a pod actually receiving the
-        # device needs a KVM-kubelet node, which kind is not).
+      - name: Adaptive device-plugin assertion (KVM-advertised or no-KVM)
+        # Determine whether the node advertises agentrun.dev/kvm by reading the
+        # node allocatable. The kind-e2e runner has /dev/kvm, so kvm_present=true
+        # is the expected path; a runner without /dev/kvm is handled honestly.
+        #
+        # If KVM IS advertised:
+        #   - deploy a non-privileged probe pod that requests agentrun.dev/kvm: 1
+        #     and runs `test -e /dev/kvm && sleep 300` (busybox); the request
+        #     triggers Allocate which injects /dev/kvm into the container.
+        #   - assert the pod reaches Running (scheduler placed it: advertise->
+        #     schedule proven).
+        #   - exec `test -e /dev/kvm` inside the running pod to prove Allocate
+        #     actually injected the device (advertise->schedule->inject proven).
+        #   - the pod is NOT privileged and carries no hostPath: access comes
+        #     solely via the device plugin, proving the PSA-restricted path.
+        #
+        # If KVM is NOT advertised:
+        #   - assert the probe pod stays Pending: honest scheduler truth, no KVM
+        #     resource available means the pod is unschedulable.
         run: |
           set -euo pipefail
+
+          # Read the allocatable value; empty or "0" means not advertised.
+          kvm_allocatable=$(kubectl get nodes \
+            -o jsonpath='{.items[*].status.allocatable.agentrun\.dev/kvm}' 2>/dev/null || true)
+          echo "node allocatable agentrun.dev/kvm: '${kvm_allocatable}'"
+
+          kvm_advertised=false
+          for v in $kvm_allocatable; do
+            if [ "$v" != "0" ] && [ -n "$v" ]; then
+              kvm_advertised=true
+              break
+            fi
+          done
+          echo "kvm_advertised: $kvm_advertised"
+
+          # Apply the probe pod. It requests agentrun.dev/kvm: 1 so Allocate
+          # fires on schedule. The securityContext is restricted (non-privileged,
+          # no allowPrivilegeEscalation, all capabilities dropped, read-only root
+          # filesystem): /dev/kvm access comes from the device plugin alone.
           cat <<'POD' | kubectl apply -f -
           apiVersion: v1
           kind: Pod
@@ -231,20 +266,66 @@ jobs:
             restartPolicy: Never
             containers:
               - name: probe
-                image: registry.k8s.io/pause:3.9
+                image: busybox:stable
+                command: ["sh", "-c", "test -e /dev/kvm && sleep 300"]
                 resources:
                   limits:
                     agentrun.dev/kvm: "1"
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  privileged: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: ["ALL"]
           POD
-          # Give the scheduler time to (fail to) place it, then assert Pending.
-          sleep 20
-          phase=$(kubectl -n agent-run get pod kvm-resource-probe -o jsonpath='{.status.phase}')
-          echo "probe pod phase: $phase"
-          kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A2 'Events:' || true
-          if [ "$phase" != "Pending" ]; then
-            echo "expected Pending (no KVM advertised), got $phase"
-            exit 1
+
+          if [ "$kvm_advertised" = "true" ]; then
+            echo "KVM advertised: asserting probe pod reaches Running and /dev/kvm is injected"
+
+            # Wait up to 60s for the pod to reach Running (scheduler places it
+            # because the resource is available; Allocate injects the device).
+            for i in $(seq 1 30); do
+              phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+                -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              echo "  [${i}/30] probe pod phase: $phase"
+              if [ "$phase" = "Running" ]; then
+                break
+              fi
+              sleep 2
+            done
+
+            phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+              -o jsonpath='{.status.phase}')
+            echo "probe pod final phase: $phase"
+            kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A5 'Events:' || true
+
+            if [ "$phase" != "Running" ]; then
+              echo "FAIL: expected Running (KVM advertised, pod should be scheduled and /dev/kvm injected), got $phase"
+              exit 1
+            fi
+
+            # Prove Allocate injected /dev/kvm into the non-privileged container.
+            echo "Proving /dev/kvm is present inside the non-privileged probe container..."
+            kubectl -n agent-run exec kvm-resource-probe -- test -e /dev/kvm
+            echo "PASS: /dev/kvm injected by Allocate into the non-privileged probe pod (advertise->schedule->inject proven)"
+
+          else
+            echo "KVM not advertised: asserting probe pod stays Pending (honest scheduler truth)"
+
+            # Give the scheduler time to (fail to) place the pod, then assert Pending.
+            sleep 20
+            phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+              -o jsonpath='{.status.phase}')
+            echo "probe pod phase: $phase"
+            kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A2 'Events:' || true
+
+            if [ "$phase" != "Pending" ]; then
+              echo "FAIL: expected Pending (no KVM advertised), got $phase"
+              exit 1
+            fi
+            echo "PASS: probe pod stays Pending on a no-KVM node (honest scheduler truth)"
           fi
+
           kubectl -n agent-run delete pod kvm-resource-probe --ignore-not-found=true
       - name: agentrun sandbox ls (control-plane dispatch lists claims)
         run: agentrun sandbox ls

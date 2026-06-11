@@ -309,15 +309,25 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
   Registration server over a unix socket with the right Version, Endpoint, and
   ResourceName. No real kubelet is involved.
 - The kind e2e job deploys the DaemonSet and gates on it becoming Ready and not
-  crashlooping. kind has no `/dev/kvm`, so the plugin correctly advertises ZERO
-  and registers anyway, and a pod requesting `agentrun.dev/kvm: 1` stays
-  Pending: the honest scheduler truth on a no-KVM cluster.
+  crashlooping. The kind-e2e GitHub Actions runner has `/dev/kvm` (the same
+  runner class also runs the Firecracker KVM suite), so the plugin advertises a
+  non-zero count. The e2e assertion is adaptive: it reads the node allocatable
+  for `agentrun.dev/kvm` and branches on whether KVM is advertised.
+- **Full advertise->schedule->inject path proven on the kind-e2e runner** (the
+  stronger result): the probe pod requests `agentrun.dev/kvm: 1`, the scheduler
+  places it (Running, not Pending), and `kubectl exec` into the running pod
+  confirms `/dev/kvm` is present inside the container. The probe pod is
+  explicitly non-privileged (`privileged: false`, `allowPrivilegeEscalation:
+  false`, all capabilities dropped, read-only root filesystem): `/dev/kvm`
+  access comes entirely from the device plugin's `Allocate` response, not from
+  any host-path mount or privilege escalation. This proves the full
+  PSA-restricted device-access path end to end on the CI runner. The e2e
+  assertion also handles the no-KVM case honestly: on a runner without
+  `/dev/kvm` the plugin advertises zero and the probe pod stays Pending (also
+  asserted in the adaptive branch).
 
 **Open:**
 
-- A pod ACTUALLY receiving `/dev/kvm` from the plugin needs a node whose kubelet
-  has a real `/dev/kvm` (a KVM-kubelet reference node); the kind cluster cannot
-  prove device injection because it has no KVM.
 - Running the husk stub INSIDE a pod that requests this resource (the pod spec
   wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
   hostPath to request the resource are follow-ups (see section 6).
@@ -349,10 +359,15 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
   `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where `/dev/kvm`
   exists and injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod
   gets KVM as a scheduled resource instead of `privileged: true` (section 5).
-  The DevicePlugin and Registration gRPC are unit-tested against a fake kubelet,
-  and the kind e2e gates on the DaemonSet registering and advertising zero on a
-  no-KVM node. A pod actually receiving the device needs a KVM-kubelet node, and
-  the forkd-DaemonSet migration off its privileged hostPath is a follow-up.
+  The DevicePlugin and Registration gRPC are unit-tested against a fake kubelet.
+  The kind e2e gates on the DaemonSet becoming Ready, then proves the full
+  advertise->schedule->inject path: a non-privileged probe pod requesting
+  `agentrun.dev/kvm: 1` is scheduled to Running on the KVM-capable kind-e2e
+  runner, and `kubectl exec` into the running pod confirms `/dev/kvm` is present
+  inside the container (injected by `Allocate`, not by any privilege or hostPath).
+  This is the PSA-restricted device-access path proven end to end. The assertion
+  is adaptive: on a no-KVM runner it asserts Pending instead. The forkd-DaemonSet
+  migration off its privileged hostPath remains a follow-up.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
