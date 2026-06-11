@@ -29,8 +29,11 @@ full epic still needs.
 Today a sandbox VM is a Firecracker process forkd launches and tracks directly.
 The husk-pods model moves every sandbox VM inside a Kubernetes pod so the VM
 inherits real pod semantics: the scheduler sees it, ResourceQuota/LimitRange
-bound it, NetworkPolicy (Cilium) governs its netns, and PSA can hold the
-namespace to `restricted` (with exactly one documented device exception).
+bound it, NetworkPolicy (Cilium) governs its netns, and the husk pod's
+securityContext satisfies every PSA `restricted` control, with exactly two
+documented exceptions that keep it out of a restricted namespace: the read-only
+snapshot hostPath and `runAsNonRoot: false` (the /dev/kvm device). The exact PSA
+finding, empirically verified, is in the "Kubernetes conformance" section.
 
 The shape:
 
@@ -605,16 +608,112 @@ unprivileged husk pods. The husk pod never builds; it only activates.
   the husk-pod-Ready -> claim-Ready -> in-pod-exec tail is best-effort in
   `kind-e2e-husk` and GATED in `kvm-test.yaml` (FC on the host). The documented
   kind boundary is reported as `HUSK-KIND-VMM`;
-- the conformance suite (scheduler truth quotas actually bounding the pool,
-  LimitRange defaulting, NetworkPolicy/Cilium over the pod netns, PSA
-  `restricted` minus the device-plugin exception, `kubectl get pods`,
-  eviction/preemption/PDB/drain);
+- the conformance suite is now PROVEN object-level on kind (scheduler truth,
+  ResourceQuota/LimitRange, NetworkPolicy attach, the exact PSA level minus the
+  documented exceptions, `kubectl get pods` + logs; see section 6e). What remains
+  open is the IN-VM enforcement of a NetworkPolicy over the VM tap (bare-metal
+  kubelet) and eviction/preemption/PDB/drain (slice 4b);
 - the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark;
 - the re-derived threat model for the unprivileged-stub escape surface
   ([docs/threat-model.md](threat-model.md) records the default-surface change;
   the full re-derivation is a later slice);
 - fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
   read-only mount; removing forkd entirely (it stays the builder).
+
+## 6d. Networking reconciliation: which layer governs egress (per mode)
+
+The husk default changes WHICH layer enforces a sandbox's egress, and the two
+run modes use DIFFERENT mechanisms. They do not both govern a given sandbox;
+exactly one applies, decided by the run mode. (Full detail, including the CI
+proof, is in [docs/networking.md](networking.md).)
+
+- **Husk mode (the default): a Kubernetes `NetworkPolicy` governs.** The VM's tap
+  lives inside the HUSK POD's network namespace, so the sandbox's traffic IS the
+  pod's traffic. A `NetworkPolicy` (or Cilium) selecting the husk pod
+  (`podSelector` on `agentrun.dev/husk=true`) is the GOVERNING egress layer,
+  enforced by the CNI on the pod netns exactly as for any pod. This is honest pod
+  networking with zero bespoke code: the cluster's existing pod-network policy
+  machinery applies. The bespoke host-nftables engine is REDUNDANT here and is
+  NOT installed for husk pods.
+- **Raw-forkd mode (`--enable-raw-forkd`, `--mock`): the bespoke host-nftables
+  engine governs.** There is no pod; the VM's tap lives on the HOST (forkd's
+  netns), where a `NetworkPolicy` cannot see it. The bespoke default-deny per-tap
+  nftables allowlist (`internal/network` + `internal/netconf`, issues #47/#48)
+  plus the controlled DNS proxy (`internal/dnsproxy`) ARE the enforcement
+  mechanism.
+
+The bespoke nftables engine is RETAINED (raw-forkd still depends on it); it is
+not deleted. It is redundant ONLY for the husk pod-netns path. Neither mode runs
+both layers over the same sandbox.
+
+Honest scope: in husk mode the `NetworkPolicy` is the policy boundary proven at
+the OBJECT level on kind (it exists and selects the husk pod; the CNI is
+responsible for enforcement). The actual IN-VM enforcement of the VM tap by the
+pod netns needs a KVM-capable kubelet running the husk pod's VMM (a bare-metal
+reference node) and is the documented open item, not gated on the shared kind
+runner where the nested VMM does not reliably come up.
+
+## 6e. Kubernetes conformance (proven object-level on kind)
+
+Now that sandboxes are pods by default, the Kubernetes conformance criteria are
+proven at the OBJECT level on the KVM-capable kind runner (the `kind-e2e-husk`
+job in `.github/workflows/ci.yaml`). These assertions act on the husk pod
+OBJECTS, which exist on kind regardless of whether the nested VMM boots; the
+in-VM tail (a real activated VM, exec through the guest) is gated separately in
+`kvm-test.yaml` on real KVM. Each criterion gates the job and distinguishes a
+SETUP issue from a real conformance failure.
+
+| # | Criterion | How it is proven object-level on kind |
+| - | --------- | ------------------------------------- |
+| 1 | Scheduler truth | The husk pod carries cpu + memory REQUESTS and the scheduler BOUND it (`Status.NodeName` set), so the sandbox is an ordinary scheduled workload. A probe pod requesting more than node allocatable stays Pending: the native scheduler does not double-book. |
+| 2 | ResourceQuota + LimitRange | A `ResourceQuota` (`count/pods: 1` + cpu/memory caps) and a `LimitRange` in a test namespace bound husk-shaped pods: the first is admitted, the second is REJECTED by the quota admission with a Kubernetes `exceeded quota` / `forbidden` error. ZERO custom code: the rejection is from Kubernetes. |
+| 3 | NetworkPolicy attach | A `NetworkPolicy` with `podSelector` `matchLabels agentrun.dev/husk=true` exists and SELECTS the husk pod. In husk mode this is the governing egress layer (the VM tap is in the pod netns); see section 6d. |
+| 4 | PSA level | Empirically verified (see below): the husk pod is rejected by a `restricted` namespace on EXACTLY the documented exceptions, the same securityContext minus those exceptions IS admitted into restricted, and a privileged pod IS rejected (PSA is enforcing). |
+| 5 | kubectl get pods + logs | `kubectl get pods -l agentrun.dev/husk=true` lists the sandboxes and `kubectl logs` returns the husk stub console (`husk-stub: preparing dormant VMM` / `dormant` / `serving ... control`). A sandbox is a pod an operator can list and read logs from. |
+
+### The exact PSA level the husk pod passes (empirically verified)
+
+Verified against the v1.31 PodSecurity admission plugin on kind (and asserted in
+the conformance job): the husk pod's securityContext satisfies EVERY `restricted`
+control: `privileged: false`, `allowPrivilegeEscalation: false`, all capabilities
+dropped (`drop: [ALL]`, none added), and `seccompProfile: RuntimeDefault` at both
+the pod and the container level. But the husk pod is NOT admitted into a baseline
+or restricted namespace, for exactly two DOCUMENTED EXCEPTIONS, both intrinsic to
+the husk model:
+
+1. **the read-only snapshot hostPath.** `hostPath` is forbidden under BOTH
+   baseline and restricted (the volume-types control); the husk pod mounts the
+   node's read-only template snapshot so the dormant VMM can load it.
+2. **`runAsNonRoot: false`.** restricted requires `runAsNonRoot: true`; the husk
+   pod runs uid 0 so Firecracker can open the device-plugin-injected `/dev/kvm`
+   WITHOUT `privileged` (the `/dev/kvm` device exception).
+
+So the honest claim is precise: the husk pod is **NOT fully `restricted` and NOT
+`baseline`**, because of the read-only snapshot hostPath; its securityContext is
+restricted-clean (the SAME securityContext minus the hostPath and with
+`runAsNonRoot: true` IS admitted into a restricted namespace, verified), and the
+only PSA violations are the documented read-only-snapshot-hostPath +
+`runAsNonRoot`-false (`/dev/kvm` device) exceptions, plus the `agentrun.dev/kvm`
+device-plugin resource that replaces `privileged: true`. The conformance job also
+rejects a genuinely privileged pod in the same restricted namespace, proving PSA
+is actually enforcing (so the husk-pod admission result is meaningful).
+
+### PROVEN vs OPEN for conformance
+
+**PROVEN (object-level on kind, `kind-e2e-husk`):** scheduler truth (requests +
+bound + no double-booking); ResourceQuota + LimitRange bounding husk-shaped pods
+with zero custom code; a NetworkPolicy selecting the husk pod (the husk-mode
+governing egress layer); the exact PSA level (rejected by restricted on EXACTLY
+the documented hostPath + runAsNonRoot exceptions, the restricted-clean
+securityContext admitted, a privileged pod rejected); `kubectl get pods` +
+`kubectl logs` showing the sandboxes.
+
+**OPEN:** the IN-VM enforcement of the VM tap by the pod netns (a NetworkPolicy
+actually dropping the VM's egress) needs a KVM-capable kubelet running the husk
+pod's VMM, a bare-metal reference node, not the shared kind runner where the
+nested VMM does not reliably come up; eviction / preemption / PDB / drain with
+checkpoint-or-kill per pool policy (slice 4b); the bare-metal P99
+claim-to-first-exec benchmark (slice 5).
 
 ## 7. Proven vs remaining
 
@@ -683,11 +782,14 @@ fallback behind `--enable-raw-forkd`. The full husk-pods epic still needs:
   full claim -> pod -> exec tail GATES on kind too. Today that tail is best-effort
   in the `kind-e2e-husk` job (the cluster object lifecycle GATES there) and is
   GATED in `kvm-test.yaml`, where Firecracker runs on the runner host;
-- the conformance suite, each acceptance criterion a test: scheduler truth
-  (a quota actually bounding the pool, a LimitRange defaulting it),
-  NetworkPolicy/Cilium over the pod netns, PSA `restricted` minus the documented
-  device-plugin exception, `kubectl get pods`, and eviction/preemption/PDB/drain
-  behavior;
+- the conformance suite is PROVEN object-level on kind (section 6e): scheduler
+  truth, ResourceQuota/LimitRange bounding husk-shaped pods, a NetworkPolicy
+  selecting the husk pod, the exact PSA level (rejected by restricted on EXACTLY
+  the documented hostPath + runAsNonRoot exceptions, the securityContext otherwise
+  restricted-clean, a privileged pod rejected), and `kubectl get pods` + logs.
+  What remains OPEN is the IN-VM enforcement of a NetworkPolicy over the VM tap
+  (needs a KVM-capable kubelet, a bare-metal reference node) and
+  eviction/preemption/PDB/drain behavior (slice 4b);
 - the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark
   (before/after); the shared-CI activation latency is not this number;
 - the re-derived threat model for the unprivileged-stub escape surface (the

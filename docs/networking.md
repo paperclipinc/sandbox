@@ -182,6 +182,41 @@ second, defense-in-depth layer and is where snapshot-fork-under-netns is
 resolved. The two layers are complementary: the host-side allowlist is the
 policy boundary; the per-VM netns is the containment boundary.
 
+## Per-mode egress enforcement: husk vs raw-forkd
+
+There are two run modes (see [docs/husk-pods.md](husk-pods.md)) and they enforce
+egress through DIFFERENT mechanisms. The two do NOT both govern a given
+sandbox; exactly one applies, decided by the run mode.
+
+- **Husk mode (the default).** The VM's tap lives in the HUSK POD's network
+  namespace (the VM runs inside the pod). The pod netns is therefore the egress
+  boundary, and a Kubernetes `NetworkPolicy` (or Cilium) selecting the husk pod
+  is the GOVERNING egress layer: it is enforced by the CNI on the pod's netns,
+  exactly as for any pod. This is honest pod networking: the sandbox's traffic is
+  the pod's traffic, so the cluster's existing pod-network policy machinery
+  applies with zero bespoke code. The bespoke host-nftables engine described
+  above is REDUNDANT for the husk pod-netns path and is NOT installed for husk
+  pods.
+- **Raw-forkd mode (`--enable-raw-forkd`, and `--mock`).** There is no pod; the
+  VM's tap lives on the HOST (forkd's netns). A Kubernetes `NetworkPolicy` cannot
+  see a host-netns tap, so the bespoke host-nftables egress engine
+  (`internal/network` + `internal/netconf`, the default-deny per-tap allowlist,
+  issues #47/#48) plus the controlled DNS resolver (`internal/dnsproxy`) ARE the
+  enforcement mechanism. This is the engine the rest of this document describes.
+
+So the bespoke nftables engine is RETAINED, because raw-forkd still needs it; it
+is the only egress enforcement on the host-tap path. It is redundant only in husk
+mode, where the pod netns + `NetworkPolicy` govern instead. Neither mode runs
+both layers over the same sandbox.
+
+Honest scope: in husk mode the `NetworkPolicy` is the policy boundary at the
+OBJECT level (it selects the husk pod and the CNI is responsible for enforcement),
+proven object-level on kind in the conformance job. The actual in-VM enforcement
+of the VM tap by the pod netns requires a KVM-capable kubelet running the husk
+pod's VMM (a bare-metal reference node); that in-VM enforcement is not gated on
+the shared kind runner (the nested VMM does not reliably come up there) and is
+the documented open item.
+
 ## CI proof
 
 `.github/workflows/kvm-test.yaml` runs three REQUIRED (gating) phases on a root
