@@ -16,6 +16,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
+| 6 | Incompatible snapshot restored (crash/corruption) | Refuse on load: the manifest records the producing environment (format version, Firecracker version, CPU model, kernel, config hash); require exact VMM match, exact CPU-model match, format version in the supported set (kernel informational); `--allow-incompatible-snapshots` dev escape hatch | go: `internal/snapcompat` `TestCheck*`, `internal/fork/compat_test.go`; KVM: record a real manifest, assert compatible passes and a VMM / format-version mismatch is refused | **done** (load-gate enforcement after the digest verify, before any Firecracker launch; CPU templates + live cross-version restore open) |
 
 ## 1. RNG and entropy after restore
 
@@ -168,6 +169,39 @@ Required implementation:
 
 Test: fork, record T=0 unique bytes; run a write-heavy workload; assert the
 exported metric grows accordingly and that `GetCapacity` reflects it.
+
+## 6. Snapshot compatibility on restore
+
+A Firecracker snapshot is not portable across arbitrary hosts. Restoring memory
+and device state captured under a different Firecracker version or on a
+different CPU model is a crash or silent-corruption hazard: the guest can fault,
+hang, or run with subtly wrong CPU feature assumptions. The snapshot format
+itself can also change incompatibly between builds.
+
+Contract fields. Every manifest records the producing environment as part of its
+content-addressed identity (`internal/cas.Manifest`):
+
+- `SnapshotFormatVersion` (current = `cas.CurrentSnapshotFormatVersion` = 1)
+- `VMMVersion` (the producing Firecracker version)
+- `CPUModel` (the host CPU model)
+- `KernelVersion` (the guest kernel; informational)
+- `ConfigHash` (the microvm machine config the snapshot was captured under)
+
+Policy (`internal/snapcompat.Check`). A restore is refused unless the format
+version is in the set this build supports, the Firecracker version matches
+exactly, and the CPU model matches exactly. A kernel mismatch is informational
+when the rest match (the guest kernel is baked into the snapshot image). The
+check is part of the load gate: it runs after the content-addressed digest
+verify and before any Firecracker launch, so an incompatible snapshot never
+reaches a VM. Refusals carry an actionable message (rebuild the template on this
+node, or schedule the fork on a matching node). A `--allow-incompatible-snapshots`
+dev escape hatch logs loudly and proceeds; it is for development only.
+
+Open: Firecracker CPU templates would relax the exact-CPU-model rule for a
+defined family; live cross-Firecracker-version restore testing needs two FC
+versions in CI. Both are tracked as follow-ups; the contract refuses them today.
+
+See docs/snapshot-format.md for the full format-version and migration policy.
 
 ## CI job
 

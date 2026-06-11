@@ -243,6 +243,95 @@ jobs:
           echo "  CAS integrity checks passed"
           echo "================================"
 
+      # Snapshot compatibility contract proof (#32). The manifest records the
+      # producing environment (snapshot format version, Firecracker version, CPU
+      # model, kernel) and the engine refuses to restore an incompatible
+      # snapshot on load, after the digest verify and before any Firecracker
+      # launch (internal/snapcompat, internal/fork/engine.go). This phase proves
+      # that load-gate contract on a REAL manifest produced by the REAL
+      # Firecracker on this runner:
+      #   1. record       stamps the manifest with this node's detected
+      #                   environment (real firecracker --version, real
+      #                   /proc/cpuinfo model name, real uname -r), then
+      #      compat-check asserts it PASSES: the snapshot is compatible with the
+      #                   node that produced it.
+      #   2. rewrite-manifest flips the recorded VMMVersion to a bogus value and
+      #      compat-check asserts the load is REFUSED, and that the refusal names
+      #                   the Firecracker (VMM) mismatch.
+      #   3. rewrite-manifest flips the recorded SnapshotFormatVersion to 999 and
+      #      compat-check asserts the load is REFUSED (unsupported format).
+      # The real kernel + rootfs (always present) stand in for the snapshot file
+      # payload; the contract under test is the manifest's recorded producing
+      # environment, not the file bytes (those are covered by the CAS integrity
+      # phase above). HONEST SCOPE: this proves the contract CHECK refuses a
+      # mismatched/downgraded manifest. It is not a live cross-Firecracker-version
+      # restore, which would need two Firecracker versions on the runner; that
+      # remains covered by the contract, not by a live cross-version restore.
+      # This phase genuinely gates: no continue-on-error.
+      - name: Snapshot compatibility contract refuses incompatible restores
+        run: |
+          set -e
+          INPUTS=/tmp/agent-run-test
+          FC=/usr/local/bin/firecracker
+          STORE=/tmp/agent-run-test/cas-compat
+          echo "Node environment under the compatibility contract:"
+          $FC --version | head -1
+          grep -m1 'model name' /proc/cpuinfo || true
+          uname -r
+
+          go build -o /tmp/cas-verify ./cmd/cas-verify/
+
+          # (1) Record a manifest stamped with this node's real producing
+          # environment and assert it is compatible with this node.
+          DIGEST=$(/tmp/cas-verify record \
+            -dir $INPUTS \
+            -store $STORE \
+            -files vmlinux,rootfs.ext4 \
+            -firecracker $FC | tail -1)
+          echo "recorded manifest digest: $DIGEST"
+
+          echo "--- (1) compatible snapshot must PASS ---"
+          /tmp/cas-verify compat-check -digest "$DIGEST" -store $STORE -firecracker $FC
+
+          # (2) Synthesize a Firecracker (VMM) mismatch and assert refusal. The
+          # rewritten manifest has a new digest because the producing environment
+          # is part of the content-addressed identity.
+          echo "--- (2) bogus Firecracker version must be REFUSED ---"
+          BAD_VMM=$(/tmp/cas-verify rewrite-manifest \
+            -digest "$DIGEST" -store $STORE \
+            -vmm-version "0.0.0-incompatible" | tail -1)
+          echo "rewritten (bad VMM) digest: $BAD_VMM"
+          OUT=$(/tmp/cas-verify compat-check -digest "$BAD_VMM" -store $STORE -firecracker $FC 2>&1) && {
+            echo "FAIL: compat-check accepted an incompatible Firecracker version"
+            echo "$OUT"
+            exit 1
+          } || true
+          echo "$OUT"
+          echo "$OUT" | grep -qi "REFUSED" || { echo "FAIL: refusal not reported"; exit 1; }
+          echo "$OUT" | grep -qi "Firecracker" || { echo "FAIL: refusal did not name the Firecracker mismatch"; exit 1; }
+          echo "OK: incompatible Firecracker version refused with a VMM-mismatch message"
+
+          # (3) Synthesize an unsupported snapshot format version and assert refusal.
+          echo "--- (3) unsupported snapshot format version must be REFUSED ---"
+          BAD_FMT=$(/tmp/cas-verify rewrite-manifest \
+            -digest "$DIGEST" -store $STORE \
+            -format-version 999 | tail -1)
+          echo "rewritten (bad format) digest: $BAD_FMT"
+          OUT=$(/tmp/cas-verify compat-check -digest "$BAD_FMT" -store $STORE -firecracker $FC 2>&1) && {
+            echo "FAIL: compat-check accepted an unsupported snapshot format version"
+            echo "$OUT"
+            exit 1
+          } || true
+          echo "$OUT"
+          echo "$OUT" | grep -qi "REFUSED" || { echo "FAIL: refusal not reported"; exit 1; }
+          echo "$OUT" | grep -qi "format version" || { echo "FAIL: refusal did not name the format-version mismatch"; exit 1; }
+          echo "OK: unsupported snapshot format version refused"
+
+          echo "================================================="
+          echo "  Snapshot compatibility contract enforced:"
+          echo "  compatible passes, VMM + format mismatch refused"
+          echo "================================================="
+
       - name: Build guest agent
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/agent-run-test/agent ./guest/agent/

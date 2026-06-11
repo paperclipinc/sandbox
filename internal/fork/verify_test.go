@@ -46,7 +46,7 @@ func TestRecordAndVerifyTemplateRoundTrip(t *testing.T) {
 	dataDir := writeFakeTemplate(t, id)
 	store := newTestStore(t, dataDir)
 
-	d, err := recordTemplateDigest(store, dataDir, id, "")
+	d, err := recordTemplateDigest(store, dataDir, id, cas.Metadata{})
 	if err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestRecordAndVerifyTemplateRoundTrip(t *testing.T) {
 	}
 
 	// Recorded digest must persist and match what verifyTemplate re-derives.
-	got, err := verifyTemplate(dataDir, id, "")
+	got, err := verifyTemplate(dataDir, id, cas.Metadata{})
 	if err != nil {
 		t.Fatalf("verifyTemplate: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestVerifyTemplateFailsOnTamperedMem(t *testing.T) {
 	dataDir := writeFakeTemplate(t, id)
 	store := newTestStore(t, dataDir)
 
-	if _, err := recordTemplateDigest(store, dataDir, id, ""); err != nil {
+	if _, err := recordTemplateDigest(store, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestVerifyTemplateFailsOnTamperedMem(t *testing.T) {
 		t.Fatalf("remove marker: %v", err)
 	}
 
-	if _, err := verifyTemplate(dataDir, id, ""); err == nil {
+	if _, err := verifyTemplate(dataDir, id, cas.Metadata{}); err == nil {
 		t.Fatal("expected verifyTemplate to fail on tampered mem")
 	}
 	if isVerified(dataDir, id) {
@@ -100,11 +100,12 @@ func newGateEngine(t *testing.T, dataDir string, allowUnverified bool) *Engine {
 	t.Helper()
 	store := newTestStore(t, dataDir)
 	return &Engine{
-		dataDir:          dataDir,
-		casStore:         store,
-		allowUnverified:  allowUnverified,
-		unverifiedWarned: make(map[string]struct{}),
-		templateDigests:  make(map[string]cas.Digest),
+		dataDir:            dataDir,
+		casStore:           store,
+		allowUnverified:    allowUnverified,
+		unverifiedWarned:   make(map[string]struct{}),
+		incompatibleWarned: make(map[string]struct{}),
+		templateDigests:    make(map[string]cas.Digest),
 	}
 }
 
@@ -115,7 +116,7 @@ func TestForkGateRefusesWhenMarkerAbsentAndFlagOff(t *testing.T) {
 
 	// Record a digest, then tamper and drop the marker so the lazy verify
 	// inside the gate must fail.
-	if _, err := recordTemplateDigest(e.casStore, dataDir, id, ""); err != nil {
+	if _, err := recordTemplateDigest(e.casStore, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
 	mustWrite(t, filepath.Join(dataDir, "templates", id, "snapshot", "mem"), bytes.Repeat([]byte{0x00}, 9<<20))
@@ -133,7 +134,7 @@ func TestForkGateProceedsWhenFlagOn(t *testing.T) {
 	dataDir := writeFakeTemplate(t, id)
 	e := newGateEngine(t, dataDir, true)
 
-	if _, err := recordTemplateDigest(e.casStore, dataDir, id, ""); err != nil {
+	if _, err := recordTemplateDigest(e.casStore, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
 	mustWrite(t, filepath.Join(dataDir, "templates", id, "snapshot", "mem"), bytes.Repeat([]byte{0x00}, 9<<20))
@@ -151,7 +152,7 @@ func TestForkGateCheapPathWhenMarkerPresent(t *testing.T) {
 	dataDir := writeFakeTemplate(t, id)
 	e := newGateEngine(t, dataDir, false)
 
-	if _, err := recordTemplateDigest(e.casStore, dataDir, id, ""); err != nil {
+	if _, err := recordTemplateDigest(e.casStore, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
 	// Marker present from recording: gate passes without re-hashing even if we
@@ -169,7 +170,7 @@ func TestIsVerifiedReflectsMarker(t *testing.T) {
 		t.Fatal("template should not be verified before recording")
 	}
 	store := newTestStore(t, dataDir)
-	if _, err := recordTemplateDigest(store, dataDir, id, ""); err != nil {
+	if _, err := recordTemplateDigest(store, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
 	}
 	if !isVerified(dataDir, id) {

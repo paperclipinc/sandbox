@@ -87,7 +87,7 @@ func (s *Store) GetManifest(d Digest) (Manifest, error) {
 // written last. Single-pass keeps I/O to one read of each file (it halves I/O
 // on multi-GB images) while memory stays bounded to one ChunkSize buffer. The
 // returned manifest's digest is the snapshot identifier.
-func (s *Store) PutSnapshot(files map[string]string, vmmVersion string, createdUnix int64) (Manifest, error) {
+func (s *Store) PutSnapshot(files map[string]string, meta Metadata) (Manifest, error) {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
@@ -103,11 +103,7 @@ func (s *Store) PutSnapshot(files map[string]string, vmmVersion string, createdU
 		entries = append(entries, fe)
 	}
 
-	m := Manifest{
-		Files:       entries,
-		VMMVersion:  vmmVersion,
-		CreatedUnix: createdUnix,
-	}
+	m := manifestFrom(entries, meta)
 	if err := s.writeManifest(m); err != nil {
 		return Manifest{}, err
 	}
@@ -338,9 +334,13 @@ func decodeManifest(data []byte) (Manifest, error) {
 		Size   int64       `json:"size"`
 	}
 	type manifestJSON struct {
-		CreatedUnix int64      `json:"createdUnix"`
-		Files       []fileJSON `json:"files"`
-		VMMVersion  string     `json:"vmmVersion"`
+		ConfigHash            string     `json:"configHash"`
+		CPUModel              string     `json:"cpuModel"`
+		CreatedUnix           int64      `json:"createdUnix"`
+		Files                 []fileJSON `json:"files"`
+		KernelVersion         string     `json:"kernelVersion"`
+		SnapshotFormatVersion int        `json:"snapshotFormatVersion"`
+		VMMVersion            string     `json:"vmmVersion"`
 	}
 	if len(data) == 0 {
 		return Manifest{}, errEmptyManifest
@@ -350,8 +350,12 @@ func decodeManifest(data []byte) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	m := Manifest{
-		VMMVersion:  mj.VMMVersion,
-		CreatedUnix: mj.CreatedUnix,
+		VMMVersion:            mj.VMMVersion,
+		CreatedUnix:           mj.CreatedUnix,
+		SnapshotFormatVersion: mj.SnapshotFormatVersion,
+		CPUModel:              mj.CPUModel,
+		KernelVersion:         mj.KernelVersion,
+		ConfigHash:            mj.ConfigHash,
 	}
 	for _, fj := range mj.Files {
 		fe := FileEntry{Name: fj.Name, Size: fj.Size}

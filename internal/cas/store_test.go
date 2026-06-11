@@ -29,7 +29,7 @@ func TestPutSnapshotAndMaterializeByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m, err := store.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, "v1", 1000)
+	m, err := store.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, Metadata{VMMVersion: "v1", CreatedUnix: 1000})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestPutSnapshotDedupAddsFewChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m1, err := store.PutSnapshot(map[string]string{"mem": a}, "v1", 1)
+	m1, err := store.PutSnapshot(map[string]string{"mem": a}, Metadata{VMMVersion: "v1", CreatedUnix: 1})
 	if err != nil {
 		t.Fatalf("PutSnapshot 1: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestPutSnapshotDedupAddsFewChunks(t *testing.T) {
 		changed[i] ^= 0xFF
 	}
 	b := writeFile(t, src, "b", changed)
-	m2, err := store.PutSnapshot(map[string]string{"mem": b}, "v1", 2)
+	m2, err := store.PutSnapshot(map[string]string{"mem": b}, Metadata{VMMVersion: "v1", CreatedUnix: 2})
 	if err != nil {
 		t.Fatalf("PutSnapshot 2: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestMaterializeCorruptedChunkFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m, err := store.PutSnapshot(map[string]string{"mem": mem}, "v1", 1)
+	m, err := store.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 1})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestMaterializeCorruptedChunkLeavesNoOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m, err := store.PutSnapshot(map[string]string{"mem": mem}, "v1", 1)
+	m, err := store.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 1})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestMissingChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m, err := store.PutSnapshot(map[string]string{"mem": mem}, "v1", 1)
+	m, err := store.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 1})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}

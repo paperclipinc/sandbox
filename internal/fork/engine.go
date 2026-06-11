@@ -16,6 +16,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
+	"github.com/paperclipinc/sandbox/internal/snapcompat"
 	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
@@ -25,6 +26,7 @@ type Engine struct {
 	dataDir        string
 	templateMgr    *firecracker.TemplateManager
 	firecrackerBin string
+	kernelPath     string
 	jailer         firecracker.JailerConfig
 	sandboxes      map[string]*Sandbox
 	nextPort       int32
@@ -37,12 +39,23 @@ type Engine struct {
 	// or skipped verification, after a loud one-time warning. Development
 	// escape hatch only; default false refuses unverified forks.
 	allowUnverified bool
-	// vmmVersion is threaded into every snapshot manifest. Empty for now; the
-	// version-compat contract is tracked separately (#32).
+	// env is the host environment detected once at engine start (Firecracker
+	// version, CPU model, kernel, restorable format versions). It is stamped
+	// into every template manifest at build and checked against every snapshot
+	// at load (snapcompat). vmmVersion mirrors env.VMMVersion for the legacy
+	// manifest field.
+	env        snapcompat.Environment
 	vmmVersion string
+	// allowIncompatible disables the load-time compatibility refusal
+	// (development only). Default false refuses a snapshot whose recorded
+	// environment is incompatible with this host.
+	allowIncompatible bool
 	// unverifiedWarned records snapshot IDs that already emitted the loud
 	// allow-unverified warning, so it fires once per template not per fork.
 	unverifiedWarned map[string]struct{}
+	// incompatibleWarned records snapshot IDs that already emitted the loud
+	// allow-incompatible warning, so it fires once per template not per fork.
+	incompatibleWarned map[string]struct{}
 	// templateDigests caches the recorded manifest digest per template id so
 	// GetCapacity can report it to the controller without re-reading disk.
 	templateDigests map[string]cas.Digest
@@ -355,8 +368,14 @@ type EngineOpts struct {
 	CASDir string
 	// AllowUnverified disables the verify-on-load refusal (development only).
 	AllowUnverified bool
-	// VMMVersion is recorded in every snapshot manifest. May be empty.
-	VMMVersion string
+	// AllowIncompatible disables the load-time snapshot compatibility refusal
+	// (development only). Default false refuses a snapshot built for a different
+	// Firecracker, CPU, or snapshot format than this host.
+	AllowIncompatible bool
+	// Environment, when non-zero (FormatVersions set), overrides automatic
+	// detection in NewEngine. Tests inject a known environment here; production
+	// leaves it zero so NewEngine detects the real host.
+	Environment snapcompat.Environment
 	// NetManager and NetAllocator enable per-fork networking. Both must be
 	// non-nil to enable it; either nil leaves networking DISABLED (default).
 	NetManager   network.Manager
@@ -494,18 +513,36 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		volBackend = volume.New(dataDir)
 	}
 
+	// Detect the host environment once (Firecracker version, CPU, kernel) so
+	// every template manifest is stamped with it and every snapshot is checked
+	// against it on load. Tests may inject a known environment; production
+	// detects the real host and surfaces a detection failure rather than
+	// silently running with an unknown environment.
+	env := opts.Environment
+	if len(env.FormatVersions) == 0 {
+		detected, derr := snapcompat.DetectEnvironment(firecrackerBin, snapcompat.ExecRunner, snapcompat.ProcCPUInfoReader)
+		if derr != nil {
+			return nil, fmt.Errorf("detect host environment for snapshot compatibility: %w", derr)
+		}
+		env = detected
+	}
+
 	tmplMgr := firecracker.NewTemplateManager(firecrackerBin, kernelPath, dataDir, jailer)
 	e := &Engine{
 		dataDir:              dataDir,
 		firecrackerBin:       firecrackerBin,
+		kernelPath:           kernelPath,
 		jailer:               jailer,
 		templateMgr:          tmplMgr,
 		sandboxes:            make(map[string]*Sandbox),
 		nextPort:             10000,
 		casStore:             store,
 		allowUnverified:      opts.AllowUnverified,
-		vmmVersion:           opts.VMMVersion,
+		allowIncompatible:    opts.AllowIncompatible,
+		env:                  env,
+		vmmVersion:           env.VMMVersion,
 		unverifiedWarned:     make(map[string]struct{}),
+		incompatibleWarned:   make(map[string]struct{}),
 		templateDigests:      make(map[string]cas.Digest),
 		netMgr:               opts.NetManager,
 		netAlloc:             opts.NetAllocator,
@@ -523,6 +560,28 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		return err
 	}
 	return e, nil
+}
+
+// manifestMetadata builds the CAS manifest metadata stamped into a template's
+// snapshot manifest: the current snapshot format version, the detected host
+// environment (Firecracker version, CPU model, kernel), and the config hash.
+// CreatedUnix is fixed at 0 so the digest is a pure content address (build time
+// is not part of the snapshot identity).
+//
+// The config hash covers only stable inputs (vcpu count, memory, and the
+// engine's kernel path), NOT mutable per-build fields like the temp rootfs path:
+// the rootfs bytes are already chunked into the manifest's file entries, and a
+// transient build path would make the digest irreproducible at verify time. This
+// is what lets recordTemplateDigest and verifyTemplate (which passes the default
+// config) derive the same digest from the same on-disk snapshot.
+func (e *Engine) manifestMetadata(cfg firecracker.VMConfig) cas.Metadata {
+	return cas.Metadata{
+		SnapshotFormatVersion: cas.CurrentSnapshotFormatVersion,
+		VMMVersion:            e.env.VMMVersion,
+		CPUModel:              e.env.CPUModel,
+		KernelVersion:         e.env.KernelVersion,
+		ConfigHash:            snapcompat.ConfigHash(cfg.VcpuCount, cfg.MemSizeMib, e.kernelPath, ""),
+	}
 }
 
 func validateKVM() error {
@@ -546,6 +605,13 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 	// lazy verify for templates this process did not build. Refuses on
 	// mismatch unless the development escape hatch is set.
 	if err := e.ensureVerified(snapshotID); err != nil {
+		return nil, err
+	}
+	// Compatibility gate (#32): the verified snapshot's recorded environment
+	// (Firecracker version, CPU model, format) must be restorable on this host.
+	// Runs AFTER the digest verify and BEFORE any Firecracker launch, so an
+	// incompatible snapshot is refused without starting a VM.
+	if err := e.ensureCompatible(snapshotID); err != nil {
 		return nil, err
 	}
 	// The drive path embedded in the snapshot points at the template's
@@ -972,7 +1038,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
 		return err
 	}
-	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.vmmVersion)
+	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))
 	if err != nil {
 		return fmt.Errorf("record template %s digest: %w", id, err)
 	}
@@ -990,7 +1056,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 // discovered on disk after a forkd restart. It is intentionally NOT called per
 // fork: see verify.go for the verify-once-at-registration rationale.
 func (e *Engine) VerifyTemplate(id string) error {
-	d, err := verifyTemplate(e.dataDir, id, e.vmmVersion)
+	d, err := verifyTemplate(e.dataDir, id, e.manifestMetadata(firecracker.DefaultVMConfig()))
 	if err != nil {
 		return err
 	}
@@ -1030,6 +1096,51 @@ func (e *Engine) warnUnverifiedOnce(snapshotID string, cause error) {
 	e.mu.Unlock()
 	if !seen {
 		fmt.Fprintf(os.Stderr, "forkd: WARNING forking UNVERIFIED snapshot %s: %v; integrity is NOT enforced because --allow-unverified-snapshots is set (development only)\n", snapshotID, cause)
+	}
+}
+
+// ensureCompatible loads the snapshot's recorded manifest from the CAS store
+// (keyed by the on-disk recorded digest) and checks its stamped environment
+// against this host. An incompatible snapshot is refused with the actionable
+// snapcompat error UNLESS allowIncompatible is set, in which case it logs a loud
+// one-time warning per template and proceeds. A snapshot with no recorded digest
+// or manifest yet (e.g. a live-fork checkpoint that was never content-addressed)
+// is treated as compatible: there is nothing to check, and ensureVerified
+// already governs integrity.
+func (e *Engine) ensureCompatible(snapshotID string) error {
+	d, err := readDigestFile(e.dataDir, snapshotID)
+	if err != nil {
+		// No recorded digest: nothing to check (e.g. live-fork checkpoints).
+		return nil
+	}
+	m, err := e.casStore.GetManifest(d)
+	if err != nil {
+		// No stored manifest: nothing to check here; integrity is governed by
+		// ensureVerified, which would already have refused a tampered snapshot.
+		return nil
+	}
+	if cerr := snapcompat.Check(m, e.env); cerr != nil {
+		if e.allowIncompatible {
+			e.warnIncompatibleOnce(snapshotID, cerr)
+			return nil
+		}
+		return fmt.Errorf("refusing to fork incompatible snapshot %s: %w (set --allow-incompatible-snapshots to override in development)", snapshotID, cerr)
+	}
+	return nil
+}
+
+// warnIncompatibleOnce emits the loud allow-incompatible warning a single time
+// per snapshot id. The id and the cause carry no secret values and are safe to
+// log.
+func (e *Engine) warnIncompatibleOnce(snapshotID string, cause error) {
+	e.mu.Lock()
+	_, seen := e.incompatibleWarned[snapshotID]
+	if !seen {
+		e.incompatibleWarned[snapshotID] = struct{}{}
+	}
+	e.mu.Unlock()
+	if !seen {
+		fmt.Fprintf(os.Stderr, "forkd: WARNING forking INCOMPATIBLE snapshot %s: %v; compatibility is NOT enforced because --allow-incompatible-snapshots is set (development only)\n", snapshotID, cause)
 	}
 }
 

@@ -27,31 +27,32 @@ import (
 
 func main() {
 	var (
-		listenAddr      string
-		httpAddr        string
-		dataDir         string
-		firecrackerBin  string
-		kernelPath      string
-		mockMode        bool
-		tlsCert         string
-		tlsKey          string
-		tlsCA           string
-		jailerBin       string
-		chrootBase      string
-		uidRange        string
-		casDir          string
-		allowUnverified bool
-		enableNet       bool
-		sandboxSubnet   string
-		uplink          string
-		dnsResolver     string
-		enableDNSEgress bool
-		dnsUpstream     string
-		agentBin        string
-		busyboxBin      string
-		enableVolumes   bool
-		auditLog        string
-		otlpEndpoint    string
+		listenAddr        string
+		httpAddr          string
+		dataDir           string
+		firecrackerBin    string
+		kernelPath        string
+		mockMode          bool
+		tlsCert           string
+		tlsKey            string
+		tlsCA             string
+		jailerBin         string
+		chrootBase        string
+		uidRange          string
+		casDir            string
+		allowUnverified   bool
+		allowIncompatible bool
+		enableNet         bool
+		sandboxSubnet     string
+		uplink            string
+		dnsResolver       string
+		enableDNSEgress   bool
+		dnsUpstream       string
+		agentBin          string
+		busyboxBin        string
+		enableVolumes     bool
+		auditLog          string
+		otlpEndpoint      string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -68,6 +69,7 @@ func main() {
 	flag.StringVar(&uidRange, "uid-range", "64000-64999", "Inclusive uid/gid range for per-VM jailer users, formatted low-high")
 	flag.StringVar(&casDir, "cas-dir", "", "Content-addressed store directory for snapshot integrity and transfer. Empty means <data-dir>/cas")
 	flag.BoolVar(&allowUnverified, "allow-unverified-snapshots", false, "Allow forking snapshots that fail or skip integrity verification (development only; refused by default)")
+	flag.BoolVar(&allowIncompatible, "allow-incompatible-snapshots", false, "Allow forking snapshots whose recorded environment (Firecracker version, CPU model, or snapshot format) is incompatible with this host (development only; refused by default)")
 	flag.BoolVar(&enableNet, "enable-networking", false, "Enable per-sandbox guest networking (tap device, egress nftables, NIC attach). Default false until proven on KVM CI")
 	flag.StringVar(&sandboxSubnet, "sandbox-subnet", "10.200.0.0/16", "IPv4 subnet carved into per-sandbox /30 point-to-point links; requires --enable-networking")
 	flag.StringVar(&uplink, "uplink", "", "Host egress interface for the optional sandbox-subnet MASQUERADE rule. Empty relies on the node's existing NAT")
@@ -121,11 +123,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "forkd: jailer DISABLED; Firecracker runs unjailed as forkd's user (threat model section 1); supply --jailer for any non-development deployment")
 		}
 		engineOpts := fork.EngineOpts{
-			CASDir:          casDir,
-			AllowUnverified: allowUnverified,
-			AgentBinPath:    agentBin,
-			BusyboxPath:     busyboxBin,
-			EnableVolumes:   enableVolumes,
+			CASDir:            casDir,
+			AllowUnverified:   allowUnverified,
+			AllowIncompatible: allowIncompatible,
+			AgentBinPath:      agentBin,
+			BusyboxPath:       busyboxBin,
+			EnableVolumes:     enableVolumes,
 		}
 		if enableVolumes {
 			fmt.Println("forkd: per-fork volumes ENABLED")

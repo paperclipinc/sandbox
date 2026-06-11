@@ -11,6 +11,23 @@
 //	             file to the original; exit 0 only if every file is byte-identical.
 //	tamper-check put, corrupt one byte of one chunk in the store, then assert
 //	             Materialize fails (the integrity gate). Exit 0 only if it fails.
+//	record       PutSnapshot the files in a snapshot dir, stamping the CURRENT
+//	             detected environment (snapshot format version, Firecracker
+//	             version, CPU model, kernel) into the manifest, then print its
+//	             digest. This produces a manifest whose recorded environment
+//	             genuinely matches the producing node, so a follow-up
+//	             compat-check PASSES honestly.
+//	compat-check load a recorded manifest by -digest and run snapcompat.Check
+//	             against the CURRENT detected environment (Firecracker version,
+//	             CPU model, kernel). Exit 0 if compatible, nonzero with the
+//	             actionable refusal message if not. This proves the load-gate
+//	             compatibility contract on a real recorded manifest.
+//	rewrite-manifest
+//	             load a recorded manifest by -digest, override one or more of its
+//	             compatibility fields (-vmm-version, -cpu-model, -format-version),
+//	             re-record the rewritten manifest, and print its new digest. This
+//	             synthesizes an incompatible snapshot from a real one so a
+//	             follow-up compat-check can prove the mismatch is refused.
 //
 // A snapshot dir is expected to contain the files named by -files (default
 // "mem,vmstate"). The store root is given by -store.
@@ -19,6 +36,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +45,7 @@ import (
 	"strings"
 
 	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/sandbox/internal/snapcompat"
 )
 
 func main() {
@@ -47,6 +66,12 @@ func main() {
 		err = runCheck(args)
 	case "tamper-check":
 		err = runTamperCheck(args)
+	case "record":
+		err = runRecord(args)
+	case "compat-check":
+		err = runCompatCheck(args)
+	case "rewrite-manifest":
+		err = runRewriteManifest(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -69,6 +94,9 @@ modes:
   materialize  -digest <manifest> -store <root> -out <dir>
   check        -dir <snapshot dir> -store <root> -out <dir> [-files mem,vmstate] [-vmm-version V]
   tamper-check -dir <snapshot dir> -store <root> -out <dir> [-files mem,vmstate] [-vmm-version V]
+  record       -dir <snapshot dir> -store <root> [-files mem,vmstate] [-firecracker <path>]
+  compat-check -digest <manifest> -store <root> [-firecracker <path>]
+  rewrite-manifest -digest <manifest> -store <root> [-vmm-version V] [-cpu-model M] [-format-version N]
 `)
 }
 
@@ -144,7 +172,7 @@ func runPut(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}
@@ -181,7 +209,7 @@ func runCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}
@@ -223,7 +251,7 @@ func runTamperCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}
@@ -274,6 +302,176 @@ func flipOneByte(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// runRecord chunks the snapshot files and records a manifest stamped with the
+// CURRENT detected environment: the snapshot format version this build
+// produces (cas.CurrentSnapshotFormatVersion), the Firecracker version, the
+// host CPU model, and the kernel. The recorded environment therefore genuinely
+// matches the producing node, so a follow-up compat-check against the same node
+// PASSES honestly (it is not a hand-faked match). CreatedUnix is fixed at 0 for
+// a reproducible template digest.
+func runRecord(args []string) error {
+	fs := flag.NewFlagSet("record", flag.ContinueOnError)
+	var dir, store, files, firecracker string
+	fs.StringVar(&dir, "dir", "", "snapshot directory holding the input files")
+	fs.StringVar(&store, "store", "", "CAS store root")
+	fs.StringVar(&files, "files", "mem,vmstate", "comma-separated logical file names to look for in -dir")
+	fs.StringVar(&firecracker, "firecracker", "/usr/local/bin/firecracker", "path to the firecracker binary for version detection")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if store == "" {
+		return fmt.Errorf("-store is required")
+	}
+	if dir == "" {
+		return fmt.Errorf("-dir is required")
+	}
+
+	snapFiles, err := snapshotFiles(dir, files)
+	if err != nil {
+		return err
+	}
+	env, err := snapcompat.DetectEnvironment(firecracker, snapcompat.ExecRunner, snapcompat.ProcCPUInfoReader)
+	if err != nil {
+		return fmt.Errorf("detect environment: %w", err)
+	}
+	fmt.Printf("recording producing environment: firecracker=%q cpu=%q kernel=%q formatVersion=%d\n",
+		env.VMMVersion, env.CPUModel, env.KernelVersion, cas.CurrentSnapshotFormatVersion)
+
+	st, err := cas.New(store)
+	if err != nil {
+		return err
+	}
+	m, err := st.PutSnapshot(snapFiles, cas.Metadata{
+		SnapshotFormatVersion: cas.CurrentSnapshotFormatVersion,
+		VMMVersion:            env.VMMVersion,
+		CPUModel:              env.CPUModel,
+		KernelVersion:         env.KernelVersion,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(m.Digest())
+	return nil
+}
+
+// runCompatCheck loads a recorded manifest by digest and runs the snapshot
+// compatibility contract (snapcompat.Check) against the CURRENT environment
+// detected on this host: the Firecracker version, the host CPU model, and the
+// kernel. It exits 0 when the snapshot is compatible with the node and nonzero
+// (with the actionable refusal message) when it is not. This proves the
+// load-gate contract on a real recorded manifest, not a unit fixture.
+func runCompatCheck(args []string) error {
+	fs := flag.NewFlagSet("compat-check", flag.ContinueOnError)
+	var store, digest, firecracker string
+	fs.StringVar(&store, "store", "", "CAS store root")
+	fs.StringVar(&digest, "digest", "", "manifest digest to check")
+	fs.StringVar(&firecracker, "firecracker", "/usr/local/bin/firecracker", "path to the firecracker binary for version detection")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if store == "" {
+		return fmt.Errorf("-store is required")
+	}
+	if digest == "" {
+		return fmt.Errorf("-digest is required")
+	}
+
+	s, err := cas.New(store)
+	if err != nil {
+		return err
+	}
+	m, err := s.GetManifest(cas.Digest(digest))
+	if err != nil {
+		return err
+	}
+
+	env, err := snapcompat.DetectEnvironment(firecracker, snapcompat.ExecRunner, snapcompat.ProcCPUInfoReader)
+	if err != nil {
+		return fmt.Errorf("detect environment: %w", err)
+	}
+	fmt.Printf("detected environment: firecracker=%q cpu=%q kernel=%q formatVersions=%v\n",
+		env.VMMVersion, env.CPUModel, env.KernelVersion, env.FormatVersions)
+	fmt.Printf("manifest records: firecracker=%q cpu=%q kernel=%q formatVersion=%d\n",
+		m.VMMVersion, m.CPUModel, m.KernelVersion, m.SnapshotFormatVersion)
+
+	if cerr := snapcompat.Check(m, env); cerr != nil {
+		if errors.Is(cerr, snapcompat.ErrIncompatible) {
+			return fmt.Errorf("COMPAT CHECK REFUSED (incompatible snapshot): %w", cerr)
+		}
+		return fmt.Errorf("COMPAT CHECK error: %w", cerr)
+	}
+	fmt.Println("COMPAT CHECK PASSED: snapshot is compatible with this node")
+	return nil
+}
+
+// runRewriteManifest loads a recorded manifest by digest, overrides one or more
+// of its compatibility fields, and re-records the rewritten manifest under its
+// new digest (printed to stdout). It is the synthesis half of the CI proof:
+// from a real recorded manifest it produces an intentionally incompatible one
+// (a bogus Firecracker version, a different CPU model, or an unsupported format
+// version) so a follow-up compat-check can prove the mismatch is refused. Only
+// flags that are explicitly set change a field; the rest are copied verbatim.
+func runRewriteManifest(args []string) error {
+	fs := flag.NewFlagSet("rewrite-manifest", flag.ContinueOnError)
+	var store, digest, vmmVersion, cpuModel string
+	var formatVersion int
+	fs.StringVar(&store, "store", "", "CAS store root")
+	fs.StringVar(&digest, "digest", "", "manifest digest to rewrite")
+	fs.StringVar(&vmmVersion, "vmm-version", "", "override the recorded Firecracker (VMM) version")
+	fs.StringVar(&cpuModel, "cpu-model", "", "override the recorded CPU model")
+	fs.IntVar(&formatVersion, "format-version", -1, "override the recorded snapshot format version")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if store == "" {
+		return fmt.Errorf("-store is required")
+	}
+	if digest == "" {
+		return fmt.Errorf("-digest is required")
+	}
+
+	s, err := cas.New(store)
+	if err != nil {
+		return err
+	}
+	m, err := s.GetManifest(cas.Digest(digest))
+	if err != nil {
+		return err
+	}
+
+	// Only fields explicitly set by a flag change; everything else (including
+	// the file chunks) is preserved so the rewritten manifest still
+	// materializes byte-identically.
+	changed := false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "vmm-version":
+			fmt.Printf("rewrite vmmVersion %q -> %q\n", m.VMMVersion, vmmVersion)
+			m.VMMVersion = vmmVersion
+			changed = true
+		case "cpu-model":
+			fmt.Printf("rewrite cpuModel %q -> %q\n", m.CPUModel, cpuModel)
+			m.CPUModel = cpuModel
+			changed = true
+		case "format-version":
+			fmt.Printf("rewrite snapshotFormatVersion %d -> %d\n", m.SnapshotFormatVersion, formatVersion)
+			m.SnapshotFormatVersion = formatVersion
+			changed = true
+		}
+	})
+	if !changed {
+		return fmt.Errorf("no compatibility field overridden; set at least one of -vmm-version, -cpu-model, -format-version")
+	}
+
+	if err := s.PutManifest(m); err != nil {
+		return fmt.Errorf("re-record rewritten manifest: %w", err)
+	}
+	// The compatibility fields are part of the content-addressed digest, so the
+	// rewritten manifest has a NEW digest. Print it for the follow-up check.
+	fmt.Println(m.Digest())
+	return nil
 }
 
 func fileSHA(path string) (string, error) {

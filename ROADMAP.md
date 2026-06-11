@@ -80,6 +80,24 @@ licensing/IP posture (#34), security operations: we ship a kernel
 (#35), hosted-service abuse controls with OSS hooks (#36), and
 community/credibility operations (#37).
 
+Format-freeze blockers:
+
+- ✅ Snapshot version-compatibility contract (#32): the manifest records the
+  snapshot format version (current = 1), the producing Firecracker version, the
+  CPU model, the kernel, and the machine-config hash, all part of the
+  content-addressed identity. The engine refuses to restore an incompatible
+  snapshot on load (exact VMM match, exact CPU-model match, format version in
+  the supported set; kernel informational), after the digest verify and before
+  any Firecracker launch, with an actionable error and a
+  `--allow-incompatible-snapshots` dev escape hatch. Proven by unit tests and a
+  KVM CI phase that records a real manifest, confirms it is compatible with its
+  producing node, and confirms a VMM mismatch and an unsupported format version
+  are refused. See docs/snapshot-format.md. Open follow-ups: Firecracker CPU
+  templates for cross-CPU-model restore, and live cross-Firecracker-version
+  restore testing (needs two FC versions in CI).
+- ⬜ Per-workspace encryption keys / crypto-shredding (#31).
+- ⬜ CoW-aware metering, the shared-pages billing primitive (#33).
+
 ## 0. Make the claimed system real (in progress)
 
 The README previously described an end-to-end system; parts of it were stubs.
