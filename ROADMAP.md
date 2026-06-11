@@ -312,11 +312,21 @@ or spoof.
 
 ## 5. Talos + Hetzner reference platform
 
-- ⬜ `docs/platforms/talos-hetzner.md`: machine-config fragments (/dev/kvm,
-  modules, hugepages, CoW volume backend), minimal forkd privilege under
-  Talos
+- ✅ `deploy/talos/worker-kvm.yaml` and `deploy/talos/controlplane.yaml`:
+  machine-config patches for KVM-capable workers (/dev/kvm, modules kvm /
+  kvm_intel / kvm_amd / vhost_vsock / tun, node label, data partition);
+  validated by `talosctl validate --mode metal` in the `talos-validate` CI job.
+- ✅ `docs/platforms/talos-hetzner.md`: end-to-end bare-metal provisioning
+  runbook (Hetzner AX BOM as a reference example, NOT measured; Cloud vs
+  dedicated explained; Talos install + machine-config flow; KVM readiness
+  checks; operator deploy + PKI bootstrap; smoke test; capacity planning
+  pointers). CI-VERIFIED vs HARDWARE-REQUIRED split clearly marked in the
+  runbook.
 - ⬜ Evaluate dm-thin / xfs-reflink as alternatives to the btrfs dependency
-- ⬜ Hetzner BOM (3× AX nodes) with measured density and cost/sandbox-hour
+- ⬜ Hetzner AX reference BOM: MEASURED density and cost/sandbox-hour on the
+  pinned reference node. Needs the hardware; do NOT fabricate numbers.
+  Will update `BENCHMARKS.md` and `docs/platforms/talos-hetzner.md` once
+  measured (ROADMAP section 4 bare-metal bench run).
 - ⬜ Measure and publish the nested-virt penalty on EKS/GKE/AKS instead of
   hiding it
 
