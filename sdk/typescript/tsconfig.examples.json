@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "paths": {
+      "@agentrun/sdk": ["./dist/index.d.ts"]
+    }
+  },
+  "include": ["examples"]
+}

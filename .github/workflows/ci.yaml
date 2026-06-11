@@ -110,6 +110,22 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v
 
+  typescript-sdk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run lint
+      - run: npm pack --dry-run
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

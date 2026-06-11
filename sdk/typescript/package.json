@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit && npm run check:examples",
+    "check:examples": "tsc --project tsconfig.examples.json"
   },
   "engines": {
     "node": ">=18"
