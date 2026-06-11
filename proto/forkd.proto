@@ -270,6 +270,24 @@ message GetCapacityResponse {
   // identity in the SandboxPool status even for templates it did not just
   // build.
   map<string, string> template_digests = 9;
+  // templates carries a per-template capacity estimate the controller uses to
+  // project the marginal memory cost of placing a new fork: the shared set a
+  // cold start pays once, and the average per-fork unique footprint a warm
+  // fork adds. Derived from the node's CoW-aware metering.
+  repeated TemplateCapacity templates = 10;
+}
+
+// TemplateCapacity is the per-template memory estimate the controller uses to
+// bin-pack forks. shared_once_bytes is the template's CoW shared set counted a
+// single time (paid once on a cold start of this template on a node).
+// avg_fork_unique_bytes is the mean per-fork unique footprint (paid by every
+// fork, warm or cold); when fork_count is 0 it is a small floor estimate.
+message TemplateCapacity {
+  string template_id = 1;
+  string snapshot_digest = 2;
+  int64 shared_once_bytes = 3;
+  int64 avg_fork_unique_bytes = 4;
+  int32 fork_count = 5;
 }
 
 // --- Shared types ---

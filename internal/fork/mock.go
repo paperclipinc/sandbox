@@ -45,6 +45,11 @@ type MockEngine struct {
 	// CreateTemplate call (nil if none). Tests assert the template's declared
 	// volumes were plumbed through the CreateTemplate RPC to the engine.
 	lastTemplateVolumes []volume.Spec
+	// memoryTotalBytes is the fixed node memory budget GetCapacity reports so
+	// envtest scheduling has a non-zero capacity to bin-pack against. Defaults
+	// to 16 GiB; SetMemoryTotal overrides it (Task 3 envtests shrink it to
+	// force capacity exhaustion).
+	memoryTotalBytes int64
 }
 
 // LastInitCommands returns the init commands passed to the most recent
@@ -98,10 +103,21 @@ func (e *MockEngine) vsockPath(sandboxID string) string {
 
 func NewMockEngine() *MockEngine {
 	return &MockEngine{
-		templates: make(map[string]*Template),
-		sandboxes: make(map[string]*Sandbox),
-		ForkDelay: 800 * time.Microsecond,
+		templates:        make(map[string]*Template),
+		sandboxes:        make(map[string]*Sandbox),
+		ForkDelay:        800 * time.Microsecond,
+		memoryTotalBytes: 16 * 1024 * 1024 * 1024,
 	}
+}
+
+// SetMemoryTotal overrides the fixed node memory budget the mock's GetCapacity
+// reports. Tests use it to shrink the budget and exercise capacity-exhaustion
+// paths (the scheduler's ErrNoCapacity and the claim reconciler's bounded
+// failure).
+func (e *MockEngine) SetMemoryTotal(bytes int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.memoryTotalBytes = bytes
 }
 
 func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
@@ -253,18 +269,40 @@ func (e *MockEngine) GetCapacity() Capacity {
 		})
 	}
 	active := int32(len(e.sandboxes))
+	memTotal := e.memoryTotalBytes
 	e.mu.RUnlock()
 
 	report := metering.Aggregate(samples)
 
+	// Per-template estimates: derive from live forks when present, else floor a
+	// known template so envtest scheduling has a non-zero cold-start estimate
+	// to bin-pack against even before any fork exists.
+	estimates := templateEstimatesFromReport(report, nil)
+	seen := make(map[string]struct{}, len(estimates))
+	for _, est := range estimates {
+		seen[est.TemplateID] = struct{}{}
+	}
+	for _, id := range templateIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		floor := templateEstimateFloor()
+		floor.TemplateID = id
+		// A representative cold shared set (256 MiB) so a cold placement has a
+		// realistic non-zero marginal cost in scheduling tests.
+		floor.SharedOnceBytes = 256 * 1024 * 1024
+		estimates = append(estimates, floor)
+	}
+
 	return Capacity{
-		ActiveSandboxes: active,
-		MaxSandboxes:    1000,
-		MemoryTotal:     8 * 1024 * 1024 * 1024,
-		MemoryUsed:      report.UsedCoWAware,
-		MemoryShared:    report.SharedOnceTotal(),
-		TemplateIDs:     templateIDs,
-		KVMAvailable:    false,
+		ActiveSandboxes:   active,
+		MaxSandboxes:      1000,
+		MemoryTotal:       memTotal,
+		MemoryUsed:        report.UsedCoWAware,
+		MemoryShared:      report.SharedOnceTotal(),
+		TemplateIDs:       templateIDs,
+		TemplateEstimates: estimates,
+		KVMAvailable:      false,
 	}
 }
 

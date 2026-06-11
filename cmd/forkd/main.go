@@ -54,6 +54,7 @@ func main() {
 		enableEncryption  bool
 		auditLog          string
 		otlpEndpoint      string
+		memReserveBytes   int64
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -83,6 +84,7 @@ func main() {
 	flag.BoolVar(&enableEncryption, "enable-encryption", false, "Encrypt template snapshots at rest: each template is built inside a per-template LUKS2 container (requires cryptsetup) and crypto-shred at delete. Default false (plaintext snapshots on disk, exactly as before). PR1 KEY-CUSTODY LIMITATION: keys are generated and held in node memory only, are NOT escrowed, and are lost on restart (an existing encrypted template can then no longer be opened); a follow-up moves key custody to a Kubernetes Secret or KMS")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
+	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
 	flag.Parse()
 
 	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-forkd", otlpEndpoint)
@@ -125,12 +127,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "forkd: jailer DISABLED; Firecracker runs unjailed as forkd's user (threat model section 1); supply --jailer for any non-development deployment")
 		}
 		engineOpts := fork.EngineOpts{
-			CASDir:            casDir,
-			AllowUnverified:   allowUnverified,
-			AllowIncompatible: allowIncompatible,
-			AgentBinPath:      agentBin,
-			BusyboxPath:       busyboxBin,
-			EnableVolumes:     enableVolumes,
+			CASDir:             casDir,
+			AllowUnverified:    allowUnverified,
+			AllowIncompatible:  allowIncompatible,
+			AgentBinPath:       agentBin,
+			BusyboxPath:        busyboxBin,
+			EnableVolumes:      enableVolumes,
+			MemoryReserveBytes: memReserveBytes,
 		}
 		if enableVolumes {
 			fmt.Println("forkd: per-fork volumes ENABLED")

@@ -2019,8 +2019,13 @@ type GetCapacityResponse struct {
 	// identity in the SandboxPool status even for templates it did not just
 	// build.
 	TemplateDigests map[string]string `protobuf:"bytes,9,rep,name=template_digests,json=templateDigests,proto3" json:"template_digests,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// templates carries a per-template capacity estimate the controller uses to
+	// project the marginal memory cost of placing a new fork: the shared set a
+	// cold start pays once, and the average per-fork unique footprint a warm
+	// fork adds. Derived from the node's CoW-aware metering.
+	Templates     []*TemplateCapacity `protobuf:"bytes,10,rep,name=templates,proto3" json:"templates,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetCapacityResponse) Reset() {
@@ -2116,6 +2121,94 @@ func (x *GetCapacityResponse) GetTemplateDigests() map[string]string {
 	return nil
 }
 
+func (x *GetCapacityResponse) GetTemplates() []*TemplateCapacity {
+	if x != nil {
+		return x.Templates
+	}
+	return nil
+}
+
+// TemplateCapacity is the per-template memory estimate the controller uses to
+// bin-pack forks. shared_once_bytes is the template's CoW shared set counted a
+// single time (paid once on a cold start of this template on a node).
+// avg_fork_unique_bytes is the mean per-fork unique footprint (paid by every
+// fork, warm or cold); when fork_count is 0 it is a small floor estimate.
+type TemplateCapacity struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	TemplateId         string                 `protobuf:"bytes,1,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
+	SnapshotDigest     string                 `protobuf:"bytes,2,opt,name=snapshot_digest,json=snapshotDigest,proto3" json:"snapshot_digest,omitempty"`
+	SharedOnceBytes    int64                  `protobuf:"varint,3,opt,name=shared_once_bytes,json=sharedOnceBytes,proto3" json:"shared_once_bytes,omitempty"`
+	AvgForkUniqueBytes int64                  `protobuf:"varint,4,opt,name=avg_fork_unique_bytes,json=avgForkUniqueBytes,proto3" json:"avg_fork_unique_bytes,omitempty"`
+	ForkCount          int32                  `protobuf:"varint,5,opt,name=fork_count,json=forkCount,proto3" json:"fork_count,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *TemplateCapacity) Reset() {
+	*x = TemplateCapacity{}
+	mi := &file_proto_forkd_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TemplateCapacity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TemplateCapacity) ProtoMessage() {}
+
+func (x *TemplateCapacity) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_forkd_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TemplateCapacity.ProtoReflect.Descriptor instead.
+func (*TemplateCapacity) Descriptor() ([]byte, []int) {
+	return file_proto_forkd_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *TemplateCapacity) GetTemplateId() string {
+	if x != nil {
+		return x.TemplateId
+	}
+	return ""
+}
+
+func (x *TemplateCapacity) GetSnapshotDigest() string {
+	if x != nil {
+		return x.SnapshotDigest
+	}
+	return ""
+}
+
+func (x *TemplateCapacity) GetSharedOnceBytes() int64 {
+	if x != nil {
+		return x.SharedOnceBytes
+	}
+	return 0
+}
+
+func (x *TemplateCapacity) GetAvgForkUniqueBytes() int64 {
+	if x != nil {
+		return x.AvgForkUniqueBytes
+	}
+	return 0
+}
+
+func (x *TemplateCapacity) GetForkCount() int32 {
+	if x != nil {
+		return x.ForkCount
+	}
+	return 0
+}
+
 type ResourceSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Vcpus         int32                  `protobuf:"varint,1,opt,name=vcpus,proto3" json:"vcpus,omitempty"`
@@ -2126,7 +2219,7 @@ type ResourceSpec struct {
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_proto_forkd_proto_msgTypes[34]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2138,7 +2231,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[34]
+	mi := &file_proto_forkd_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2151,7 +2244,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{34}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ResourceSpec) GetVcpus() int32 {
@@ -2178,7 +2271,7 @@ type EnvVar struct {
 
 func (x *EnvVar) Reset() {
 	*x = EnvVar{}
-	mi := &file_proto_forkd_proto_msgTypes[35]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2190,7 +2283,7 @@ func (x *EnvVar) String() string {
 func (*EnvVar) ProtoMessage() {}
 
 func (x *EnvVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[35]
+	mi := &file_proto_forkd_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2203,7 +2296,7 @@ func (x *EnvVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvVar.ProtoReflect.Descriptor instead.
 func (*EnvVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{35}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *EnvVar) GetKey() string {
@@ -2230,7 +2323,7 @@ type SecretVar struct {
 
 func (x *SecretVar) Reset() {
 	*x = SecretVar{}
-	mi := &file_proto_forkd_proto_msgTypes[36]
+	mi := &file_proto_forkd_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2242,7 +2335,7 @@ func (x *SecretVar) String() string {
 func (*SecretVar) ProtoMessage() {}
 
 func (x *SecretVar) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[36]
+	mi := &file_proto_forkd_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2255,7 +2348,7 @@ func (x *SecretVar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretVar.ProtoReflect.Descriptor instead.
 func (*SecretVar) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{36}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *SecretVar) GetKey() string {
@@ -2282,7 +2375,7 @@ type NetworkConfig struct {
 
 func (x *NetworkConfig) Reset() {
 	*x = NetworkConfig{}
-	mi := &file_proto_forkd_proto_msgTypes[37]
+	mi := &file_proto_forkd_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2294,7 +2387,7 @@ func (x *NetworkConfig) String() string {
 func (*NetworkConfig) ProtoMessage() {}
 
 func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_forkd_proto_msgTypes[37]
+	mi := &file_proto_forkd_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2307,7 +2400,7 @@ func (x *NetworkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkConfig.ProtoReflect.Descriptor instead.
 func (*NetworkConfig) Descriptor() ([]byte, []int) {
-	return file_proto_forkd_proto_rawDescGZIP(), []int{37}
+	return file_proto_forkd_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *NetworkConfig) GetEgressPolicy() string {
@@ -2484,7 +2577,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x12(\n" +
 	"\x10modified_at_unix\x18\x04 \x01(\x03R\x0emodifiedAtUnix\x12\x12\n" +
 	"\x04mode\x18\x05 \x01(\rR\x04mode\"\x14\n" +
-	"\x12GetCapacityRequest\"\xfa\x03\n" +
+	"\x12GetCapacityRequest\"\xb1\x04\n" +
 	"\x13GetCapacityResponse\x12)\n" +
 	"\x10active_sandboxes\x18\x01 \x01(\x05R\x0factiveSandboxes\x12#\n" +
 	"\rmax_sandboxes\x18\x02 \x01(\x05R\fmaxSandboxes\x12,\n" +
@@ -2494,10 +2587,20 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\ftemplate_ids\x18\x06 \x03(\tR\vtemplateIds\x12!\n" +
 	"\fsnapshot_ids\x18\a \x03(\tR\vsnapshotIds\x12#\n" +
 	"\rkvm_available\x18\b \x01(\bR\fkvmAvailable\x12Z\n" +
-	"\x10template_digests\x18\t \x03(\v2/.forkd.GetCapacityResponse.TemplateDigestsEntryR\x0ftemplateDigests\x1aB\n" +
+	"\x10template_digests\x18\t \x03(\v2/.forkd.GetCapacityResponse.TemplateDigestsEntryR\x0ftemplateDigests\x125\n" +
+	"\ttemplates\x18\n" +
+	" \x03(\v2\x17.forkd.TemplateCapacityR\ttemplates\x1aB\n" +
 	"\x14TemplateDigestsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xda\x01\n" +
+	"\x10TemplateCapacity\x12\x1f\n" +
+	"\vtemplate_id\x18\x01 \x01(\tR\n" +
+	"templateId\x12'\n" +
+	"\x0fsnapshot_digest\x18\x02 \x01(\tR\x0esnapshotDigest\x12*\n" +
+	"\x11shared_once_bytes\x18\x03 \x01(\x03R\x0fsharedOnceBytes\x121\n" +
+	"\x15avg_fork_unique_bytes\x18\x04 \x01(\x03R\x12avgForkUniqueBytes\x12\x1d\n" +
+	"\n" +
+	"fork_count\x18\x05 \x01(\x05R\tforkCount\"A\n" +
 	"\fResourceSpec\x12\x14\n" +
 	"\x05vcpus\x18\x01 \x01(\x05R\x05vcpus\x12\x1b\n" +
 	"\tmemory_mb\x18\x02 \x01(\x03R\bmemoryMb\"0\n" +
@@ -2543,7 +2646,7 @@ func file_proto_forkd_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_forkd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+var file_proto_forkd_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_proto_forkd_proto_goTypes = []any{
 	(ExecStreamResponse_Stream)(0), // 0: forkd.ExecStreamResponse.Stream
 	(*CreateTemplateRequest)(nil),  // 1: forkd.CreateTemplateRequest
@@ -2580,62 +2683,64 @@ var file_proto_forkd_proto_goTypes = []any{
 	(*FileInfo)(nil),               // 32: forkd.FileInfo
 	(*GetCapacityRequest)(nil),     // 33: forkd.GetCapacityRequest
 	(*GetCapacityResponse)(nil),    // 34: forkd.GetCapacityResponse
-	(*ResourceSpec)(nil),           // 35: forkd.ResourceSpec
-	(*EnvVar)(nil),                 // 36: forkd.EnvVar
-	(*SecretVar)(nil),              // 37: forkd.SecretVar
-	(*NetworkConfig)(nil),          // 38: forkd.NetworkConfig
-	nil,                            // 39: forkd.GetCapacityResponse.TemplateDigestsEntry
+	(*TemplateCapacity)(nil),       // 35: forkd.TemplateCapacity
+	(*ResourceSpec)(nil),           // 36: forkd.ResourceSpec
+	(*EnvVar)(nil),                 // 37: forkd.EnvVar
+	(*SecretVar)(nil),              // 38: forkd.SecretVar
+	(*NetworkConfig)(nil),          // 39: forkd.NetworkConfig
+	nil,                            // 40: forkd.GetCapacityResponse.TemplateDigestsEntry
 }
 var file_proto_forkd_proto_depIdxs = []int32{
-	35, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
+	36, // 0: forkd.CreateTemplateRequest.resources:type_name -> forkd.ResourceSpec
 	13, // 1: forkd.CreateTemplateRequest.volumes:type_name -> forkd.VolumeMount
 	7,  // 2: forkd.ListTemplatesResponse.templates:type_name -> forkd.TemplateInfo
-	36, // 3: forkd.ForkRequest.env:type_name -> forkd.EnvVar
-	37, // 4: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
-	38, // 5: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
+	37, // 3: forkd.ForkRequest.env:type_name -> forkd.EnvVar
+	38, // 4: forkd.ForkRequest.secrets:type_name -> forkd.SecretVar
+	39, // 5: forkd.ForkRequest.network:type_name -> forkd.NetworkConfig
 	13, // 6: forkd.ForkRequest.volumes:type_name -> forkd.VolumeMount
-	36, // 7: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
-	36, // 8: forkd.ExecRequest.env:type_name -> forkd.EnvVar
-	36, // 9: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
+	37, // 7: forkd.ForkRunningRequest.env:type_name -> forkd.EnvVar
+	37, // 8: forkd.ExecRequest.env:type_name -> forkd.EnvVar
+	37, // 9: forkd.ExecStreamRequest.env:type_name -> forkd.EnvVar
 	0,  // 10: forkd.ExecStreamResponse.stream:type_name -> forkd.ExecStreamResponse.Stream
 	25, // 11: forkd.ListSandboxesResponse.sandboxes:type_name -> forkd.SandboxInfo
 	32, // 12: forkd.ListDirResponse.entries:type_name -> forkd.FileInfo
-	39, // 13: forkd.GetCapacityResponse.template_digests:type_name -> forkd.GetCapacityResponse.TemplateDigestsEntry
-	1,  // 14: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
-	3,  // 15: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
-	5,  // 16: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
-	8,  // 17: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
-	10, // 18: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
-	12, // 19: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
-	15, // 20: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
-	17, // 21: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
-	19, // 22: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
-	21, // 23: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
-	23, // 24: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
-	26, // 25: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
-	28, // 26: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
-	30, // 27: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
-	33, // 28: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
-	2,  // 29: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
-	4,  // 30: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
-	6,  // 31: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
-	9,  // 32: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
-	11, // 33: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
-	14, // 34: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
-	16, // 35: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
-	18, // 36: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
-	20, // 37: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
-	22, // 38: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
-	24, // 39: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
-	27, // 40: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
-	29, // 41: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
-	31, // 42: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
-	34, // 43: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
-	29, // [29:44] is the sub-list for method output_type
-	14, // [14:29] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	40, // 13: forkd.GetCapacityResponse.template_digests:type_name -> forkd.GetCapacityResponse.TemplateDigestsEntry
+	35, // 14: forkd.GetCapacityResponse.templates:type_name -> forkd.TemplateCapacity
+	1,  // 15: forkd.ForkDaemon.CreateTemplate:input_type -> forkd.CreateTemplateRequest
+	3,  // 16: forkd.ForkDaemon.DeleteTemplate:input_type -> forkd.DeleteTemplateRequest
+	5,  // 17: forkd.ForkDaemon.ListTemplates:input_type -> forkd.ListTemplatesRequest
+	8,  // 18: forkd.ForkDaemon.CreateSnapshot:input_type -> forkd.CreateSnapshotRequest
+	10, // 19: forkd.ForkDaemon.DeleteSnapshot:input_type -> forkd.DeleteSnapshotRequest
+	12, // 20: forkd.ForkDaemon.Fork:input_type -> forkd.ForkRequest
+	15, // 21: forkd.ForkDaemon.ForkRunning:input_type -> forkd.ForkRunningRequest
+	17, // 22: forkd.ForkDaemon.Exec:input_type -> forkd.ExecRequest
+	19, // 23: forkd.ForkDaemon.ExecStream:input_type -> forkd.ExecStreamRequest
+	21, // 24: forkd.ForkDaemon.Terminate:input_type -> forkd.TerminateRequest
+	23, // 25: forkd.ForkDaemon.ListSandboxes:input_type -> forkd.ListSandboxesRequest
+	26, // 26: forkd.ForkDaemon.ReadFile:input_type -> forkd.ReadFileRequest
+	28, // 27: forkd.ForkDaemon.WriteFile:input_type -> forkd.WriteFileRequest
+	30, // 28: forkd.ForkDaemon.ListDir:input_type -> forkd.ListDirRequest
+	33, // 29: forkd.ForkDaemon.GetCapacity:input_type -> forkd.GetCapacityRequest
+	2,  // 30: forkd.ForkDaemon.CreateTemplate:output_type -> forkd.CreateTemplateResponse
+	4,  // 31: forkd.ForkDaemon.DeleteTemplate:output_type -> forkd.DeleteTemplateResponse
+	6,  // 32: forkd.ForkDaemon.ListTemplates:output_type -> forkd.ListTemplatesResponse
+	9,  // 33: forkd.ForkDaemon.CreateSnapshot:output_type -> forkd.CreateSnapshotResponse
+	11, // 34: forkd.ForkDaemon.DeleteSnapshot:output_type -> forkd.DeleteSnapshotResponse
+	14, // 35: forkd.ForkDaemon.Fork:output_type -> forkd.ForkResponse
+	16, // 36: forkd.ForkDaemon.ForkRunning:output_type -> forkd.ForkRunningResponse
+	18, // 37: forkd.ForkDaemon.Exec:output_type -> forkd.ExecResponse
+	20, // 38: forkd.ForkDaemon.ExecStream:output_type -> forkd.ExecStreamResponse
+	22, // 39: forkd.ForkDaemon.Terminate:output_type -> forkd.TerminateResponse
+	24, // 40: forkd.ForkDaemon.ListSandboxes:output_type -> forkd.ListSandboxesResponse
+	27, // 41: forkd.ForkDaemon.ReadFile:output_type -> forkd.ReadFileResponse
+	29, // 42: forkd.ForkDaemon.WriteFile:output_type -> forkd.WriteFileResponse
+	31, // 43: forkd.ForkDaemon.ListDir:output_type -> forkd.ListDirResponse
+	34, // 44: forkd.ForkDaemon.GetCapacity:output_type -> forkd.GetCapacityResponse
+	30, // [30:45] is the sub-list for method output_type
+	15, // [15:30] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_proto_forkd_proto_init() }
@@ -2649,7 +2754,7 @@ func file_proto_forkd_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_forkd_proto_rawDesc), len(file_proto_forkd_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   39,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

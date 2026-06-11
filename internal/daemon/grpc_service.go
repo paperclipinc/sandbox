@@ -83,6 +83,16 @@ func (g *grpcService) ListSandboxes(ctx context.Context, _ *forkdpb.ListSandboxe
 
 func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityRequest) (*forkdpb.GetCapacityResponse, error) {
 	c := g.srv.engine.GetCapacity()
+	templates := make([]*forkdpb.TemplateCapacity, 0, len(c.TemplateEstimates))
+	for _, t := range c.TemplateEstimates {
+		templates = append(templates, &forkdpb.TemplateCapacity{
+			TemplateId:         t.TemplateID,
+			SnapshotDigest:     t.SnapshotDigest,
+			SharedOnceBytes:    t.SharedOnceBytes,
+			AvgForkUniqueBytes: t.AvgForkUniqueBytes,
+			ForkCount:          t.ForkCount,
+		})
+	}
 	return &forkdpb.GetCapacityResponse{
 		ActiveSandboxes:   c.ActiveSandboxes,
 		MaxSandboxes:      c.MaxSandboxes,
@@ -93,6 +103,7 @@ func (g *grpcService) GetCapacity(ctx context.Context, _ *forkdpb.GetCapacityReq
 		SnapshotIds:       c.SnapshotIDs,
 		KvmAvailable:      c.KVMAvailable,
 		TemplateDigests:   c.TemplateDigests,
+		Templates:         templates,
 	}, nil
 }
 

@@ -41,11 +41,28 @@ type NodeInfo struct {
 	// snapshot manifest digest, as reported by the node's GetCapacity. Safe
 	// to log; used by the pool reconciler to record the digest in CRD status.
 	TemplateDigests map[string]string
-	LastHeartbeat   time.Time
+	// TemplateEstimates maps each template id to the node's per-template
+	// capacity estimate (shared-once and average per-fork unique bytes). The
+	// scheduler uses it to project the marginal memory cost of placing a fork.
+	TemplateEstimates map[string]TemplateCapacity
+	LastHeartbeat     time.Time
 	// TLS, when set, overrides the registry-level TLS config for dials to
 	// this node; lets tests run mixed TLS/insecure fleets in one registry.
 	TLS  *tls.Config
 	conn *grpc.ClientConn
+}
+
+// TemplateCapacity is the controller-side mirror of the forkd proto
+// TemplateCapacity: the per-template memory estimate the scheduler bin-packs
+// with. SharedOnceBytes is the CoW shared set a cold start of this template
+// pays once; AvgForkUniqueBytes is the mean per-fork unique footprint every
+// fork (warm or cold) adds.
+type TemplateCapacity struct {
+	TemplateID         string
+	SnapshotDigest     string
+	SharedOnceBytes    int64
+	AvgForkUniqueBytes int64
+	ForkCount          int32
 }
 
 func NewNodeRegistry() *NodeRegistry {

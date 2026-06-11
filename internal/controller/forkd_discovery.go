@@ -119,6 +119,19 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
 	info.TemplateIDs = resp.TemplateIds
 	info.SnapshotIDs = resp.SnapshotIds
 	info.TemplateDigests = resp.TemplateDigests
+	if len(resp.Templates) > 0 {
+		estimates := make(map[string]TemplateCapacity, len(resp.Templates))
+		for _, t := range resp.Templates {
+			estimates[t.TemplateId] = TemplateCapacity{
+				TemplateID:         t.TemplateId,
+				SnapshotDigest:     t.SnapshotDigest,
+				SharedOnceBytes:    t.SharedOnceBytes,
+				AvgForkUniqueBytes: t.AvgForkUniqueBytes,
+				ForkCount:          t.ForkCount,
+			}
+		}
+		info.TemplateEstimates = estimates
+	}
 }
 
 // NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod

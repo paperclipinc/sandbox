@@ -20,6 +20,35 @@ func TestMockEngine_CreateTemplate(t *testing.T) {
 	}
 }
 
+func TestMockEngine_CapacityReportsTotalAndEstimate(t *testing.T) {
+	engine := NewMockEngine()
+	engine.CreateTemplate("python", "python:3.12-slim", nil, nil)
+
+	cap := engine.GetCapacity()
+	if cap.MemoryTotal != 16*1024*1024*1024 {
+		t.Errorf("MemoryTotal: got %d want 16 GiB", cap.MemoryTotal)
+	}
+	// Even with no forks yet, a known template carries a cold-start estimate so
+	// envtest scheduling has a non-zero budget to bin-pack against.
+	var found bool
+	for _, est := range cap.TemplateEstimates {
+		if est.TemplateID == "python" {
+			found = true
+			if est.SharedOnceBytes <= 0 || est.AvgForkUniqueBytes <= 0 {
+				t.Errorf("python estimate has non-positive bytes: %+v", est)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no estimate for template python: %+v", cap.TemplateEstimates)
+	}
+
+	engine.SetMemoryTotal(4 * 1024 * 1024 * 1024)
+	if got := engine.GetCapacity().MemoryTotal; got != 4*1024*1024*1024 {
+		t.Errorf("SetMemoryTotal: got %d want 4 GiB", got)
+	}
+}
+
 func TestMockEngine_Fork(t *testing.T) {
 	engine := NewMockEngine()
 	engine.CreateTemplate("python", "python:3.12-slim", nil, nil)

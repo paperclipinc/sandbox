@@ -130,6 +130,14 @@ type Engine struct {
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
 	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
+
+	// memReserveBytes is the OS/forkd reserve withheld from the reported node
+	// memory budget: GetCapacity reports MemoryTotal = max(0, MemTotal-reserve).
+	memReserveBytes int64
+	// meminfoReader returns the /proc/meminfo contents GetCapacity parses for the
+	// host MemTotal. A seam: production reads /proc/meminfo; tests inject canned
+	// contents. On non-linux/dev hosts the read fails and MemoryTotal is 0.
+	meminfoReader func() (string, error)
 }
 
 // Placeholder network identity used only while building a template snapshot.
@@ -447,6 +455,14 @@ type EngineOpts struct {
 	// CryptManager is the container manager seam. Nil with EnableEncryption true
 	// makes NewEngine build the real storecrypt.Manager; tests inject a fake.
 	CryptManager containerManager
+	// MemoryReserveBytes is the OS/forkd reserve withheld from the reported node
+	// memory budget. Zero means the safe default (defaultMemoryReserveBytes,
+	// 2 GiB). GetCapacity reports MemoryTotal = max(0, host MemTotal - reserve).
+	MemoryReserveBytes int64
+	// MeminfoReader is the /proc/meminfo source GetCapacity parses for the host
+	// MemTotal. Nil uses the production reader (reads /proc/meminfo); tests
+	// inject canned contents or a failing reader for non-linux paths.
+	MeminfoReader func() (string, error)
 }
 
 type Template struct {
@@ -617,6 +633,14 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		keyProvider:          keyProvider,
 		encOpen:              make(map[string]struct{}),
 		buildRootfsFromImage: buildRootfsFromImage,
+		memReserveBytes:      opts.MemoryReserveBytes,
+		meminfoReader:        opts.MeminfoReader,
+	}
+	if e.memReserveBytes == 0 {
+		e.memReserveBytes = defaultMemoryReserveBytes
+	}
+	if e.meminfoReader == nil {
+		e.meminfoReader = procMeminfoReader
 	}
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
@@ -1014,17 +1038,29 @@ func (e *Engine) GetCapacity() Capacity {
 		}
 	}
 
+	// Host memory budget: MemTotal minus the OS/forkd reserve, never negative.
+	// The reader fails on non-linux/dev hosts, leaving MemoryTotal at 0 (the
+	// real engine runs on linux; the mock reports a fixed total).
+	var memoryTotal int64
+	if memTotal, err := hostMemTotalBytes(e.meminfoReader); err == nil {
+		if avail := memTotal - e.memReserveBytes; avail > 0 {
+			memoryTotal = avail
+		}
+	}
+
 	return Capacity{
 		ActiveSandboxes: activeSandboxes,
+		MemoryTotal:     memoryTotal,
 		// MemoryUsed is the CoW-aware resident total (per-fork unique plus each
 		// template's shared set counted once), NOT the naive per-fork sum.
 		MemoryUsed: report.UsedCoWAware,
 		// MemoryShared is the shared-once footprint summed over templates
 		// (UsedCoWAware minus the unique total): the honest shared bytes.
-		MemoryShared:    report.SharedOnceTotal(),
-		TemplateIDs:     templateIDs,
-		TemplateDigests: digests,
-		KVMAvailable:    true,
+		MemoryShared:      report.SharedOnceTotal(),
+		TemplateIDs:       templateIDs,
+		TemplateDigests:   digests,
+		TemplateEstimates: templateEstimatesFromReport(report, digests),
+		KVMAvailable:      true,
 	}
 }
 
@@ -1426,7 +1462,11 @@ type Capacity struct {
 	// digest (a content address, safe to log). The controller records this in
 	// the SandboxPool status so the snapshot identity is visible in the CRD.
 	TemplateDigests map[string]string
-	KVMAvailable    bool
+	// TemplateEstimates is the per-template marginal-cost estimate the
+	// controller bin-packs with: per template, the shared set a cold start pays
+	// once and the average per-fork unique footprint every fork adds.
+	TemplateEstimates []TemplateEstimate
+	KVMAvailable      bool
 }
 
 type ForkOpts struct {
