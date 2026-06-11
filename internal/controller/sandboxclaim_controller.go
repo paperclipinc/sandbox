@@ -496,13 +496,27 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		return ctrl.Result{}, err
 	}
 
+	// The recorded snapshot manifest digest the husk stub re-verifies the on-disk
+	// snapshot against before loading it (the husk mirror of forkd's verify-on-load
+	// gate). forkd reported it via GetCapacity; the NodeRegistry holds it. It is a
+	// content address, not a secret. An empty digest (no node has reported it yet)
+	// makes the stub refuse to activate unless it runs with the development escape
+	// hatch, which is exactly the fail-closed behavior we want in production.
+	expectedDigest := ""
+	if r.NodeRegistry != nil {
+		if d, ok := r.NodeRegistry.TemplateDigest(pool.Spec.TemplateRef.Name); ok {
+			expectedDigest = d
+		}
+	}
+
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
 	req := husk.ActivateRequest{
-		SnapshotDir: HuskSnapshotDir,
-		Env:         env,
-		Secrets:     secretVals,
-		Network:     huskNotifyNetwork(template),
-		Token:       apiToken,
+		SnapshotDir:    HuskSnapshotDir,
+		ExpectedDigest: expectedDigest,
+		Env:            env,
+		Secrets:        secretVals,
+		Network:        huskNotifyNetwork(template),
+		Token:          apiToken,
 	}
 	res, err := activate(ctx, addr, r.HuskTLS, req)
 	if err != nil || !res.OK {

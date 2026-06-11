@@ -239,6 +239,44 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 	}
 }
 
+// TestHuskClaimActivateCarriesExpectedDigest proves the controller threads the
+// template's recorded CAS manifest digest (from the NodeRegistry, fed by forkd's
+// GetCapacity) into the ActivateRequest, so the husk stub can re-verify the
+// snapshot against it before loading (the husk mirror of forkd's verify-on-load
+// gate). The digest is a content address, not a secret.
+func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
+	const wantDigest = "1111111111111111111111111111111111111111111111111111111111111111"
+	// Register a healthy node holding the template with a recorded digest, so
+	// TemplateDigest resolves it for the claim reconciler.
+	testRegistry.Register(&controller.NodeInfo{
+		Name:            "digest-node",
+		TemplateIDs:     []string{"husk-d-tmpl"},
+		TemplateDigests: map[string]string{"husk-d-tmpl": wantDigest},
+	})
+	t.Cleanup(func() { testRegistry.Unregister("digest-node") })
+
+	pod := makeDormantHuskPod(t, "husk-d-pool", "10.1.2.9")
+	_ = pod
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: true, VsockPath: "/run/husk/vm/vsock", LatencyMs: 1.0}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	claim := makeHuskClaim(t, "husk-d", v1alpha1.SandboxClaimSpec{})
+
+	waitClaimPhase(t, claim.Name, func(c *v1alpha1.SandboxClaim) bool {
+		return c.Status.Phase == v1alpha1.SandboxReady
+	})
+
+	req, ok := act.lastReq()
+	if !ok {
+		t.Fatal("activator was never called")
+	}
+	if req.ExpectedDigest != wantDigest {
+		t.Errorf("activate request ExpectedDigest = %q, want %q", req.ExpectedDigest, wantDigest)
+	}
+}
+
 // TestHuskClaimSingleDormantPodNoDoubleAssign proves the isolation guarantee:
 // with exactly ONE dormant husk pod and TWO claims racing for it, the
 // optimistic-lock claim-before-activate path lets exactly ONE claim win the pod

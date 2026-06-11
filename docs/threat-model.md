@@ -122,17 +122,29 @@ same boundary.
 
 **Surface 3: the READ-ONLY SNAPSHOT HOSTPATH.** The node template snapshot is
 mounted READ-ONLY into the husk pod (`huskpod.go`: the snapshot hostPath and the
-kernel file are both `ReadOnly: true`). It is content-addressed and
-integrity-verified on load (#9, section 5: a sha256 digest verified before any
-fork, refused on mismatch) and version-compat-checked (#32, section 5:
-`internal/snapcompat.Check` after the digest verify, fail-closed on a benign
-mismatch). Residual, stated honestly: all husk pods on a node share the SAME
-read-only snapshot dir. This IS a shared read-only host mount and is one of the
-two documented PSA-restricted exceptions (the hostPath, surface 1). It is
-acceptable because (a) it is READ-ONLY: a husk pod cannot WRITE it, so it cannot
-tamper with the base image another pod loads; (b) it is integrity-verified and
-content-addressed, so a tampered-on-disk snapshot fails the verify-on-load gate
-(with the verify-at-registration residual noted in section 5); and (c) it is a
+kernel file are both `ReadOnly: true`). The husk stub RE-VERIFIES the snapshot ON
+ACTIVATE, before it loads it, applying the SAME fail-closed gate as raw-forkd:
+the stub decodes the mounted CAS manifest, binds it to the controller-passed
+recorded digest (`husk.ActivateRequest.ExpectedDigest`, fed from the
+NodeRegistry's forkd-reported `TemplateDigests`), re-hashes the loaded
+mem+vmstate against it (a sha256 digest verify, #9), and runs
+`internal/snapcompat.Check` against THIS node's detected environment (#32), all
+in `internal/husk` `verifySnapshot` (the production verifier, shared with the
+fork path via the `internal/cas` chunk/hash primitives so the two cannot drift).
+Both checks fail closed: a snapshot tampered on the node disk after forkd's
+build-time verification, or one incompatible with this node, is REFUSED on the
+husk path too and never loaded into the VM (proven by `internal/husk`
+`TestActivateVerifyRefusesTamperedSnapshot` and
+`TestActivateVerifyRefusesIncompatibleSnapshot`). So the husk path is no longer a
+verify gap relative to raw-forkd: it is the same digest + snapcompat gate.
+Residual, stated honestly: all husk pods on a node share the SAME read-only
+snapshot dir. This IS a shared read-only host mount and is one of the two
+documented PSA-restricted exceptions (the hostPath, surface 1). It is acceptable
+because (a) it is READ-ONLY: a husk pod cannot WRITE it, so it cannot tamper with
+the base image another pod loads; (b) it is integrity-verified and
+content-addressed, and the husk stub re-checks the digest + compatibility on EACH
+activate before loading, so a tampered-on-disk or incompatible snapshot is
+refused at activate time on the husk path; and (c) it is a
 BASE IMAGE, not tenant data: tenant secrets are delivered post-restore over the
 control channel (surface 2), never baked into the shared snapshot (section 6).
 Cross-pod isolation of the mount is the read-only property, not a per-pod copy;
@@ -199,10 +211,17 @@ key to a node whose connection is not mTLS, and forkd refuses to start encrypted
 without its TLS flags), is held in node process memory while a container is open,
 and is NEVER written to the node data disk (section 5: `RequestKeyProvider`,
 key-not-on-disk proven by unit and envtest, key-never-logged enforced by grep in
-CI). Residual, stated honestly: the IN-MEMORY KEY WINDOW. While a container is
-open the key is necessarily in process memory; a root attacker with a node-memory
-dump while a container is open recovers it. Zeroize-on-close is the current
-mitigation; HSM/envelope custody is the follow-up.
+CI). On the HUSK path the key reaches FORKD (the builder) ONLY, over the same
+mTLS gRPC; forkd uses it to open the per-template LUKS container and the snapshot
+is decrypted BELOW the page cache by forkd's `dm-crypt` mount. The husk pod mounts
+that mount's PRE-DECRYPTED snapshot bytes read-only and NEVER receives the
+encryption key: the key does not cross the controller-to-husk mTLS control channel
+and is never present in the husk pod's address space. So a compromised husk pod
+cannot exfiltrate the template key. Residual, stated honestly: the IN-MEMORY KEY
+WINDOW on the FORKD process. While a container is open the key is necessarily in
+forkd's process memory; a root attacker with a node-memory dump of FORKD while a
+container is open recovers it. Zeroize-on-close is the current mitigation;
+HSM/envelope custody is the follow-up.
 
 **Surface 8: EVICTION and DRAIN (slice 4b).** A husk pod is an ordinary pod, so
 it is subject to drain, eviction, preemption, and delete. A `policy/v1`
@@ -228,12 +247,12 @@ is discussed separately below the table.
 
 | Axis | Old forkd (raw-forkd) | Husk pod | Verdict |
 |---|---|---|---|
-| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (the one device exception), no escalation | husk BETTER |
+| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (one of the two PSA-restricted exceptions, the `/dev/kvm` device one; the other is the read-only snapshot hostPath), no escalation | husk BETTER |
 | Capabilities | explicit set incl. `CAP_SYS_ADMIN`, `SYS_CHROOT` | `drop: [ALL]`, none added | husk BETTER |
-| Host FS access | hostPath to the node data dir (RW) | one READ-ONLY snapshot mount + read-only kernel file | husk BETTER |
+| Host FS access | hostPath to the node data dir (RW) | READ-ONLY node hostPaths only: the snapshot mount, the kernel file, and (when verify is enforced) the CAS manifest the stub checks the snapshot against; all read-only | husk BETTER |
 | Device access (`/dev/kvm` + kernel) | `/dev/kvm` via hostPath | `/dev/kvm` via device plugin (no privilege) | EQUAL on the inherent KVM/kernel escape surface; husk removes only the privileged REQUIREMENT, not the device surface |
 | Network governance | host-nftables in forkd's netns | pod netns governed by NetworkPolicy/Cilium (object-level proven; in-VM bare-metal) | husk BETTER (defense-in-depth pod netns); in-VM enforcement bare-metal-pending |
-| Secret + key delivery | mTLS gRPC to forkd | mTLS control channel to the pod, controller-identity authz, token + key never on disk | EQUAL/BETTER (same mTLS anchor; key never on the husk node disk, in-memory-window residual) |
+| Secret + key delivery | mTLS gRPC to forkd | tenant secrets + token over the mTLS control channel to the pod (controller-identity authz, never on disk); the per-template ENCRYPTION KEY never reaches the husk pod at all (it goes to forkd, which serves the pre-decrypted snapshot via dm-crypt) | EQUAL/BETTER (same mTLS anchor; enc key never enters the husk pod, in-memory-window residual is on forkd only) |
 
 Honest conclusion: on the privilege, capabilities, host-FS, and network axes the
 husk model is BETTER, with the residuals named (shared read-only snapshot mount,

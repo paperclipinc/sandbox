@@ -1513,12 +1513,19 @@ jobs:
             # keeps concurrent/overlapping stubs from colliding on the in-pod
             # sandbox HTTP API port (this phase exercises the control socket +
             # vsock exec, not the HTTP API).
+            # --allow-unverified-snapshots: this phase proves activation LATENCY
+            # against the real bench snapshot, not the integrity gate (that gate
+            # is unit-tested in internal/husk). The bench snapshot carries no
+            # mounted manifest here, so the development escape hatch keeps the
+            # default verify-enforced stub from refusing it. Production husk pods
+            # run with --manifest and verify enforced (controller-driven).
             /tmp/husk-stub \
               --firecracker /usr/local/bin/firecracker \
               --workdir $workdir \
               --control-socket $ctrl \
               --sandbox-listen 127.0.0.1:$((19090 + n)) \
               --mem-mib 256 \
+              --allow-unverified-snapshots \
               > $stublog 2>&1 &
             local stub_pid=$!
 
@@ -1722,12 +1729,18 @@ jobs:
             # so each needs a distinct in-pod sandbox HTTP API port (this phase
             # execs over vsock, not the HTTP API, but the stub serves it on
             # activate and the two must not collide on one port).
+            # --allow-unverified-snapshots: this fork-correctness phase exercises
+            # the reseed handshake + env/secret delivery against the real bench
+            # snapshot, not the integrity gate (unit-tested in internal/husk).
+            # No manifest is mounted here, so the development escape hatch keeps
+            # the default verify-enforced stub from refusing the bench snapshot.
             /tmp/husk-stub \
               --firecracker /usr/local/bin/firecracker \
               --workdir $workdir \
               --control-socket $ctrl \
               --sandbox-listen 127.0.0.1:$((19090 + n)) \
               --mem-mib 256 \
+              --allow-unverified-snapshots \
               > $stublog 2>&1 &
             local pid=$!
             eval "STUB${n}_PID=$pid"
@@ -1986,6 +1999,12 @@ jobs:
           # Start a DORMANT husk pod serving mTLS network control. With all three
           # TLS flags it serves ServeTLS authorized to the controller identity;
           # WITHOUT them cmd/husk-stub refuses to serve (proven by the stub guard).
+          # --allow-unverified-snapshots: this phase proves the NETWORK mTLS
+          # transport + auth + a real activate/exec/secret against the bench
+          # snapshot, not the snapshot integrity gate (unit-tested in
+          # internal/husk). No manifest is mounted here, so the development escape
+          # hatch keeps the default verify-enforced stub from refusing the bench
+          # snapshot. Production husk pods run with --manifest and verify enforced.
           /tmp/husk-stub \
             --firecracker /usr/local/bin/firecracker \
             --workdir $WORKDIR \
@@ -1995,6 +2014,7 @@ jobs:
             --tls-key $CERTS/server.key \
             --tls-ca $CERTS/ca.crt \
             --mem-mib 256 \
+            --allow-unverified-snapshots \
             > $STUBLOG 2>&1 &
           STUB_PID=$!
 

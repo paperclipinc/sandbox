@@ -82,6 +82,13 @@ const (
 	huskCAMountPath       = "/etc/husk/ca"
 	huskSnapshotMountPath = "/var/lib/agent-run/snapshot"
 	huskKernelMountPath   = "/var/lib/agent-run/kernel/vmlinux"
+	// huskManifestMountPath is the in-pod path the recorded CAS manifest is
+	// mounted at (read-only). The stub decodes it, binds it to the activate
+	// request's ExpectedDigest, re-hashes the loaded snapshot files against it,
+	// and runs the snapcompat check, all BEFORE loading the snapshot. This is the
+	// husk mirror of forkd's verify-on-load gate (issues #9 and #32). The manifest
+	// is a content-addressed artifact, not a secret.
+	huskManifestMountPath = "/var/lib/agent-run/manifest.json"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -104,6 +111,15 @@ type HuskPodOptions struct {
 	// DataDir is the forkd data directory on the node (default /var/lib/agent-run).
 	// The snapshot hostPath is rooted here. Empty defaults to the forkd default.
 	DataDir string
+	// ExpectedDigest is the template's recorded CAS manifest digest, as reported
+	// by forkd via GetCapacity (the NodeRegistry TemplateDigests). When set, the
+	// husk pod mounts the recorded manifest from <DataDir>/cas/manifests/<digest>
+	// read-only and runs the stub with verify enforced (--manifest); the stub
+	// re-verifies the snapshot against it before loading (fail-closed). Empty means
+	// no manifest mount and the stub runs the development escape hatch
+	// (--allow-unverified-snapshots) so a pre-digest pool still activates; this is
+	// the only non-fail-closed path and is logged loudly by the stub.
+	ExpectedDigest string
 	// TLSSecretName is the Secret holding the husk stub's mTLS server leaf
 	// (tls.crt, tls.key), mounted read-only so the stub can serve the mTLS network
 	// control. This mirrors how forkd gets its leaf from a mounted PKI Secret
@@ -175,10 +191,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// husk pod's securityContext satisfies EVERY restricted control, but the husk
 	// pod is NOT admitted into a baseline or restricted namespace, for exactly two
 	// DOCUMENTED EXCEPTIONS, both intrinsic to the husk model:
-	//   1. the read-only snapshot hostPath. hostPath is forbidden under BOTH
-	//      baseline and restricted (the "HostPath Volumes" / "Volume Types"
-	//      controls); the husk pod mounts the node's read-only template snapshot
-	//      so the dormant VMM can load it. This is the node-snapshot exception.
+	//   1. the read-only node hostPaths. hostPath is forbidden under BOTH baseline
+	//      and restricted (the "HostPath Volumes" / "Volume Types" controls); the
+	//      husk pod mounts the node's read-only template snapshot (mem+vmstate) so
+	//      the dormant VMM can load it, the guest kernel, and (when the pool has a
+	//      recorded digest) the read-only CAS manifest the stub verifies the
+	//      snapshot against before loading. These are all the same node-hostPath
+	//      exception category (read-only, intrinsic to the node-local snapshot
+	//      model); none is writable.
 	//   2. runAsNonRoot=false. restricted requires runAsNonRoot=true; the husk pod
 	//      runs uid 0 so Firecracker can open the device-plugin-injected /dev/kvm
 	//      WITHOUT privileged (the /dev/kvm device exception).
@@ -234,6 +254,19 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
 	}
 
+	// Snapshot verify gate (fail-closed): when the pool has a recorded template
+	// digest, mount the recorded CAS manifest and point the stub at it so it
+	// re-verifies the snapshot (digest + snapcompat) before loading. Without a
+	// recorded digest (a pool whose snapshot has not been content-addressed yet)
+	// fall back to the development escape hatch so the warm pool still activates;
+	// the stub logs this loudly. The manifest mount itself is added in the snapshot
+	// block below (it shares the snapshot placement requirement).
+	if opts.ExpectedDigest != "" {
+		args = append(args, "--manifest", huskManifestMountPath)
+	} else {
+		args = append(args, "--allow-unverified-snapshots")
+	}
+
 	// Volumes + mounts: the mTLS Secret, the node's template snapshot subdir
 	// (read-only hostPath; the stub reads SnapshotDir/{mem,vmstate}), and the
 	// guest kernel. PLACEMENT REQUIREMENT: the snapshot hostPath assumes the
@@ -281,6 +314,23 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		mounts = append(mounts, corev1.VolumeMount{Name: "snapshot", MountPath: huskSnapshotMountPath, ReadOnly: true})
 
 		fileType := corev1.HostPathFile
+
+		// The recorded CAS manifest, mounted read-only so the stub can re-verify
+		// the snapshot against it before loading (fail-closed). Only added when the
+		// pool has a recorded digest; the file lives at
+		// <dataDir>/cas/manifests/<digest> on the same node the snapshot is on.
+		if opts.ExpectedDigest != "" {
+			volumes = append(volumes, corev1.Volume{
+				Name: "snapshot-manifest",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: filepath.Join(dataDir, "cas", "manifests", opts.ExpectedDigest),
+						Type: &fileType,
+					},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{Name: "snapshot-manifest", MountPath: huskManifestMountPath, ReadOnly: true})
+		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "kernel",
 			VolumeSource: corev1.VolumeSource{
@@ -463,6 +513,11 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 			DataDir:         r.DataDir,
 			TLSSecretName:   r.HuskTLSSecretName,
 			CASecretName:    r.HuskCASecretName,
+			// The recorded snapshot manifest digest, so the husk pod mounts the
+			// manifest and the stub verifies the snapshot before loading
+			// (fail-closed). Empty (no node has reported it yet) falls back to the
+			// stub's development escape hatch so the warm pool still activates.
+			ExpectedDigest: r.huskTemplateDigest(pool.Spec.TemplateRef.Name),
 			// Pin husk pods to the nodes the pool built the snapshot on, so the
 			// read-only snapshot hostPath resolves. Empty (no registry, or no node
 			// holds it yet) falls back to the kvm nodeSelector alone.

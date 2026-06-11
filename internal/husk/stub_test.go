@@ -81,12 +81,19 @@ func (f *fakeNotifier) notify(vsockPath string, generation uint64, entropy []byt
 	return f.err
 }
 
+// verifyOK is the no-op verifier the unit-path stubs inject: it lets the activate
+// state machine be exercised without an on-disk manifest. The dedicated
+// verification tests (TestActivateVerify*) inject their own verifier to assert
+// the fail-closed gate.
+func verifyOK(ActivateRequest) error { return nil }
+
 func newTestStub(t *testing.T, vm *fakeVMM, ready guestReady) *Stub {
 	t.Helper()
 	return New(firecracker.VMConfig{ID: "husk-test"}, Options{
 		Start:  func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
 		Ready:  ready,
 		Notify: (&fakeNotifier{}).notify,
+		Verify: verifyOK,
 	})
 }
 
@@ -98,6 +105,7 @@ func newTestStubWithNotifier(t *testing.T, vm *fakeVMM, ready guestReady, n *fak
 		Start:  func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
 		Ready:  ready,
 		Notify: n.notify,
+		Verify: verifyOK,
 	})
 }
 

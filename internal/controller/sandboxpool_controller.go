@@ -235,6 +235,22 @@ func (r *SandboxPoolReconciler) snapshotNodeNames(templateID string) []string {
 	return names
 }
 
+// huskTemplateDigest returns the recorded CAS manifest digest for the template,
+// as reported by any healthy node holding it (forkd's GetCapacity feeds the
+// NodeRegistry). The husk pod mounts the matching manifest and the stub verifies
+// the snapshot against it before loading. A nil registry or no reported digest
+// returns "", which makes the husk pod fall back to the stub's development
+// escape hatch (the warm pool still activates, the stub logs it loudly).
+func (r *SandboxPoolReconciler) huskTemplateDigest(templateID string) string {
+	if r.NodeRegistry == nil {
+		return ""
+	}
+	if d, ok := r.NodeRegistry.TemplateDigest(templateID); ok {
+		return d
+	}
+	return ""
+}
+
 // ensureTemplateBuilt drives the template snapshot toward pool.Spec.Replicas
 // holder nodes using the same build/distribute path as the raw-forkd pool
 // (createSnapshotsOnNodes). It is the FIRST half of a husk-mode reconcile: the

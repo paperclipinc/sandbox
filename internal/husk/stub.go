@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/sandbox/internal/snapcompat"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
 
@@ -176,6 +177,23 @@ type Options struct {
 	// Notify runs the post-restore fork-correctness handshake. Nil uses the
 	// production seam (connect the vsock client and NotifyForked + Configure).
 	Notify notifier
+	// Verify re-verifies the snapshot at activate time BEFORE it is loaded
+	// (digest integrity + snapcompat, fail-closed). Nil uses the production
+	// verifier built from ManifestPath, Env, and AllowUnverified below. Tests
+	// inject a no-op (or a failing) verifier so they need no on-disk manifest.
+	Verify snapshotVerifier
+	// ManifestPath is the on-disk path of the recorded CAS manifest mounted into
+	// the husk pod read-only; the production verifier decodes it, binds it to the
+	// request's ExpectedDigest, and re-hashes the loaded files against it. Empty
+	// is only valid with AllowUnverified (development).
+	ManifestPath string
+	// Env is the detected host environment the production verifier checks snapshot
+	// compatibility against (Firecracker version, CPU model, kernel, formats).
+	Env snapcompat.Environment
+	// AllowUnverified is the development escape hatch mirroring forkd's
+	// --allow-unverified-snapshots: when true the verifier warns once and proceeds
+	// on a missing-digest or failed check. Default false keeps verify enforced.
+	AllowUnverified bool
 	// ReadyTimeout bounds the guest-readiness wait during Activate. Zero uses
 	// DefaultReadyTimeout.
 	ReadyTimeout time.Duration
@@ -201,6 +219,7 @@ type Stub struct {
 	start        starter
 	ready        guestReady
 	notify       notifier
+	verify       snapshotVerifier
 	onActivated  func(vsockPath, token string) error
 	cfg          firecracker.VMConfig
 	readyTimeout time.Duration
@@ -218,6 +237,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		start:        opts.Start,
 		ready:        opts.Ready,
 		notify:       opts.Notify,
+		verify:       opts.Verify,
 		onActivated:  opts.OnActivated,
 		cfg:          cfg,
 		readyTimeout: opts.ReadyTimeout,
@@ -231,6 +251,13 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.notify == nil {
 		s.notify = productionNotifier
+	}
+	if s.verify == nil {
+		s.verify = productionVerifier(verifyConfig{
+			manifestPath:    opts.ManifestPath,
+			env:             opts.Env,
+			allowUnverified: opts.AllowUnverified,
+		})
 	}
 	if s.readyTimeout == 0 {
 		s.readyTimeout = DefaultReadyTimeout
@@ -289,6 +316,18 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
 
 	start := time.Now()
+
+	// Verify-on-activate gate: re-verify the snapshot BEFORE loading it, the same
+	// fail-closed integrity + compatibility gate forkd's Fork path applies (digest
+	// verify, issue #9, and snapcompat.Check, issue #32). A snapshot tampered on
+	// the node disk after forkd's build-time verification, or one incompatible
+	// with this node, is refused here and never restored. Runs before any VMM
+	// load, so an unverified snapshot never touches the guest.
+	if err := s.verify(req); err != nil {
+		werr := fmt.Errorf("husk: snapshot verification failed: %w", err)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
 	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, true, req.NetworkOverrides); err != nil {
 		// Fail closed: the snapshot did not load; the VM is not usable. Leave
 		// state dormant so a retry (or teardown) can decide what to do.

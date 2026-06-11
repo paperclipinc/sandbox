@@ -147,6 +147,7 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
 			Ready:       func(string, time.Duration) error { return nil },
 			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Verify:      verifyOK,
 			OnActivated: onActivated,
 		})
 

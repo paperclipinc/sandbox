@@ -316,6 +316,95 @@ func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 	}
 }
 
+// TestBuildHuskPodMountsManifestWhenDigestKnown proves that when the pool has a
+// recorded template digest, the husk pod mounts the recorded CAS manifest
+// read-only and runs the stub with verify ENFORCED (--manifest, no escape
+// hatch), so the stub re-verifies the snapshot before loading (fail-closed).
+func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
+	const digest = "abc1230000000000000000000000000000000000000000000000000000000000"
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-pool", Namespace: "default", UID: "pool-uid-v"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "verify-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:      "agent-run-husk-stub:test",
+		SnapshotID:     "verify-tmpl",
+		DataDir:        "/var/lib/agent-run",
+		ExpectedDigest: digest,
+	})
+
+	args := strings.Join(pod.Spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "--manifest /var/lib/agent-run/manifest.json") {
+		t.Errorf("args missing --manifest mount path: %v", pod.Spec.Containers[0].Args)
+	}
+	if strings.Contains(args, "--allow-unverified-snapshots") {
+		t.Errorf("verify must be ENFORCED when a digest is known; escape hatch present: %v", pod.Spec.Containers[0].Args)
+	}
+
+	// The manifest is a read-only hostPath at <dataDir>/cas/manifests/<digest>.
+	var manVol *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "snapshot-manifest" {
+			manVol = &pod.Spec.Volumes[i]
+		}
+	}
+	if manVol == nil || manVol.HostPath == nil {
+		t.Fatalf("snapshot-manifest volume is not a hostPath: %+v", manVol)
+	}
+	if manVol.HostPath.Path != "/var/lib/agent-run/cas/manifests/"+digest {
+		t.Errorf("manifest hostPath = %q, want /var/lib/agent-run/cas/manifests/%s", manVol.HostPath.Path, digest)
+	}
+	var mounted bool
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.Name == "snapshot-manifest" {
+			mounted = true
+			if !m.ReadOnly {
+				t.Error("manifest mount must be read-only")
+			}
+		}
+	}
+	if !mounted {
+		t.Error("manifest volume is not mounted into the container")
+	}
+}
+
+// TestBuildHuskPodEscapeHatchWhenNoDigest proves the fallback: with no recorded
+// digest the husk pod mounts no manifest and runs the stub's development escape
+// hatch so the warm pool still activates (the stub logs this loudly).
+func TestBuildHuskPodEscapeHatchWhenNoDigest(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodigest-pool", Namespace: "default", UID: "pool-uid-n"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "nodigest-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodigest-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:  "agent-run-husk-stub:test",
+		SnapshotID: "nodigest-tmpl",
+		DataDir:    "/var/lib/agent-run",
+	})
+
+	args := strings.Join(pod.Spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "--allow-unverified-snapshots") {
+		t.Errorf("with no digest the stub must run the escape hatch: %v", pod.Spec.Containers[0].Args)
+	}
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "snapshot-manifest" {
+			t.Error("no manifest should be mounted when no digest is recorded")
+		}
+	}
+}
+
 func TestBuildHuskPodDefaultSizing(t *testing.T) {
 	pool := &v1alpha1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "def-pool", Namespace: "default", UID: "pool-uid-2"},

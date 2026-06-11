@@ -42,7 +42,17 @@ import (
 // reach the activated VM. It is a SECRET: it rides the mTLS control channel and
 // is NEVER logged.
 type ActivateRequest struct {
-	SnapshotDir      string                        `json:"snapshot_dir"`
+	SnapshotDir string `json:"snapshot_dir"`
+	// ExpectedDigest is the template's recorded CAS manifest digest (a content
+	// address, NOT a secret). The controller passes the digest forkd reported via
+	// GetCapacity (the NodeRegistry TemplateDigests), and the stub re-verifies the
+	// on-disk snapshot against it BEFORE loading: the mounted manifest must hash
+	// to this digest and the loaded mem+vmstate must re-hash to the manifest, so a
+	// snapshot tampered on the node disk is refused (fail-closed, the husk mirror
+	// of forkd's verify-on-load gate, issues #9 and #32). It is safe to log but is
+	// kept out of noisy logging. An empty digest is refused unless the stub runs
+	// with the development --allow-unverified-snapshots escape hatch.
+	ExpectedDigest   string                        `json:"expected_digest,omitempty"`
 	NetworkOverrides []firecracker.NetworkOverride `json:"network_overrides,omitempty"`
 	Env              map[string]string             `json:"env,omitempty"`
 	Secrets          map[string]string             `json:"secrets,omitempty"`
