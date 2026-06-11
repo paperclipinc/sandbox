@@ -137,6 +137,26 @@ func TestCreateRollsBackOnMkfsFailure(t *testing.T) {
 	}
 }
 
+func TestCreateRollsBackOnMountFailure(t *testing.T) {
+	root := t.TempDir()
+	mnt := filepath.Join(t.TempDir(), "mount")
+	rr := &recordingRunner{failOn: "mount"}
+	m := New(root, root, rr.run)
+
+	key := Key("0123456789abcdef0123456789abcdef")
+	err := m.Create(context.Background(), "tmpl1", key, 256<<20, mnt)
+	if err == nil {
+		t.Fatal("expected Create to fail when mount fails")
+	}
+	// Rollback: luksClose was issued and the image removed.
+	if !contains(verbs(rr.calls), "cryptsetup luksClose") {
+		t.Fatalf("expected luksClose rollback, got %v", verbs(rr.calls))
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "enc", "tmpl1.img")); !os.IsNotExist(statErr) {
+		t.Fatal("image file should have been removed on rollback")
+	}
+}
+
 func TestCloseEmitsUmountAndLuksClose(t *testing.T) {
 	root := t.TempDir()
 	rr := &recordingRunner{}

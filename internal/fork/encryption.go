@@ -29,9 +29,11 @@ type containerManager interface {
 // memory; PR2 swaps in a provider backed by a Kubernetes Secret or a KMS so the
 // key custody moves off the node. KeyFor is called on the template build path
 // and on the (cold) container-open path, never per fork once a container is
-// already open.
+// already open. ForgetKey destroys the in-memory key for a scope as part of
+// crypto-shred: after it returns the provider holds no copy of the key.
 type KeyProvider interface {
 	KeyFor(scopeID string) (storecrypt.Key, error)
+	ForgetKey(scopeID string)
 }
 
 // InMemoryKeyProvider generates a random 256-bit key per scope and caches it in
@@ -63,6 +65,29 @@ func (p *InMemoryKeyProvider) KeyFor(scopeID string) (storecrypt.Key, error) {
 	}
 	p.keys[scopeID] = k
 	return k, nil
+}
+
+// ForgetKey destroys the in-memory key for scopeID: it zeroizes the key bytes
+// (clearing the underlying array shared with any caller copy) and deletes the
+// map entry. After it returns a subsequent KeyFor(scopeID) generates a fresh
+// key. It is called from crypto-shred so the key does not linger in node memory
+// after the container is erased. A no-op for a scope with no cached key.
+func (p *InMemoryKeyProvider) ForgetKey(scopeID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if k, ok := p.keys[scopeID]; ok {
+		k.Zeroize()
+		delete(p.keys, scopeID)
+	}
+}
+
+// hasKey reports whether the provider currently holds a cached key for scopeID.
+// It is test-only support for asserting that crypto-shred forgot the key.
+func (p *InMemoryKeyProvider) hasKey(scopeID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.keys[scopeID]
+	return ok
 }
 
 // encryptionEnabled reports whether at-rest encryption is wired: the flag is set
@@ -166,12 +191,32 @@ func (e *Engine) ensureTemplateOpen(id string) error {
 	if !e.templateEncrypted(id) {
 		return nil
 	}
+	// Fast path: already open. A cheap RLock-guarded map check, taken on the hot
+	// fork path once the first fork has opened the container.
 	e.mu.RLock()
 	_, open := e.encOpen[id]
 	e.mu.RUnlock()
 	if open {
 		return nil
 	}
+	// Slow path: serialize the open per template so concurrent forks of the same
+	// template (after a restart, with an empty encOpen map) do not both call
+	// crypt.Open (the second luksOpen would fail: device already exists). The
+	// per-template lock lets the first opener run while the rest wait, then they
+	// re-check and find it open.
+	mu := e.openLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-check under the per-template lock: a concurrent caller may have opened
+	// the container while we waited.
+	e.mu.RLock()
+	_, open = e.encOpen[id]
+	e.mu.RUnlock()
+	if open {
+		return nil
+	}
+
 	key, err := e.keyProvider.KeyFor(id)
 	if err != nil {
 		return fmt.Errorf("key for template %s: %w", id, err)
@@ -181,6 +226,13 @@ func (e *Engine) ensureTemplateOpen(id string) error {
 	}
 	e.markTemplateOpen(id)
 	return nil
+}
+
+// openLock returns the per-template mutex that serializes ensureTemplateOpen for
+// id, creating it on first use. Only one *sync.Mutex ever exists per id.
+func (e *Engine) openLock(id string) *sync.Mutex {
+	mu, _ := e.encOpenLocks.LoadOrStore(id, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 // shredTemplateContainer crypto-shreds an encrypted template's container at
@@ -199,12 +251,18 @@ func (e *Engine) shredTemplateContainer(id string) error {
 		if err := e.crypt.Shred(context.Background(), id, templateDir(e.dataDir, id)); err != nil {
 			return err
 		}
+		// Destroy the in-memory key AFTER the keyslots are erased so the secret
+		// does not linger in node memory once the ciphertext is unrecoverable.
+		e.keyProvider.ForgetKey(id)
 		e.forgetTemplateOpen(id)
 		return nil
 	}
 	if err := e.crypt.Shred(context.Background(), id, templateDir(e.dataDir, id)); err != nil {
 		return fmt.Errorf("shred encrypted container for template %s: %w", id, err)
 	}
+	// Destroy the in-memory key AFTER the keyslots are erased so the secret does
+	// not linger in node memory once the ciphertext is unrecoverable.
+	e.keyProvider.ForgetKey(id)
 	e.forgetTemplateOpen(id)
 	return nil
 }

@@ -113,6 +113,12 @@ type Engine struct {
 	crypt            containerManager
 	keyProvider      KeyProvider
 	encOpen          map[string]struct{}
+	// encOpenLocks serializes ensureTemplateOpen per template id so two
+	// concurrent forks of the same encrypted template (e.g. after a restart with
+	// an empty encOpen map) do not both call crypt.Open; the second waits and
+	// then sees the container already open. The fast path (already open) never
+	// touches this. Keyed by template id, value *sync.Mutex.
+	encOpenLocks sync.Map
 
 	// buildRootfsFromImage turns an OCI image ref into a bootable rootfs.ext4
 	// at outPath. It is a seam so CreateTemplate can be tested without a
@@ -1162,7 +1168,7 @@ func apparentSize(path string) int64 {
 // path unchanged; an OCI reference is pulled, the agent is injected, and a
 // rootfs.ext4 is built from it before boot. A nonzero init command aborts the
 // build so a broken template is never snapshotted or served.
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) (retErr error) {
 	cfg := firecracker.DefaultVMConfig()
 
 	// The template rootfs runs the guest agent as PID 1 at /init: ociroot
@@ -1238,6 +1244,21 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		if err := e.createTemplateContainer(id, cfg.RootfsPath, volSizes); err != nil {
 			return err
 		}
+		// Roll back the freshly created container if ANY later build step fails:
+		// crypto-shred it (umount + luksClose + luksErase + remove image) and drop
+		// the in-memory key so a failed build leaves no open dm-crypt device and no
+		// half-built container, and a retry can recreate cleanly (luksFormat would
+		// otherwise fail because the image already exists). This mirrors the
+		// in-Create rollback storecrypt.Create already does for its own steps. Only
+		// runs on the error path: a successful build returns nil and keeps the
+		// container open for forks.
+		defer func() {
+			if retErr != nil {
+				if cerr := e.shredTemplateContainer(id); cerr != nil {
+					fmt.Fprintf(os.Stderr, "forkd: roll back encrypted container for template %s after failed build: %v\n", id, cerr)
+				}
+			}
+		}()
 	}
 
 	// When volumes are enabled, create one seed backing per template volume and

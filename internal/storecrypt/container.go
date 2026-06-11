@@ -181,8 +181,9 @@ func (m *Manager) Open(ctx context.Context, scopeID string, key Key, mountPoint 
 
 // Close unmounts mountPoint and closes the dm-crypt device for scopeID. It is
 // tolerant of an already-unmounted or already-closed container: both steps are
-// best effort and a not-mounted / not-open condition is not an error. No key is
-// needed (luksClose takes only the mapper name).
+// best effort and a not-mounted / not-open condition is not an error. The
+// Manager holds no key, so there is nothing to zeroize here; luksClose needs
+// only the mapper name.
 func (m *Manager) Close(ctx context.Context, scopeID, mountPoint string) error {
 	if err := validateScopeID(scopeID); err != nil {
 		return err
