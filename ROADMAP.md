@@ -87,17 +87,37 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     is mounted read-only from the node (a placement requirement). Proven: the
     mTLS transport + auth and the claim-activation wiring in envtest; a REAL
     network activate + exec + secret delivery + auth rejection on KVM (the husk
-    network-activation CI phase, certs via `internal/pki` so the SANs match). The
-    DEFAULT is still raw-forkd. See `docs/husk-pods.md` section 6b.
-  - ⬜ Still open (rest of #18): running the stub INSIDE a real husk pod (the
-    dormant VMM actually starting, cgroup/netns placement; kind-e2e); flipping
-    pod-native to the DEFAULT with raw-forkd behind the flag and running the full
-    kind claim -> pod -> exec path as the default (slice 3); the conformance
-    suite (scheduler truth, ResourceQuota/LimitRange, NetworkPolicy/PSA-restricted,
-    `kubectl get pods`, eviction/preemption/PDB/drain); and the BARE-METAL P99
-    claim-to-first-exec <= 10ms warm-pool benchmark (the shared-CI activation
-    latency is not that target). Sandboxes are pods ONLY on the husk path, which
-    is opt-in behind the flag until the default flips.
+    network-activation CI phase, certs via `internal/pki` so the SANs match). At
+    this slice the DEFAULT was still raw-forkd. See `docs/husk-pods.md` section 6b.
+  - ✅ Pod-native is the DEFAULT + the full cluster path (migration slice 3): the
+    controller runs `--enable-husk-pods` by DEFAULT (`--enable-raw-forkd` selects
+    the fork-per-claim fallback; `--mock` forces it), so each `SandboxPool` builds
+    the template snapshot on the KVM nodes AND maintains a warm pool of husk pods
+    pinned to the snapshot-holding nodes, and a `SandboxClaim` activates one in
+    place. The build-vs-run split: forkd stays the PRIVILEGED snapshot BUILDER;
+    the husk pod is the UNPRIVILEGED RUNNER (device-plugin `/dev/kvm`, no
+    `privileged`, read-only snapshot mount). The production base (`deploy/`) runs
+    the controller in husk mode + forkd builder + device plugin with PKI
+    bootstrap on; `Dockerfile.husk-stub` is built in CI. The `kind-e2e-husk` job
+    proves the full CLUSTER object lifecycle on the KVM-capable runner: stack up,
+    PKI Secrets minted, device plugin advertising, the pool creating husk pods the
+    scheduler binds to the KVM node, and the claim driven to husk-pod activation;
+    when the nested dormant VMM comes up in the kind pod it tightens to the full
+    claim -> Ready -> exec gate. The in-VM activation + exec + fork-correctness +
+    secret delivery + wrong-CA rejection path is gated on real KVM in
+    `kvm-test.yaml`. Sandboxes ARE pods by default. See `docs/husk-pods.md`
+    section 6c and `docs/threat-model.md` section 0 (the default execution surface
+    is now the unprivileged husk pod).
+  - ⬜ Still open (rest of #18): the nested dormant Firecracker VMM coming up
+    reliably INSIDE a kind pod so the full claim -> pod -> exec tail GATES on kind
+    too (today best-effort in `kind-e2e-husk`, gated in `kvm-test.yaml` with FC on
+    the host); the conformance suite (scheduler truth, ResourceQuota/LimitRange,
+    NetworkPolicy/PSA-restricted, `kubectl get pods`, eviction/preemption/PDB/drain);
+    the BARE-METAL P99 claim-to-first-exec <= 10ms warm-pool benchmark (the
+    shared-CI activation latency is not that target); the full re-derived threat
+    model for the unprivileged-stub escape surface; and fully pod-native snapshot
+    delivery (CAS pull into the pod) plus removing forkd entirely (it stays the
+    builder).
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in

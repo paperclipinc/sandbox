@@ -16,10 +16,46 @@ has happened.
 | Component | Runs as | Trusts | Trusted by |
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
-| Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd treats its output as data only |
-| forkd (`cmd/forkd`) | root DaemonSet pod with `/dev/kvm` and an explicit capability list (not `privileged`) | controller | controller, nodes |
-| controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd |
-| Snapshot artifacts | files under `/var/lib/agent-run` on each node | - | forkd executes them as memory images |
+| Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd / husk stub treat its output as data only |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, `seccomp: RuntimeDefault`, read-only snapshot mount | controller (mTLS control channel) | controller |
+| forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | root DaemonSet pod with `/dev/kvm` and an explicit capability list (not `privileged`) | controller | controller, nodes |
+| controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
+| Snapshot artifacts | files under `/var/lib/agent-run` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
+
+## 0. Default execution surface: the unprivileged husk pod (issue #18, slice 3)
+
+Pod-native execution is now the DEFAULT (the controller runs
+`--enable-husk-pods` by default). This is a deliberate change to the threat
+surface, recorded here; the FULL re-derivation for the unprivileged-stub escape
+surface is a later slice (#18), not done in this change.
+
+The build-vs-run split moves the per-sandbox EXECUTION surface from a privileged
+process to an unprivileged one:
+
+- **Old default (raw-forkd, now the fallback behind `--enable-raw-forkd`).** A
+  sandbox VM was forked by forkd: a root DaemonSet with `/dev/kvm`, a broad
+  capability set, and a hostPath to the node data dir. The per-sandbox execution
+  surface was that privileged process.
+- **New default (husk pods).** A sandbox VM runs inside an UNPRIVILEGED husk pod:
+  `privileged: false`, `allowPrivilegeEscalation: false`, drop ALL capabilities,
+  `seccompProfile: RuntimeDefault`, `/dev/kvm` injected by the device plugin
+  (not a hostPath or privilege), and the template snapshot mounted READ-ONLY. The
+  one documented exception is `runAsNonRoot: false` (section 1). A VMM escape
+  from a husk pod lands in an unprivileged pod, not in forkd's root, and the pod
+  is governed by ordinary pod mechanisms (the scheduler, cgroups, the pod netns).
+- **forkd-the-builder stays privileged.** Building a template snapshot still
+  needs `/dev/kvm` and the jailer, so forkd remains the privileged BUILDER on the
+  KVM nodes (and the `--enable-raw-forkd` fork-per-claim engine). The privileged
+  surface is now confined to the BUILD path, run once per node per template,
+  rather than every sandbox execution.
+
+NEW boundaries this default introduces, to be fully derived in the dedicated
+slice: the unprivileged stub activating a VM in place (a new escape surface
+distinct from forkd's), the mTLS control channel that delivers tenant secrets
+into the pod (`internal/husk` `ServeTLS`, authorized to the controller
+identity; covered for transport/auth in section 3 and `docs/husk-pods.md`
+section 6b), and the read-only node snapshot mount shared across husk pods on a
+node. The device-plugin surface itself is in section 3.
 
 ## 1. Guest → host escape
 

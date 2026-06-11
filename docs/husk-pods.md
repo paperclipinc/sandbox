@@ -6,13 +6,23 @@ charging behavior that makes that claim hold, the measured CI proof, the honest
 first-faulter accounting nuance, and what this work proves today versus what the
 full epic still needs.
 
-> Honest scope, stated up front: sandboxes are NOT pods today. forkd owns VMs
-> directly; the controller does not create a pod per sandbox. This document and
-> the CI phase it describes do NOT change that. They verify the single
-> precondition issue #18 demanded we confirm FIRST, before any controller
-> migration: that copy-on-write page sharing across forks of one snapshot
-> survives being placed in separate cgroup v2 memory controllers (per-pod
-> memcgs). The rest of the migration is enumerated under "Proven vs remaining".
+> Status, stated up front: pod-native is now the DEFAULT (issue #18, slice 3).
+> The controller runs `--enable-husk-pods` by default: each `SandboxPool` builds
+> its template snapshot on the KVM nodes AND maintains a warm pool of
+> pre-scheduled husk pods pinned to the snapshot-holding nodes, and a
+> `SandboxClaim` activates a dormant husk pod in place. Sandboxes ARE pods by
+> default. The build-vs-run split is the key idea: forkd stays the PRIVILEGED
+> snapshot BUILDER (it needs `/dev/kvm` and the jailer to build a template
+> snapshot), while the husk pod is the UNPRIVILEGED RUNNER (it gets `/dev/kvm`
+> from the device plugin, no `privileged: true`, and activates the pre-built
+> snapshot read-only). raw-forkd (fork per claim, no husk pods) is the documented
+> fallback behind `--enable-raw-forkd`; `--mock` implies it (the dev/no-KVM path
+> cannot run a husk pod's dormant VMM). Section 6c covers the default flip and
+> what the kind-e2e proves; the earlier sections trace how the model was built up
+> slice by slice (the CoW precondition, the prepare/activate split, the device
+> plugin, the warm-pool lifecycle, claim activation) and use the pre-flip wording
+> of their slice; section 6c and the closing "Proven vs remaining" reflect the
+> landed default.
 
 ## 1. The husk-pods architecture (issue #18)
 
@@ -517,9 +527,94 @@ rather than relying on a node read-only mount) is a refinement, not done here.
 - fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
   read-only mount.
 
-Sandboxes are pods ONLY on the husk path, which is opt-in (`--enable-husk-pods`)
-until the default flips (slice 3). With the flag off the controller is unchanged
-raw-forkd and sandboxes are forkd-owned VMs, not pods.
+Sandboxes are pods on the husk path. Slice 2 made this opt-in
+(`--enable-husk-pods`); slice 3 (section 6c) made it the DEFAULT.
+
+## 6c. Pod-native is the default (slice 3)
+
+Slice 3 flips pod-native ON by default and proves the full cluster path. The
+controller's `--enable-husk-pods` now defaults to TRUE; `--enable-raw-forkd`
+selects the fork-per-claim fallback; `--mock` forces raw-forkd (the dev/no-KVM
+overlay has no `/dev/kvm`, so a husk pod's dormant VMM cannot run there).
+Exactly one run path is active: `huskPods == !rawForkd`
+(`cmd/controller/main.go` `resolveRunMode`).
+
+### The build-vs-run split
+
+The two roles are deliberately separated by privilege:
+
+- **forkd is the privileged BUILDER.** Building a template snapshot means
+  booting a VM from the template image, running its init command in the VM, and
+  taking a Firecracker snapshot. That needs `/dev/kvm`, the jailer (per-VM
+  uid/chroot/cgroup), and write access to the node data dir. forkd stays a root
+  DaemonSet with an explicit capability set on the KVM nodes and does this build
+  (and remains the `--enable-raw-forkd` fork-per-claim engine).
+- **the husk pod is the unprivileged RUNNER.** Running a sandbox means loading a
+  PRE-BUILT snapshot read-only and resuming it. The husk pod gets `/dev/kvm`
+  from the device plugin (not `privileged: true`), mounts the node's template
+  snapshot read-only, and activates it in place. It drops ALL capabilities, runs
+  `seccompProfile: RuntimeDefault`, and is not privileged (the one documented
+  exception is `runAsNonRoot: false`, section 6).
+
+So a snapshot is BUILT once per node by privileged forkd and RUN many times by
+unprivileged husk pods. The husk pod never builds; it only activates.
+
+### The default flow
+
+1. A `SandboxPool` in husk mode builds the template snapshot on the KVM nodes
+   (the same build path raw-forkd uses) AND maintains a warm pool of husk pods
+   pinned, via a `kubernetes.io/hostname` nodeAffinity, to exactly the
+   snapshot-holding nodes, so each husk pod's read-only snapshot hostPath
+   resolves (`internal/controller/huskpod.go`).
+2. A `SandboxClaim` selects a dormant Running+Ready husk pod, claims it under an
+   optimistic lock (no double-assign), and activates it over the mTLS control
+   channel (slice 2, section 6b), delivering the claim-time env/secrets and the
+   per-sandbox bearer token; `Status.Endpoint` becomes `podIP:sandboxPort`.
+3. Exec/files go `SDK -> podIP:sandboxPort -> vsock -> guest agent`, gated by the
+   per-sandbox bearer token the husk stub serves on the in-pod sandbox API.
+
+### Proven vs open for slice 3
+
+**PROVEN:**
+
+- the run-path resolution: `resolveRunMode` makes husk pods the default,
+  `--enable-raw-forkd` and `--mock` force raw-forkd, exactly one path active
+  (unit-tested in `cmd/controller`).
+- the deploy stack: the production base (`deploy/`) runs the controller in husk
+  mode (`--enable-husk-pods`, `--husk-stub-image`, `--husk-data-dir`), the forkd
+  DaemonSet (the builder), and the KVM device plugin, with PKI bootstrap ON so
+  the husk control channel and forkd mTLS work. kubeconform-validated.
+- the full CLUSTER object-lifecycle path on the KVM-capable kind runner
+  (`.github/workflows/ci.yaml`, the `kind-e2e-husk` job): the husk-default stack
+  rolls out, EnsurePKI mints the CA + forkd + controller TLS Secrets, the device
+  plugin advertises `agentrun.dev/kvm`, the pool reconcile CREATES husk pods
+  that the scheduler BINDS to the KVM node (device-plugin resource + nodeSelector
+  + snapshot-node affinity, scheduler truth), and the claim reconcile is driven
+  to the husk-pod activation path. When a husk pod's nested dormant VMM comes up
+  inside the kind pod, the job tightens to the full claim -> Ready -> exec gate
+  (exec over the in-pod sandbox API with the claim's bearer token).
+- the IN-VM tail (dormant VMM Prepare, in-place mTLS activation, exec through the
+  guest, fork-correctness, secret delivery, wrong-CA rejection) is proven end to
+  end on the KVM runner in `.github/workflows/kvm-test.yaml`, where Firecracker
+  runs directly on the runner host (sections 3, 6b).
+
+**OPEN:**
+
+- the nested dormant Firecracker VMM coming up INSIDE a kind pod (Firecracker
+  nested in a kind-node container) is not guaranteed on a shared CI runner, so
+  the husk-pod-Ready -> claim-Ready -> in-pod-exec tail is best-effort in
+  `kind-e2e-husk` and GATED in `kvm-test.yaml` (FC on the host). The documented
+  kind boundary is reported as `HUSK-KIND-VMM`;
+- the conformance suite (scheduler truth quotas actually bounding the pool,
+  LimitRange defaulting, NetworkPolicy/Cilium over the pod netns, PSA
+  `restricted` minus the device-plugin exception, `kubectl get pods`,
+  eviction/preemption/PDB/drain);
+- the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark;
+- the re-derived threat model for the unprivileged-stub escape surface
+  ([docs/threat-model.md](threat-model.md) records the default-surface change;
+  the full re-derivation is a later slice);
+- fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
+  read-only mount; removing forkd entirely (it stays the builder).
 
 ## 7. Proven vs remaining
 
@@ -580,32 +675,29 @@ raw-forkd and sandboxes are forkd-owned VMs, not pods.
 
 ### Remaining (the rest of issue #18, follow-up PRs)
 
-This PR does NOT migrate any controller and does NOT make sandboxes pods. The
-full husk-pods epic still needs:
+Pod-native is now the DEFAULT (slice 3, section 6c): sandboxes are pods by
+default, forkd stays the privileged snapshot builder, and raw-forkd is the
+fallback behind `--enable-raw-forkd`. The full husk-pods epic still needs:
 
-- running the stub INSIDE a real husk pod (the cgroup/netns placement, the
-  dormant VMM actually starting); slice 1 (section 6) now builds and scales the
-  husk pod OBJECTS behind `--enable-husk-pods` with the device-plugin resource
-  request and the locked-down securityContext, proven in envtest, but kind-e2e
-  has not yet run the pod;
-- flipping pod-native to the DEFAULT with raw-forkd behind the flag (slice 3).
-  Claim activation itself (the claim picks a dormant husk pod and activates it
-  over the mTLS control channel, delivering the claim-time env and secrets) is
-  DONE as slice 2 (section 6b): the transport + auth + the real network
-  activate + exec + secret are proven on KVM and the claim-activation wiring is
-  proven in envtest. What remains is making it the default and running the full
-  kind claim -> pod -> exec path as the default;
-- the conformance suite, each acceptance criterion a test: scheduler truth,
-  ResourceQuota/LimitRange, NetworkPolicy/Cilium over the pod netns, PSA
-  `restricted` minus the documented device-plugin exception, `kubectl get pods`,
-  and eviction/preemption/PDB/drain behavior;
+- the nested dormant Firecracker VMM coming up reliably INSIDE a kind pod, so the
+  full claim -> pod -> exec tail GATES on kind too. Today that tail is best-effort
+  in the `kind-e2e-husk` job (the cluster object lifecycle GATES there) and is
+  GATED in `kvm-test.yaml`, where Firecracker runs on the runner host;
+- the conformance suite, each acceptance criterion a test: scheduler truth
+  (a quota actually bounding the pool, a LimitRange defaulting it),
+  NetworkPolicy/Cilium over the pod netns, PSA `restricted` minus the documented
+  device-plugin exception, `kubectl get pods`, and eviction/preemption/PDB/drain
+  behavior;
 - the bare-metal P99 claim-to-first-exec <= 10ms warm-pool benchmark
   (before/after); the shared-CI activation latency is not this number;
 - the re-derived threat model for the unprivileged-stub escape surface (the
   dormant VMM activating a VM inside the pod is a new boundary;
-  [docs/threat-model.md](threat-model.md) must be re-derived in the migration
-  PRs that introduce the stub and device plugin).
+  [docs/threat-model.md](threat-model.md) records the default-surface change now;
+  the full re-derivation is a later slice);
+- fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
+  read-only mount, and removing forkd entirely (it stays the builder).
 
-Until those land, sandboxes remain forkd-owned VMs, not pods. This PR moves the
-epic forward by removing the single largest uncertainty: that the memory-sharing
-the model depends on does not evaporate at the memcg boundary.
+The default flip moves the epic forward by proving the full cluster object
+lifecycle (build the snapshot, place husk pods, activate one on a claim) on the
+KVM-capable kind runner, with the in-VM activation + exec path already proven on
+real KVM in `kvm-test.yaml`.

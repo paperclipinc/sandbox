@@ -26,11 +26,13 @@ type SandboxPoolReconciler struct {
 	// forkd side (Task 1).
 	PeerToken string
 
-	// EnableHuskPods selects the husk pod warm-pool path (issue #18, slice 1):
-	// the pool maintains a warm pool of pre-scheduled husk pods running the
-	// dormant-VMM stub instead of building node-local snapshots. Default false:
-	// the existing raw-forkd createSnapshotsOnNodes path runs unchanged. The
-	// pod-native default is a later migration slice.
+	// EnableHuskPods selects the husk pod warm-pool path (issue #18), the
+	// pod-native default. When true the pool does BOTH: it builds the template
+	// snapshot on the target nodes (createSnapshotsOnNodes) AND maintains a warm
+	// pool of pre-scheduled husk pods, pinned to the snapshot-holding nodes, that
+	// run the dormant-VMM stub. When false the raw-forkd fork-per-claim path runs:
+	// the snapshot is built and each claim forks on a holder, no husk pods. In
+	// cmd/controller this is true by default and turned off by --enable-raw-forkd.
 	EnableHuskPods bool
 	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
 	// pod. Only used when EnableHuskPods is true.
@@ -81,29 +83,52 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	templateID := pool.Spec.TemplateRef.Name
 	desired := pool.Spec.Replicas
 
-	// Husk pod warm-pool path (issue #18, slice 1). When enabled, the pool
-	// maintains a warm pool of pre-scheduled husk pods instead of building
-	// node-local snapshots; the snapshot-on-nodes deficit is skipped entirely.
-	// readySnapshots is reused for the status count so the CRD reports the warm
-	// pool size in the existing field. The default (flag off) leaves the
-	// raw-forkd path below unchanged.
+	// Husk pod warm-pool path (issue #18, the pod-native default). When enabled,
+	// the pool does BOTH: it FIRST ensures the template snapshot is built on the
+	// target nodes (the same createSnapshotsOnNodes build path raw-forkd uses, so
+	// <dataDir>/templates/<id>/snapshot exists on those nodes), THEN maintains a
+	// warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes so
+	// their read-only snapshot hostPath resolves.
+	//
+	// ORDERING + PLACEMENT COUPLING: the snapshot build runs before the husk pods
+	// so reconcileHuskPods can read the snapshot-holding node set
+	// (NodesWithTemplate) and pin each husk pod to it via nodeAffinity. The first
+	// reconcile of a fresh pool may build the snapshot but find no holder yet (the
+	// build registers the node in the same pass); the husk pods then fall back to
+	// the kvm nodeSelector and a later reconcile tightens the affinity once the
+	// registry reports the holders. The raw-forkd path below (flag off, behind
+	// --enable-raw-forkd) is the fork-per-claim fallback and does NOT create husk
+	// pods.
 	if r.EnableHuskPods {
+		// Build the snapshot on the target nodes first. A build error is logged
+		// and we requeue; we still attempt the husk pods with whatever holders
+		// exist so a transient build hiccup does not stall the warm pool forever.
+		if err := r.ensureTemplateBuilt(ctx, &pool, &template); err != nil {
+			logger.Error(err, "failed to build template snapshot for husk pool")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
 		warm, err := r.reconcileHuskPods(ctx, &pool, &template)
 		if err != nil {
 			logger.Error(err, "failed to reconcile husk pods")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		setPoolReadySnapshots(pool.Name, warm)
-		pool.Status.ReadySnapshots = warm
-		pool.Status.TotalSnapshots = warm
+		readySnapshots := r.readySnapshotCount(templateID)
+		setPoolReadySnapshots(pool.Name, readySnapshots)
+		pool.Status.ReadySnapshots = readySnapshots
+		pool.Status.TotalSnapshots = readySnapshots
+		pool.Status.NodeDistribution = r.nodeDistribution(templateID)
+		if digest, ok := r.NodeRegistry.TemplateDigest(templateID); ok {
+			pool.Status.TemplateDigest = digest
+		}
 		now := metav1.Now()
 		pool.Status.LastSnapshotTime = &now
 		setCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
-			Status:             conditionStatus(warm >= desired),
+			Status:             conditionStatus(warm >= desired && readySnapshots > 0),
 			LastTransitionTime: now,
 			Reason:             "HuskPodsReady",
-			Message:            fmt.Sprintf("%d/%d husk pods", warm, desired),
+			Message:            fmt.Sprintf("%d/%d husk pods, %d snapshot node(s)", warm, desired, readySnapshots),
 		})
 		if err := r.Status().Update(ctx, &pool); err != nil {
 			return ctrl.Result{}, err
@@ -111,32 +136,16 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	readySnapshots := r.readySnapshotCount(templateID)
-
-	if readySnapshots < desired {
-		deficit := desired - readySnapshots
-		logger.Info("snapshot deficit", "ready", readySnapshots, "desired", desired, "creating", deficit)
-		// When the template requests at-rest encryption, own and deliver its key.
-		// EnsureEncKey creates-or-reads the per-template Secret (owner-referenced
-		// to the template for GC); the key bytes go straight into the CreateTemplate
-		// RPC over mTLS and are never logged. A plaintext template passes no key.
-		var encKey []byte
-		if template.Spec.Encrypted {
-			var keyErr error
-			encKey, keyErr = EnsureEncKey(ctx, r.Client, pool.Namespace, templateID, &template)
-			if keyErr != nil {
-				// The error names only the Secret, never key bytes.
-				logger.Error(keyErr, "ensure encryption key for template", "template", templateID)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-		}
-		created, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, encKey, deficit)
-		if err != nil {
+	// Raw-forkd path (the --enable-raw-forkd fallback): build the snapshot on the
+	// target nodes and let each claim fork on a holder. No husk pods.
+	if r.readySnapshotCount(templateID) < desired {
+		logger.Info("snapshot deficit", "ready", r.readySnapshotCount(templateID), "desired", desired)
+		if err := r.ensureTemplateBuilt(ctx, &pool, &template); err != nil {
 			logger.Error(err, "failed to create snapshots")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		readySnapshots += created
 	}
+	readySnapshots := r.readySnapshotCount(templateID)
 
 	// Update status
 	setPoolReadySnapshots(pool.Name, readySnapshots)
@@ -169,6 +178,52 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // node count.
 func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
 	return int32(len(r.NodeRegistry.NodesWithTemplate(templateID)))
+}
+
+// snapshotNodeNames returns the hostnames of the healthy nodes that hold the
+// template snapshot, the set a husk pod's nodeAffinity is pinned to. A nil
+// registry (some unit tests) returns nil, which leaves the husk pod on the kvm
+// nodeSelector alone.
+func (r *SandboxPoolReconciler) snapshotNodeNames(templateID string) []string {
+	if r.NodeRegistry == nil {
+		return nil
+	}
+	holders := r.NodeRegistry.NodesWithTemplate(templateID)
+	names := make([]string, 0, len(holders))
+	for _, n := range holders {
+		names = append(names, n.Name)
+	}
+	return names
+}
+
+// ensureTemplateBuilt drives the template snapshot toward pool.Spec.Replicas
+// holder nodes using the same build/distribute path as the raw-forkd pool
+// (createSnapshotsOnNodes). It is the FIRST half of a husk-mode reconcile: the
+// husk pods that follow mount <dataDir>/templates/<id>/snapshot on a holder
+// node, so the snapshot must exist there first. A no-op when the deficit is
+// already met. The encrypted-template key handling matches the raw path: the
+// per-template key Secret is owned here and delivered over mTLS, never logged.
+func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) error {
+	templateID := pool.Spec.TemplateRef.Name
+	readySnapshots := r.readySnapshotCount(templateID)
+	if readySnapshots >= pool.Spec.Replicas {
+		return nil
+	}
+	deficit := pool.Spec.Replicas - readySnapshots
+
+	var encKey []byte
+	if template.Spec.Encrypted {
+		var keyErr error
+		encKey, keyErr = EnsureEncKey(ctx, r.Client, pool.Namespace, templateID, template)
+		if keyErr != nil {
+			// The error names only the Secret, never key bytes.
+			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
+		}
+	}
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, encKey, deficit); err != nil {
+		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
+	}
+	return nil
 }
 
 // createSnapshotsOnNodes ensures the template is present on up to deficit

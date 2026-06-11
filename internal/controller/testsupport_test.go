@@ -66,6 +66,14 @@ func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, po
 	return r.reconcileHuskPods(ctx, pool, template)
 }
 
+// EnsureTemplateBuiltForTest exposes ensureTemplateBuilt to the external
+// controller_test package so the husk-mode "build the snapshot first" half can
+// be envtested without driving the full Reconcile (which would race the
+// manager's pool reconciler on the pool status subresource).
+func (r *SandboxPoolReconciler) EnsureTemplateBuiltForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) error {
+	return r.ensureTemplateBuilt(ctx, pool, template)
+}
+
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake
 // forkd received. It records presence/length only, NEVER the key value, so a
 // test can assert the controller delivered a key without the value ever

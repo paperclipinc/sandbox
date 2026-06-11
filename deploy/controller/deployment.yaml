@@ -26,13 +26,28 @@ spec:
       containers:
         - name: controller
           image: ghcr.io/paperclipinc/sandbox-controller:latest
-          # Production runs with the default flags: metrics on :8080, health
-          # on :8081, PKI bootstrap ENABLED (mTLS to forkd). --mock is a no-op
-          # on the controller and --disable-pki-bootstrap is deliberately
-          # omitted so the control plane refuses to dial forkd unauthenticated.
+          # Production runs the pod-native default (issue #18): metrics on
+          # :8080, health on :8081, PKI bootstrap ENABLED (mTLS to forkd AND to
+          # the husk control channel). --disable-pki-bootstrap is deliberately
+          # omitted so the control plane refuses to dial forkd or activate a
+          # husk pod over an unauthenticated channel.
+          #
+          # --enable-husk-pods is the DEFAULT (passed explicitly here for
+          # readability): each SandboxPool builds its template snapshot on the
+          # KVM nodes AND maintains a warm pool of pre-scheduled husk pods pinned
+          # to the snapshot-holding nodes; a SandboxClaim activates a dormant
+          # husk pod in place. The husk pods run the husk-stub image
+          # (--husk-stub-image) and mount the node template snapshot rooted at
+          # --husk-data-dir (matching forkd's --data-dir), the kernel, and the
+          # PKI Secrets. forkd stays as the privileged snapshot BUILDER and the
+          # --enable-raw-forkd fork-per-claim fallback. Pass --enable-raw-forkd
+          # (or --mock) to disable husk pods and fork per claim instead.
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+            - --enable-husk-pods
+            - --husk-stub-image=ghcr.io/paperclipinc/sandbox-husk-stub:latest
+            - --husk-data-dir=/var/lib/agent-run
           ports:
             - name: metrics
               containerPort: 8080
