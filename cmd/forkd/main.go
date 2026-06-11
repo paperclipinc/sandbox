@@ -108,6 +108,11 @@ func main() {
 	// dnsProxyServer is the node-level controlled resolver, set only when
 	// --enable-dns-egress and networking are both on. Nil otherwise.
 	var dnsProxyServer *dnsproxy.Server
+	// reqKeyProvider is the request-scoped encryption key provider, set only when
+	// --enable-encryption is on. The same instance is wired into the engine and
+	// the daemon server so the handlers can hand the controller-delivered key to
+	// the engine. Nil otherwise.
+	var reqKeyProvider *fork.RequestKeyProvider
 
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
@@ -140,11 +145,16 @@ func main() {
 		}
 		if enableEncryption {
 			engineOpts.EnableEncryption = true
-			// PR1 key custody: an in-memory provider generates and caches a key
-			// per template in node memory only (not escrowed; lost on restart).
-			// PR2 swaps in a Secret/KMS-backed provider.
-			engineOpts.KeyProvider = fork.NewInMemoryKeyProvider()
-			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR1: keys held in node memory only, not escrowed, lost on restart)")
+			// PR2 key custody: the controller owns the per-template key (a
+			// Kubernetes Secret in etcd) and delivers it on each mTLS RPC. The
+			// node neither generates nor persists the key; the RequestKeyProvider
+			// holds it only for the duration of a CreateTemplate/Fork call. The
+			// SAME provider instance is wired into both the engine (it reads the
+			// key via KeyFor) and the daemon server (the handlers stash the
+			// request key via SetKey and forget it after).
+			reqKeyProvider = fork.NewRequestKeyProvider()
+			engineOpts.KeyProvider = reqKeyProvider
+			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR2: key custody is the controller/etcd; the key arrives over the mTLS RPC, never generated or persisted on the node)")
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")
@@ -208,6 +218,12 @@ func main() {
 	}
 	sandboxAPI.SetAuditor(auditor)
 	server := daemon.NewServer(engine, sandboxAPI)
+	// Wire the request-scoped key provider so the gRPC handlers can hand the
+	// controller-delivered encryption key to the engine for the duration of a
+	// CreateTemplate/Fork call. Same instance the engine reads from.
+	if reqKeyProvider != nil {
+		server.SetKeyProvider(reqKeyProvider)
+	}
 
 	// Start gRPC server (controller communication)
 	lis, err := net.Listen("tcp", listenAddr)

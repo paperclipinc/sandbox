@@ -46,6 +46,12 @@ message CreateTemplateRequest {
   // its own backing; the fork's ForkRequest.volumes must match this set by
   // name. Empty means the template has no volumes.
   repeated VolumeMount volumes = 6;
+  // encryption_key is the per-template at-rest encryption key, a SECRET VALUE
+  // carried only over the mTLS RPC. The controller owns key custody (a
+  // Kubernetes Secret); the node never generates or persists it. It must NEVER
+  // be logged, placed in an error message, or written to the node data disk.
+  // Empty means the template is not encrypted.
+  bytes encryption_key = 7;
 }
 
 message CreateTemplateResponse {
@@ -115,6 +121,13 @@ message ForkRequest {
   // source for Snapshot/Share/Clone policies; the controller passes the policy
   // and spec.
   repeated VolumeMount volumes = 7;
+  // encryption_key is the source template's at-rest encryption key, a SECRET
+  // VALUE carried only over the mTLS RPC, so the node can open the encrypted
+  // container before restoring the snapshot. The controller owns key custody (a
+  // Kubernetes Secret); the node never generates or persists it. It must NEVER
+  // be logged, placed in an error message, or written to the node data disk.
+  // Empty means the source template is not encrypted.
+  bytes encryption_key = 8;
 }
 
 message VolumeMount {

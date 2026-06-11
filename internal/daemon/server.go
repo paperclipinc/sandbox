@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/storecrypt"
 	"github.com/paperclipinc/sandbox/internal/volume"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
@@ -55,9 +56,23 @@ func init() {
 	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique, cowMemorySavings, meteredDisk)
 }
 
+// RequestKeyStasher is the narrow seam the gRPC handlers use to hand the
+// request-delivered encryption key to the engine for the duration of one
+// operation. fork.RequestKeyProvider satisfies it. The key is a secret value:
+// SetKey/ForgetKey carry it without ever logging it.
+type RequestKeyStasher interface {
+	SetKey(scopeID string, key storecrypt.Key)
+	ForgetKey(scopeID string)
+}
+
 type Server struct {
 	engine     ForkEngine
 	sandboxAPI *SandboxAPI
+	// keyProvider is the SAME RequestKeyProvider the engine reads keys from. It
+	// is nil unless at-rest encryption is enabled; when set, the gRPC handlers
+	// stash the request-delivered key here before invoking the engine and forget
+	// it after. The key is never logged.
+	keyProvider RequestKeyStasher
 	// forkGeneration is a monotonic per-forkd counter handed to the guest on
 	// every fork. Uniqueness within this process is what matters (so a guest
 	// can tell two restores apart); global ordering does not.
@@ -66,6 +81,14 @@ type Server struct {
 
 func NewServer(engine ForkEngine, sandboxAPI *SandboxAPI) *Server {
 	return &Server{engine: engine, sandboxAPI: sandboxAPI}
+}
+
+// SetKeyProvider wires the request-scoped key provider the handlers use to hand
+// the controller-delivered encryption key to the engine. It must be the same
+// instance the engine reads from (EngineOpts.KeyProvider). Called only when
+// at-rest encryption is enabled.
+func (s *Server) SetKeyProvider(p RequestKeyStasher) {
+	s.keyProvider = p
 }
 
 // RegisterForkDaemonServer registers the gRPC service.
