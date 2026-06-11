@@ -25,12 +25,30 @@ type SandboxPoolReconciler struct {
 	// per-pull minted token is a follow-up; the shared-token model matches the
 	// forkd side (Task 1).
 	PeerToken string
+
+	// EnableHuskPods selects the husk pod warm-pool path (issue #18, slice 1):
+	// the pool maintains a warm pool of pre-scheduled husk pods running the
+	// dormant-VMM stub instead of building node-local snapshots. Default false:
+	// the existing raw-forkd createSnapshotsOnNodes path runs unchanged. The
+	// pod-native default is a later migration slice.
+	EnableHuskPods bool
+	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
+	// pod. Only used when EnableHuskPods is true.
+	HuskStubImage string
+	// KVMResourceName is the extended resource a husk pod requests for KVM
+	// access (the device plugin slot, not privileged: true). Empty defaults to
+	// agentrun.dev/kvm. Only used when EnableHuskPods is true.
+	KVMResourceName string
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed
-// counts and conditions. SandboxTemplate is read-only (covered above).
+// counts and conditions. SandboxTemplate is read-only (covered above). The
+// husk pod warm-pool path (issue #18) creates and deletes Pods, so the
+// reconciler needs create;delete on pods on top of the get;list;watch the forkd
+// discovery already declares.
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -49,8 +67,39 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	templateID := pool.Spec.TemplateRef.Name
-	readySnapshots := r.readySnapshotCount(templateID)
 	desired := pool.Spec.Replicas
+
+	// Husk pod warm-pool path (issue #18, slice 1). When enabled, the pool
+	// maintains a warm pool of pre-scheduled husk pods instead of building
+	// node-local snapshots; the snapshot-on-nodes deficit is skipped entirely.
+	// readySnapshots is reused for the status count so the CRD reports the warm
+	// pool size in the existing field. The default (flag off) leaves the
+	// raw-forkd path below unchanged.
+	if r.EnableHuskPods {
+		warm, err := r.reconcileHuskPods(ctx, &pool, &template)
+		if err != nil {
+			logger.Error(err, "failed to reconcile husk pods")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		setPoolReadySnapshots(pool.Name, warm)
+		pool.Status.ReadySnapshots = warm
+		pool.Status.TotalSnapshots = warm
+		now := metav1.Now()
+		pool.Status.LastSnapshotTime = &now
+		setCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             conditionStatus(warm >= desired),
+			LastTransitionTime: now,
+			Reason:             "HuskPodsReady",
+			Message:            fmt.Sprintf("%d/%d husk pods", warm, desired),
+		})
+		if err := r.Status().Update(ctx, &pool); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	readySnapshots := r.readySnapshotCount(templateID)
 
 	if readySnapshots < desired {
 		deficit := desired - readySnapshots

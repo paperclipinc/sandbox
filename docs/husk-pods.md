@@ -332,7 +332,88 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
   wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
   hostPath to request the resource are follow-ups (see section 6).
 
-## 6. Proven vs remaining
+## 6. Controller migration: husk pod lifecycle (slice 1)
+
+This is the first controller-migration slice. It is gated behind the
+`--enable-husk-pods` flag on the controller and is OFF by default; with the flag
+off the controller's behavior is unchanged (raw-forkd: the pool builds
+node-local snapshots). Nothing here makes sandboxes pods on its own; it manages
+the warm pool of husk pod OBJECTS so the later slices (activation, default flip)
+have pre-scheduled pods to activate.
+
+### What the flag does
+
+When `--enable-husk-pods` is set, a `SandboxPool` no longer drives the
+snapshot-on-nodes deficit. Instead it maintains a warm pool of husk pods sized
+to `spec.replicas`:
+
+- `buildHuskPod` (`internal/controller/huskpod.go`) emits a `GenerateName
+  <pool>-husk-` Pod in the pool's namespace, owner-referenced to the pool, with
+  the labels `agentrun.dev/pool=<pool>` and `agentrun.dev/husk=true`. The single
+  container `husk-stub` runs the image from `--husk-stub-image` with args to
+  Prepare a dormant Firecracker VMM (the `--firecracker`/`--kernel` paths and a
+  `--control-socket` to listen on). The activation transport over that socket is
+  slice 2; slice 1 only stands the dormant stub up.
+- The container requests one `agentrun.dev/kvm` slot (request AND limit, the
+  device-plugin contract) so the pod is scheduled only onto a `/dev/kvm` node,
+  without `privileged: true`. It also carries cpu/memory REQUESTS sized from the
+  template's `spec.resources` (or a documented default of 1 cpu / 512Mi when the
+  template carries no sizing). Those requests are the scheduler-truth-partial
+  result: the sandbox now shows up to the scheduler as ordinary pod requests
+  (it counts against `kubectl describe node`, ResourceQuota, and LimitRange as a
+  normal workload). The FULL scheduler-truth conformance (a quota actually
+  bounding the pool, a LimitRange defaulting it, eviction/preemption) is the
+  conformance slice; this slice proves the object exists with the requests set.
+- The container `securityContext` is the new-execution-surface lockdown,
+  documented per field in `huskpod.go`: `privileged: false`,
+  `allowPrivilegeEscalation: false`, all capabilities dropped (`drop: [ALL]`,
+  none added back; networking capabilities arrive with the networking slice),
+  `seccompProfile: RuntimeDefault`. `runAsNonRoot: false` is the single
+  documented exception: Firecracker opens the device-plugin-injected `/dev/kvm`,
+  and the dormant-VMM bring-up is simplest as uid 0 WITHOUT `privileged`; moving
+  to a non-root uid in the kvm group is a follow-up once the device permissions
+  are pinned. This is NOT privileged and escalation is denied.
+- `reconcileHuskPods` lists the pool's husk pods by label, keeps the
+  non-terminating ones it owns, creates the deficit toward `replicas`, and
+  deletes the surplus deterministically (by name) on scale-down. Deleting the
+  pool garbage-collects its husk pods via the owner reference.
+
+### The readiness nuance (envtest vs production)
+
+In PRODUCTION a husk slot is "ready" only when its pod is Running AND Ready (the
+dormant VMM is up and serving the control socket); the warm-pool size would gate
+on that. envtest has no kubelet, so pods never run, never go Ready, and have no
+phase. To keep the reconcile convergent in BOTH, `reconcileHuskPods` counts by
+object EXISTENCE of non-terminating owned husk pods: it creates up to `replicas`
+and deletes the extras. The production Running+Ready gate is layered on in the
+activation slice; object existence is the correct convergence target for this
+object-lifecycle slice.
+
+### Proven vs open for slice 1
+
+**PROVEN (envtest, `internal/controller/huskpod_test.go`):**
+
+- the husk pod spec: the `agentrun.dev/kvm` request and limit of 1, the
+  non-privileged securityContext (privileged false, escalation false, drop ALL,
+  seccomp RuntimeDefault), the owner-ref to the pool, the two labels, the
+  cpu/memory requests (template-sized and the default fallback), and the stub
+  image;
+- the warm-pool object lifecycle: a pool with `--enable-husk-pods` and
+  `replicas: 3` creates 3 husk pod objects owned by the pool; a second reconcile
+  is idempotent; scaling `replicas` to 1 deletes 2; with the flag off, no husk
+  pods are created (the raw-forkd path runs unchanged).
+
+**OPEN (later slices):**
+
+- the husk pod actually RUNNING and the dormant VMM ACTIVATING end to end (the
+  control-socket activation transport, slice 2; kind-e2e);
+- the securityContext being genuinely PSA-`restricted` enforced (the conformance
+  slice; the device-plugin exception is the one documented carve-out);
+- flipping pod-native to the default with raw-forkd behind the flag (slice 3).
+
+The default is still raw-forkd (flag off). The pod-native default is slice 3.
+
+## 7. Proven vs remaining
 
 ### Proven so far
 
@@ -374,14 +455,16 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
 This PR does NOT migrate any controller and does NOT make sandboxes pods. The
 full husk-pods epic still needs:
 
-- running the stub INSIDE a real husk pod (the pod spec, the device-plugin
-  resource request, the cgroup/netns placement); the stub binary and its control
-  protocol exist, but nothing runs it in a pod yet;
-- migrating the pool/claim/fork controllers to create + activate husk pods (with
-  raw-forkd mode kept behind a flag and pod-native as the default), including
-  sourcing the claim-time env and secrets from the controller; the stub can
-  already apply them per activation (proven above), so the migration is the
-  controller wiring, not the stub mechanism;
+- running the stub INSIDE a real husk pod (the cgroup/netns placement, the
+  dormant VMM actually starting); slice 1 (section 6) now builds and scales the
+  husk pod OBJECTS behind `--enable-husk-pods` with the device-plugin resource
+  request and the locked-down securityContext, proven in envtest, but kind-e2e
+  has not yet run the pod;
+- wiring claim activation to a husk pod (the claim picks a dormant husk pod and
+  activates it via the stub control channel, sourcing the claim-time env and
+  secrets from the controller; the stub can already apply them per activation,
+  proven above) and flipping pod-native to the default with raw-forkd behind the
+  flag;
 - the conformance suite, each acceptance criterion a test: scheduler truth,
   ResourceQuota/LimitRange, NetworkPolicy/Cilium over the pod netns, PSA
   `restricted` minus the documented device-plugin exception, `kubectl get pods`,

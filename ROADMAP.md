@@ -65,17 +65,29 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     on a no-KVM runner it asserts Pending (honest scheduler truth). Migrating
     the forkd DaemonSet off its privileged `/dev/kvm` hostPath is a follow-up.
     See `docs/husk-pods.md` section 5.
-  - ⬜ Still open (rest of #18): running the stub INSIDE a real husk pod (pod
-    spec, device-plugin resource
-    request, cgroup/netns placement); migrating the pool/claim/fork controllers
-    to create + activate husk pods, including sourcing the claim-time env and
-    secrets from the controller (the stub can already apply them per activation);
-    the conformance suite (scheduler truth, ResourceQuota/LimitRange,
-    NetworkPolicy/PSA-restricted, `kubectl get pods`,
-    eviction/preemption/PDB/drain); and the BARE-METAL P99 claim-to-first-exec
-    <= 10ms warm-pool benchmark (the shared-CI activation latency is not that
-    target). Sandboxes are NOT pods today; these milestones verified preconditions
-    and built the activation mechanism, they did not perform the migration.
+  - ✅ Husk pod lifecycle controller (migration slice 1, behind a flag): with
+    `--enable-husk-pods` (default off, raw-forkd unchanged) a `SandboxPool`
+    maintains a warm pool of pre-scheduled husk pod OBJECTS running the
+    dormant-VMM stub, each requesting `agentrun.dev/kvm` (not `privileged`) with
+    cpu/memory requests sized to the template (scheduler-truth-partial),
+    locked-down securityContext (drop ALL, no escalation, seccomp
+    RuntimeDefault, the documented `/dev/kvm` device exception), owner-ref GC,
+    scaled to `replicas`. Proven in envtest: the pod spec, create, idempotent
+    reconcile, scale up/down, owner-ref, and flag-off-unchanged. The pod
+    actually running + activation are the next slices. `Dockerfile.husk-stub`
+    builds the stub image (firecracker as in forkd; the kernel is a
+    volume-provided runtime artifact). See `docs/husk-pods.md` section 6.
+  - ⬜ Still open (rest of #18): running the stub INSIDE a real husk pod (the
+    dormant VMM actually starting, cgroup/netns placement; kind-e2e); wiring
+    claim activation to a husk pod (the claim activates a dormant husk pod via
+    the stub control channel, sourcing the claim-time env and secrets from the
+    controller, the stub can already apply them per activation) and flipping
+    pod-native to the default with raw-forkd behind the flag; the conformance
+    suite (scheduler truth, ResourceQuota/LimitRange, NetworkPolicy/PSA-restricted,
+    `kubectl get pods`, eviction/preemption/PDB/drain); and the BARE-METAL P99
+    claim-to-first-exec <= 10ms warm-pool benchmark (the shared-CI activation
+    latency is not that target). Sandboxes are NOT pods today; the warm pool
+    builds pod OBJECTS behind a flag, it does not yet run a VM in a pod.
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in

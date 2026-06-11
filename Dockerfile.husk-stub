@@ -1,0 +1,43 @@
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# The stub Prepares and (slice 2) activates a Firecracker VMM, so it is a
+# linux/amd64 binary; CGO is off for a static binary like forkd.
+RUN CGO_ENABLED=0 go build -o husk-stub ./cmd/husk-stub/
+
+FROM ubuntu:22.04
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Firecracker, mirroring Dockerfile.forkd: the stub spawns a dormant
+# Firecracker VMM, so the firecracker binary ships in the image at the same
+# path forkd uses (/usr/local/bin/firecracker), which is the default the stub
+# and the controller-built pod spec point at.
+ARG FC_VERSION=v1.15.0
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
+    curl -fsSL -o /tmp/fc.tgz \
+        "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" && \
+    tar -xzf /tmp/fc.tgz -C /tmp && \
+    mv "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker && \
+    chmod +x /usr/local/bin/firecracker && \
+    rm -rf /tmp/fc.tgz /tmp/release-* && \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/husk-stub /usr/local/bin/husk-stub
+
+# The guest KERNEL is NOT baked into this image. Like forkd's snapshot/data
+# artifacts, the kernel is a runtime artifact provided to the pod via a volume
+# mount under /var/lib/agent-run (the controller-built husk pod points
+# --kernel at /var/lib/agent-run/kernel/vmlinux). This keeps the image
+# kernel-agnostic; the running pod + its volume layout are exercised in the
+# kind-e2e slice.
+VOLUME ["/var/lib/agent-run", "/run/husk"]
+
+ENTRYPOINT ["/usr/local/bin/husk-stub"]

@@ -58,13 +58,17 @@ rules:
       - get
       - patch
       - update
-  # ForkdDiscovery lists the labeled forkd Pods to learn each node's pod IP.
-  # Read-only.
+  # ForkdDiscovery lists the labeled forkd Pods to learn each node's pod IP
+  # (get/list/watch). The husk pod warm-pool path (issue #18, slice 1) also
+  # creates and deletes husk Pods owned by a SandboxPool, so create;delete are
+  # added here.
   - apiGroups:
       - ""
     resources:
       - pods
     verbs:
+      - create
+      - delete
       - get
       - list
       - watch

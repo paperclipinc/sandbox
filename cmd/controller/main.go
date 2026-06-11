@@ -33,12 +33,16 @@ func main() {
 	var disablePKIBootstrap bool
 	var otlpEndpoint string
 	var maxPendingDuration time.Duration
+	var enableHuskPods bool
+	var huskStubImage string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&mockMode, "mock", false, "Use mock fork engine (no KVM required, for local dev with kind)")
 	flag.BoolVar(&disablePKIBootstrap, "disable-pki-bootstrap", false, "Skip creating the control plane CA and TLS Secrets; forkd dialing is then UNAUTHENTICATED unless the cluster brings its own certs")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
+	flag.BoolVar(&enableHuskPods, "enable-husk-pods", false, "Maintain a warm pool of pre-scheduled husk pods per SandboxPool instead of building node-local snapshots (issue #18, slice 1). Default false: the raw-forkd snapshot path is used.")
+	flag.StringVar(&huskStubImage, "husk-stub-image", "agent-run-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.Parse()
 
@@ -79,9 +83,12 @@ func main() {
 	peerToken := os.Getenv("FORKD_PEER_TOKEN")
 
 	if err := (&controller.SandboxPoolReconciler{
-		Client:       mgr.GetClient(),
-		NodeRegistry: nodeRegistry,
-		PeerToken:    peerToken,
+		Client:          mgr.GetClient(),
+		NodeRegistry:    nodeRegistry,
+		PeerToken:       peerToken,
+		EnableHuskPods:  enableHuskPods,
+		HuskStubImage:   huskStubImage,
+		KVMResourceName: "agentrun.dev/kvm",
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)

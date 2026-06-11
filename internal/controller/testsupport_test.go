@@ -13,13 +13,27 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/observability"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	corev1 "k8s.io/api/core/v1"
 )
+
+// BuildHuskPodForTest exposes buildHuskPod to the external controller_test
+// package so the husk pod spec can be unit-tested.
+func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, opts HuskPodOptions) *corev1.Pod {
+	return r.buildHuskPod(pool, template, opts)
+}
+
+// ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
+// controller_test package so the warm-pool lifecycle can be envtested.
+func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {
+	return r.reconcileHuskPods(ctx, pool, template)
+}
 
 // EncKeyRecorder records, per RPC, the length of any EncryptionKey the fake
 // forkd received. It records presence/length only, NEVER the key value, so a
