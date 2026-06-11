@@ -11,9 +11,10 @@ import (
 )
 
 // PullImage resolves ref and fetches the linux/amd64 image from a registry.
-// Anonymous public pulls work out of the box; the default keychain still picks
-// up configured credentials for private images. This is the network path and
-// is exercised only by integration tests.
+// Pulls are anonymous, which covers public images. Private registries and
+// credentialed pulls are a follow-up: we deliberately avoid the docker
+// config keychain here because it drags in docker/cli and its credential
+// helpers, a heavy and version-fragile dependency tree.
 func PullImage(ctx context.Context, ref string) (v1.Image, error) {
 	parsed, err := name.ParseReference(ref)
 	if err != nil {
@@ -22,7 +23,7 @@ func PullImage(ctx context.Context, ref string) (v1.Image, error) {
 
 	img, err := remote.Image(parsed,
 		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithAuth(authn.Anonymous),
 		remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}),
 	)
 	if err != nil {
