@@ -167,8 +167,28 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	}
 
 	// SecurityContext decisions (each load-bearing; the husk pod is the new
-	// execution surface, so it is locked down and the one device exception is
-	// the KVM device plugin, NOT privileged):
+	// execution surface, so it is locked down and the device exception is the KVM
+	// device plugin, NOT privileged).
+	//
+	// PSA AUDIT (empirically verified against the v1.31 PodSecurity admission
+	// plugin on kind, proven object-level in the kind-e2e conformance job): the
+	// husk pod's securityContext satisfies EVERY restricted control, but the husk
+	// pod is NOT admitted into a baseline or restricted namespace, for exactly two
+	// DOCUMENTED EXCEPTIONS, both intrinsic to the husk model:
+	//   1. the read-only snapshot hostPath. hostPath is forbidden under BOTH
+	//      baseline and restricted (the "HostPath Volumes" / "Volume Types"
+	//      controls); the husk pod mounts the node's read-only template snapshot
+	//      so the dormant VMM can load it. This is the node-snapshot exception.
+	//   2. runAsNonRoot=false. restricted requires runAsNonRoot=true; the husk pod
+	//      runs uid 0 so Firecracker can open the device-plugin-injected /dev/kvm
+	//      WITHOUT privileged (the /dev/kvm device exception).
+	// So the HONEST claim is: the husk pod is "restricted EXCEPT the read-only
+	// snapshot hostPath + runAsNonRoot-false (the /dev/kvm device) exceptions". Its
+	// securityContext is restricted-clean: with those two exceptions removed the
+	// SAME securityContext is admitted into a restricted namespace (verified on
+	// kind). The agentrun.dev/kvm device-plugin resource replaces privileged: true.
+	//
+	// The individual controls the husk pod DOES satisfy:
 	//   - Privileged: false. The whole point of the husk model is to drop
 	//     privileged: true; KVM access comes from the device plugin slot, not
 	//     from a privileged container.
@@ -179,14 +199,13 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	//     Linux capability. Networking capabilities (e.g. NET_ADMIN for tap
 	//     setup) arrive with the networking slice, not here; we add back none so
 	//     this slice stays minimal.
-	//   - SeccompProfile RuntimeDefault, so the container runs under the
-	//     runtime's default seccomp filter (PSA restricted requires this).
-	//   - RunAsNonRoot: false (documented device-plugin exception). Firecracker
-	//     opens /dev/kvm, which the device plugin injects; on common node
-	//     distros /dev/kvm is root/kvm-group owned and the dormant VMM bring-up
-	//     is simplest as uid 0 WITHOUT privileged. This is the single documented
-	//     exception PSA-restricted would flag; a follow-up slice can move to a
-	//     non-root uid in the kvm group once the device plugin's device
+	//   - SeccompProfile RuntimeDefault, set at BOTH the pod and the container
+	//     securityContext level. restricted checks the profile at the pod OR the
+	//     container level; setting both keeps the pod-level control satisfied even
+	//     if a future container is added without its own profile.
+	//   - RunAsNonRoot: false (the documented /dev/kvm device exception above),
+	//     set at both the pod and the container level. A follow-up slice can move
+	//     to a non-root uid in the kvm group once the device plugin's device
 	//     permissions are pinned. It is NOT privileged and escalation is denied.
 	runAsNonRoot := false
 
@@ -313,6 +332,20 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
 			// until terminated. Restart on crash so the warm slot recovers.
 			RestartPolicy: corev1.RestartPolicyAlways,
+			// POD-LEVEL securityContext. PSA restricted checks seccompProfile and
+			// runAsNonRoot at the pod OR the container level; we set them at the pod
+			// level too so the pod-level control is satisfied independently of any
+			// container. seccompProfile is RuntimeDefault (a restricted control the
+			// husk pod satisfies); runAsNonRoot mirrors the documented /dev/kvm
+			// device exception (false). The two PSA exceptions that keep the husk
+			// pod out of a restricted namespace are the read-only snapshot hostPath
+			// and this runAsNonRoot=false, both documented above.
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptrBool(runAsNonRoot),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
 			// Pin to a KVM node: the dormant VMM needs /dev/kvm AND the pod must
 			// land where the template snapshot hostPath exists. The nodeAffinity
 			// above narrows further to the snapshot-holding nodes when known.

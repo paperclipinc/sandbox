@@ -29,8 +29,11 @@ full epic still needs.
 Today a sandbox VM is a Firecracker process forkd launches and tracks directly.
 The husk-pods model moves every sandbox VM inside a Kubernetes pod so the VM
 inherits real pod semantics: the scheduler sees it, ResourceQuota/LimitRange
-bound it, NetworkPolicy (Cilium) governs its netns, and PSA can hold the
-namespace to `restricted` (with exactly one documented device exception).
+bound it, NetworkPolicy (Cilium) governs its netns, and the husk pod's
+securityContext satisfies every PSA `restricted` control, with exactly two
+documented exceptions that keep it out of a restricted namespace: the read-only
+snapshot hostPath and `runAsNonRoot: false` (the /dev/kvm device). The exact PSA
+finding, empirically verified, is in the "Kubernetes conformance" section.
 
 The shape:
 
@@ -615,6 +618,39 @@ unprivileged husk pods. The husk pod never builds; it only activates.
   the full re-derivation is a later slice);
 - fully pod-native snapshot delivery (CAS pull into the pod) rather than the node
   read-only mount; removing forkd entirely (it stays the builder).
+
+## 6d. Networking reconciliation: which layer governs egress (per mode)
+
+The husk default changes WHICH layer enforces a sandbox's egress, and the two
+run modes use DIFFERENT mechanisms. They do not both govern a given sandbox;
+exactly one applies, decided by the run mode. (Full detail, including the CI
+proof, is in [docs/networking.md](networking.md).)
+
+- **Husk mode (the default): a Kubernetes `NetworkPolicy` governs.** The VM's tap
+  lives inside the HUSK POD's network namespace, so the sandbox's traffic IS the
+  pod's traffic. A `NetworkPolicy` (or Cilium) selecting the husk pod
+  (`podSelector` on `agentrun.dev/husk=true`) is the GOVERNING egress layer,
+  enforced by the CNI on the pod netns exactly as for any pod. This is honest pod
+  networking with zero bespoke code: the cluster's existing pod-network policy
+  machinery applies. The bespoke host-nftables engine is REDUNDANT here and is
+  NOT installed for husk pods.
+- **Raw-forkd mode (`--enable-raw-forkd`, `--mock`): the bespoke host-nftables
+  engine governs.** There is no pod; the VM's tap lives on the HOST (forkd's
+  netns), where a `NetworkPolicy` cannot see it. The bespoke default-deny per-tap
+  nftables allowlist (`internal/network` + `internal/netconf`, issues #47/#48)
+  plus the controlled DNS proxy (`internal/dnsproxy`) ARE the enforcement
+  mechanism.
+
+The bespoke nftables engine is RETAINED (raw-forkd still depends on it); it is
+not deleted. It is redundant ONLY for the husk pod-netns path. Neither mode runs
+both layers over the same sandbox.
+
+Honest scope: in husk mode the `NetworkPolicy` is the policy boundary proven at
+the OBJECT level on kind (it exists and selects the husk pod; the CNI is
+responsible for enforcement). The actual IN-VM enforcement of the VM tap by the
+pod netns needs a KVM-capable kubelet running the husk pod's VMM (a bare-metal
+reference node) and is the documented open item, not gated on the shared kind
+runner where the nested VMM does not reliably come up.
 
 ## 7. Proven vs remaining
 

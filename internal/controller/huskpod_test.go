@@ -119,6 +119,108 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	}
 }
 
+// TestBuildHuskPodPSARestricted asserts the husk pod satisfies every PSA
+// `restricted` control it CAN, both at the pod AND the container securityContext
+// level, so a regression that adds a privilege (drops the seccomp profile, flips
+// privileged on, allows escalation, or stops dropping ALL capabilities) is caught
+// here. It also pins the DOCUMENTED EXCEPTIONS so they cannot drift silently: the
+// husk pod is admitted into a baseline/restricted namespace only EXCEPT the
+// read-only snapshot hostPath (forbidden under both baseline and restricted) and
+// runAsNonRoot=false (forbidden under restricted, the /dev/kvm device exception),
+// plus the agentrun.dev/kvm device-plugin resource. The empirical PSA finding (a
+// restricted namespace rejects the husk pod on exactly hostPath + runAsNonRoot,
+// and the SAME securityContext minus those two is admitted into restricted) is
+// proven object-level on kind in the conformance job; this unit test pins the
+// spec fields those exceptions and the satisfied controls correspond to.
+func TestBuildHuskPodPSARestricted(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "psa-pool", Namespace: "default", UID: "pool-uid-psa"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "psa-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "psa-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
+		StubImage:  "agent-run-husk-stub:test",
+		SnapshotID: "psa-tmpl",
+		DataDir:    "/var/lib/agent-run",
+	})
+
+	// POD-LEVEL securityContext: PSA restricted checks seccompProfile at the pod
+	// OR the container level; we set BOTH so the pod-level control is satisfied
+	// even if a future container is added without its own profile.
+	psc := pod.Spec.SecurityContext
+	if psc == nil {
+		t.Fatal("pod-level SecurityContext is nil; PSA restricted checks the pod-level seccompProfile")
+	}
+	if psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod SeccompProfile = %+v, want RuntimeDefault", psc.SeccompProfile)
+	}
+	// runAsNonRoot at the pod level is the documented exception: it is FALSE so
+	// Firecracker can open the device-plugin-injected /dev/kvm as uid 0 WITHOUT
+	// privileged. This is the ONLY restricted securityContext control the husk pod
+	// does not satisfy; it is documented, not accidental.
+	if psc.RunAsNonRoot == nil || *psc.RunAsNonRoot {
+		t.Error("pod RunAsNonRoot must be explicitly false (the documented /dev/kvm device exception)")
+	}
+
+	// CONTAINER-LEVEL securityContext: every other restricted control IS satisfied,
+	// so the husk pod's securityContext is restricted-clean and only the hostPath +
+	// runAsNonRoot exceptions keep it out of a restricted namespace.
+	sc := pod.Spec.Containers[0].SecurityContext
+	if sc == nil {
+		t.Fatal("container SecurityContext is nil")
+	}
+	if sc.Privileged == nil || *sc.Privileged {
+		t.Error("container Privileged must be explicitly false (restricted: privileged forbidden)")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Error("container AllowPrivilegeEscalation must be explicitly false (restricted control)")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("container Capabilities.Drop = %+v, want [ALL] (restricted control)", sc.Capabilities)
+	}
+	if len(sc.Capabilities.Add) != 0 {
+		t.Errorf("container Capabilities.Add = %+v, want none (restricted forbids adding back)", sc.Capabilities.Add)
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("container SeccompProfile = %+v, want RuntimeDefault (restricted control)", sc.SeccompProfile)
+	}
+
+	// DOCUMENTED EXCEPTION: the read-only snapshot hostPath. It is forbidden under
+	// BOTH baseline and restricted; the husk pod carries it as the documented
+	// node-snapshot-read exception. Pin it read-only so a regression to a writable
+	// snapshot mount is caught.
+	var snapVol *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "snapshot" {
+			snapVol = &pod.Spec.Volumes[i]
+		}
+	}
+	if snapVol == nil || snapVol.HostPath == nil {
+		t.Fatal("snapshot volume must be a hostPath (the documented node-snapshot exception)")
+	}
+	var snapMount *corev1.VolumeMount
+	for i := range pod.Spec.Containers[0].VolumeMounts {
+		if pod.Spec.Containers[0].VolumeMounts[i].Name == "snapshot" {
+			snapMount = &pod.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	if snapMount == nil || !snapMount.ReadOnly {
+		t.Errorf("snapshot mount = %+v, want present and ReadOnly", snapMount)
+	}
+
+	// DOCUMENTED EXCEPTION: the /dev/kvm device-plugin resource request (request
+	// AND limit), which replaces privileged: true.
+	kvm := corev1.ResourceName("agentrun.dev/kvm")
+	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
+		t.Errorf("kvm request = %s, want 1 (the device-plugin exception)", got.String())
+	}
+}
+
 func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 	pool := &v1alpha1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ctl-pool", Namespace: "default", UID: "pool-uid-9"},
