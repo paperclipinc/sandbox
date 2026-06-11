@@ -25,13 +25,18 @@ import (
 //	test-agent <vsock-uds-path>                              # default suite
 //	test-agent --mode notify --generation N <vsock-uds-path> # fork proof
 func main() {
-	mode := flag.String("mode", "default", "test mode: default | notify | egress")
+	mode := flag.String("mode", "default", "test mode: default | notify | egress | name-egress")
 	generation := flag.Uint64("generation", 1, "fork generation to send in notify mode")
 	guestIP := flag.String("guest-ip", "", "egress mode: guest eth0 IP to configure (e.g. 10.0.0.2)")
 	prefixLen := flag.Int("prefix-len", 30, "egress mode: guest eth0 prefix length")
 	gateway := flag.String("gateway", "", "egress mode: guest default gateway (the host tap IP)")
 	allowed := flag.String("allowed", "", "egress mode: ip:port the guest MUST be able to reach")
 	denied := flag.String("denied", "", "egress mode: ip:port the guest must be BLOCKED from reaching")
+	resolver := flag.String("resolver", "", "name-egress mode: DNS resolver IP to write into the guest resolv.conf")
+	allowName := flag.String("allow-name", "", "name-egress mode: host:port the guest MUST reach by resolving an allowlisted name (e.g. egress.test:8080)")
+	wrongPort := flag.String("wrong-port", "", "name-egress mode: host:port using the allowlisted name on a NON-allowlisted port; must be BLOCKED (e.g. egress.test:9090)")
+	deniedName := flag.String("denied-name", "", "name-egress mode: host:port whose name is NOT allowlisted; the resolver must REFUSE it (e.g. denied.test:8080)")
+	directIP := flag.String("direct-ip", "", "name-egress mode: ip:port that the allowlisted name resolves to; a DIRECT dial before resolving must be BLOCKED (e.g. 198.51.100.2:8080)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -57,8 +62,19 @@ func main() {
 			allowed:   *allowed,
 			denied:    *denied,
 		})
+	case "name-egress":
+		runNameEgress(client, nameEgressOpts{
+			guestIP:    *guestIP,
+			prefixLen:  *prefixLen,
+			gateway:    *gateway,
+			resolver:   *resolver,
+			allowName:  *allowName,
+			wrongPort:  *wrongPort,
+			deniedName: *deniedName,
+			directIP:   *directIP,
+		})
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify|egress)\n", *mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (want default|notify|egress|name-egress)\n", *mode)
 		os.Exit(1)
 	}
 }
@@ -121,6 +137,125 @@ func runEgress(client *vsock.Client, o egressOpts) {
 	}
 	fmt.Printf("PASS egress: denied destination %s blocked\n", o.denied)
 	fmt.Println("PASS egress: host-side default-deny allowlist enforced end to end")
+}
+
+type nameEgressOpts struct {
+	guestIP    string
+	prefixLen  int
+	gateway    string
+	resolver   string
+	allowName  string
+	wrongPort  string
+	deniedName string
+	directIP   string
+}
+
+// runNameEgress proves NAME-based egress from INSIDE the guest. The host runs a
+// controlled DNS resolver that resolves only allowlisted names and pins each
+// resolved (ip . port) into this sandbox's nftables set; the guest is pointed at
+// that resolver. The proof rests on four honest assertions, each stating exactly
+// what it demonstrates:
+//
+//  1. DIRECT-IP-BEFORE-RESOLVE blocked: dial the destination IP:port directly,
+//     BEFORE resolving any name. The IP is not pinned yet, so the host drops it.
+//     This proves the static path does not pre-allow the IP; reachability must
+//     come from resolving the name. Run first, before any lookup.
+//  2. RESOLVE+CONNECT allowed: connect to the allowlisted NAME:port. busybox nc
+//     resolves the name through the controlled resolver (which pins the answer)
+//     then connects. Success proves resolve-then-pin-then-reach end to end.
+//  3. WRONG-PORT blocked: the name resolves, but a connect on a port that is NOT
+//     on the allowlist is dropped, because the resolver pinned only the allowed
+//     port. Proves pinning is port-scoped.
+//  4. DENIED-NAME refused: a name that is NOT allowlisted gets REFUSED by the
+//     resolver (no answer), so the guest cannot even resolve it, and the IP it
+//     would map to (the same test server) was never pinned for this guest.
+//     Proves allowlisting is by NAME, not by the shared destination IP.
+//
+// The guest cannot influence the host ruleset or the resolver allowlist, so this
+// is a genuine end-to-end proof. All values here (IPs, names, ports) are safe to
+// log.
+func runNameEgress(client *vsock.Client, o nameEgressOpts) {
+	if o.guestIP == "" || o.gateway == "" || o.resolver == "" || o.allowName == "" ||
+		o.wrongPort == "" || o.deniedName == "" || o.directIP == "" {
+		fmt.Fprintln(os.Stderr, "name-egress mode requires --guest-ip, --gateway, --resolver, --allow-name, --wrong-port, --denied-name, --direct-ip")
+		os.Exit(1)
+	}
+
+	// Bring eth0 up with the per-sandbox /30 address and a default route via the
+	// host tap, then point the guest resolver at the controlled DNS resolver IP.
+	execOrDie(client, fmt.Sprintf("ip addr add %s/%d dev eth0", o.guestIP, o.prefixLen))
+	execOrDie(client, "ip link set eth0 up")
+	execOrDie(client, fmt.Sprintf("ip route add default via %s", o.gateway))
+	execOrDie(client, fmt.Sprintf("printf 'nameserver %s\\n' > /etc/resolv.conf", o.resolver))
+	fmt.Printf("PASS guest-net: eth0=%s/%d gw=%s resolver=%s\n", o.guestIP, o.prefixLen, o.gateway, o.resolver)
+
+	// connectProbe returns the guest exit code of a bounded TCP connect to a
+	// host:port. busybox nc resolves host via /etc/resolv.conf (so a NAME goes
+	// through the controlled resolver), then connects. Exit 0 == reachable; a
+	// dropped SYN hangs until `timeout` kills it (exit 124); a resolve failure
+	// also yields a non-zero exit.
+	connectProbe := func(label, target string) int {
+		host, port := splitHostPort(target)
+		out := execOrDie(client, fmt.Sprintf("timeout 6 nc %s %s </dev/null >/dev/null 2>&1; echo $?", host, port))
+		code := strings.TrimSpace(out)
+		fmt.Printf("name-egress probe [%s] %s -> exit %s\n", label, target, code)
+		n := 0
+		_, _ = fmt.Sscanf(code, "%d", &n)
+		return n
+	}
+
+	// lookupProbe returns the guest exit code of a DNS lookup of name through the
+	// controlled resolver. busybox nslookup exits non-zero on REFUSED/NXDOMAIN.
+	lookupProbe := func(label, name string) int {
+		host, _ := splitHostPort(name)
+		out := execOrDie(client, fmt.Sprintf("timeout 6 nslookup %s %s >/dev/null 2>&1; echo $?", host, o.resolver))
+		code := strings.TrimSpace(out)
+		fmt.Printf("name-egress lookup [%s] %s -> exit %s\n", label, host, code)
+		n := 0
+		_, _ = fmt.Sscanf(code, "%d", &n)
+		return n
+	}
+
+	// 1. Direct dial to the destination IP BEFORE resolving any name must be
+	// blocked: nothing is pinned, so the host drops it. Ordering matters; this
+	// runs before any lookup.
+	if rc := connectProbe("direct-ip-before-resolve", o.directIP); rc == 0 {
+		fmt.Fprintf(os.Stderr, "FAIL name-egress: direct dial to %s was reachable BEFORE resolving; the IP is statically allowed, not name-gated\n", o.directIP)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS name-egress: direct IP %s blocked before any name is resolved\n", o.directIP)
+
+	// 2. Resolve + connect to the allowlisted name on the allowed port: the
+	// resolver answers and pins, so the guest reaches it.
+	if rc := connectProbe("allow-name", o.allowName); rc != 0 {
+		fmt.Fprintf(os.Stderr, "FAIL name-egress: allowlisted name %s was NOT reachable (exit %d); resolve+pin+reach broken\n", o.allowName, rc)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS name-egress: allowlisted name %s reachable (resolved and pinned)\n", o.allowName)
+
+	// 3. The allowlisted name on a NON-allowlisted port must be blocked even
+	// though the name resolves: the resolver pinned only the allowed port.
+	if rc := connectProbe("wrong-port", o.wrongPort); rc == 0 {
+		fmt.Fprintf(os.Stderr, "FAIL name-egress: wrong port %s WAS reachable; pinning is not port-scoped\n", o.wrongPort)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS name-egress: allowlisted name on wrong port %s blocked\n", o.wrongPort)
+
+	// 4. A name that is NOT allowlisted must be REFUSED by the resolver: the
+	// guest cannot resolve it, and the (shared) IP it would map to was never
+	// pinned for this guest. The lookup failing proves the refusal; the connect
+	// failing confirms it is not reachable by name.
+	if rc := lookupProbe("denied-name", o.deniedName); rc == 0 {
+		fmt.Fprintf(os.Stderr, "FAIL name-egress: non-allowlisted name %s was RESOLVED; the resolver did not refuse it\n", o.deniedName)
+		os.Exit(1)
+	}
+	if rc := connectProbe("denied-name", o.deniedName); rc == 0 {
+		fmt.Fprintf(os.Stderr, "FAIL name-egress: non-allowlisted name %s was reachable; refusal did not block egress\n", o.deniedName)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS name-egress: non-allowlisted name %s refused and unreachable (allowlisting is by name, not by IP)\n", o.deniedName)
+
+	fmt.Println("PASS name-egress: controlled resolver enforces name-based egress end to end")
 }
 
 // splitHostPort splits an ip:port string into its host and port parts. It does

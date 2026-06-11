@@ -9,10 +9,12 @@ on:
       - 'internal/cas/**'
       - 'internal/netconf/**'
       - 'internal/network/**'
+      - 'internal/dnsproxy/**'
       - 'guest/**'
       - 'cmd/test-agent/**'
       - 'cmd/cas-verify/**'
       - 'cmd/net-smoke/**'
+      - 'cmd/dns-stub/**'
       - 'cmd/tmpl-smoke/**'
       - 'cmd/vol-smoke/**'
       - 'internal/volume/**'
@@ -991,6 +993,210 @@ jobs:
 
           echo "================================"
           echo "  Guest egress enforcement proven (reach allowed, block denied)"
+          echo "================================"
+
+      # Name-based egress proof: the controlled DNS resolver is the only way a
+      # sandbox reaches a host by NAME. forkd resolves only allowlisted names and
+      # pins each resolved (ip . port) into that sandbox's nftables set, so the
+      # guest can reach exactly what it resolved for an allowlisted name and
+      # nothing else. This phase boots ONE VM behind a per-sandbox tap whose
+      # allowlist is the NAME egress.test:8080 (not an IP), points the guest at
+      # the controlled resolver, and asserts from INSIDE the guest:
+      #
+      #   1. a DIRECT dial to the destination IP before resolving anything is
+      #      BLOCKED (the IP is not statically allowed; reachability is name-gated);
+      #   2. resolve+connect egress.test:8080 SUCCEEDS (resolver answered, pinned
+      #      198.51.100.2:8080, guest reached it);
+      #   3. egress.test:9090 is BLOCKED (the name resolves but only the allowed
+      #      port was pinned);
+      #   4. denied.test is REFUSED by the resolver (not allowlisted), so the guest
+      #      cannot resolve it even though the stub maps it to the SAME test IP:
+      #      this proves allowlisting is by NAME, not by IP.
+      #
+      # The upstream is a STUB resolver under our control (cmd/dns-stub) mapping
+      # BOTH names to the same test server IP, so assertion 4 is meaningful. The
+      # controlled resolver binds 169.254.1.1 on the host loopback: guest->resolver
+      # is delivered locally (INPUT, which our forward-hook table does not filter),
+      # while the actual egress to 198.51.100.2 is FORWARDED and gated by the
+      # sandbox chain's dynamic pin set. The same DOCKER-USER ACCEPT workaround as
+      # the IP-egress phase keeps OUR inet table the deciding verdict. REQUIRED gate.
+      - name: Name-based egress enforcement, resolve allowlisted name and block the rest
+        timeout-minutes: 8
+        run: |
+          set -e
+          WORKDIR=/tmp/agent-run-test/name-egress
+          mkdir -p $WORKDIR
+          sudo chmod 666 /dev/kvm
+
+          # Same Docker FORWARD-policy workaround as the IP-egress phase: leave OUR
+          # inet agentrun_egress table as the actual egress enforcer.
+          sudo iptables -I DOCKER-USER -j ACCEPT 2>/dev/null || sudo nft insert rule ip filter DOCKER-USER accept 2>/dev/null || true
+          sudo sysctl -w net.ipv4.ip_forward=1
+
+          # Addressing.
+          TAP=tap_negress
+          HOST_IP=10.251.0.1
+          GUEST_IP=10.251.0.2
+          GUEST_MAC='02:00:00:00:ee:02'
+          DST_IP=198.51.100.2
+          HOST_VETH_IP=198.51.100.1
+          ALLOWED_PORT=8080
+          DENIED_PORT=9090
+          RESOLVER_IP=169.254.1.1
+          STUB_ADDR=127.0.0.1:5353
+
+          # Bind the controlled-resolver IP on the host loopback so guest queries
+          # to it are delivered locally. /32 on lo is enough; remove on cleanup.
+          sudo ip addr add ${RESOLVER_IP}/32 dev lo 2>/dev/null || true
+
+          # --- destination netns: the test server on both ports ---
+          # Both names resolve to DST_IP; the listener answers on both the allowed
+          # and the wrong port so a reachability difference is due to the pin set,
+          # not a missing listener.
+          sudo ip netns add negress-dst
+          sudo ip link add veth-nhost type veth peer name veth-nns
+          sudo ip link set veth-nns netns negress-dst
+          sudo ip addr add ${HOST_VETH_IP}/30 dev veth-nhost
+          sudo ip link set veth-nhost up
+          sudo ip netns exec negress-dst ip addr add ${DST_IP}/30 dev veth-nns
+          sudo ip netns exec negress-dst ip link set veth-nns up
+          sudo ip netns exec negress-dst ip link set lo up
+          sudo ip netns exec negress-dst ip route add default via ${HOST_VETH_IP}
+          printf '%s\n' \
+            'import socket, os' \
+            'for p in (int(os.environ["AP"]), int(os.environ["DP"])):' \
+            '    s = socket.socket()' \
+            '    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+            '    s.bind((os.environ["DST"], p))' \
+            '    s.listen(16)' \
+            '    if os.fork() == 0:' \
+            '        while True:' \
+            '            c, _ = s.accept(); c.close()' \
+            > $WORKDIR/listener.py
+          sudo AP=$ALLOWED_PORT DP=$DENIED_PORT DST=$DST_IP \
+            ip netns exec negress-dst python3 $WORKDIR/listener.py &
+          LISTENER_PID=$!
+          sleep 1
+
+          # --- stub upstream resolver under our control ---
+          # Maps BOTH names to the same test server IP so the denied-name proof is
+          # by NAME, not by IP. The controlled resolver forwards allowed queries
+          # here.
+          go build -o /tmp/dns-stub ./cmd/dns-stub/
+          /tmp/dns-stub --listen $STUB_ADDR \
+            --map egress.test=${DST_IP},denied.test=${DST_IP} --ttl 30 \
+            > $WORKDIR/dns-stub.log 2>&1 &
+          STUB_PID=$!
+          sleep 1
+          echo "=== dns-stub log ==="
+          cat $WORKDIR/dns-stub.log || true
+
+          # --- host tap + chain + controlled resolver via the REAL Manager ---
+          # setup-name-egress installs the per-sandbox chain WITH the resolver IP
+          # (DNS to resolver allowed, dynamic pin set declared) and NO static IP
+          # allow, then runs the controlled resolver (the same dnsproxy forkd runs)
+          # bound on RESOLVER_IP, pinning resolved IPs via real nft. It BLOCKS, so
+          # run it in the background.
+          go build -o /tmp/net-smoke ./cmd/net-smoke/
+          sudo /tmp/net-smoke setup-name-egress \
+            --tap $TAP --host-ip $HOST_IP --guest-ip $GUEST_IP \
+            --guest-mac "$GUEST_MAC" \
+            --resolver-ip $RESOLVER_IP \
+            --upstream $STUB_ADDR \
+            --name-allow egress.test:${ALLOWED_PORT} \
+            > $WORKDIR/net-smoke.log 2>&1 &
+          NETSMOKE_PID=$!
+          # Wait for the resolver to come up (the chain is installed before listen).
+          for i in $(seq 1 20); do
+            grep -q 'controlled resolver listening' $WORKDIR/net-smoke.log && break
+            sleep 0.5
+          done
+          echo "=== net-smoke log ==="
+          cat $WORKDIR/net-smoke.log || true
+          echo "Live ruleset after setup-name-egress:"
+          sudo nft list ruleset
+
+          # --- build the guest rootfs (agent + busybox net tools incl. nslookup) ---
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr ip nc nslookup timeout sleep printf; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          # --- boot the VM with a NIC on the tap and a vsock for the agent ---
+          SOCK=$WORKDIR/firecracker.sock
+          VSOCK_UDS=$WORKDIR/vsock.sock
+          /usr/local/bin/firecracker --api-sock $SOCK > $WORKDIR/serial.log 2>&1 &
+          FC_PID=$!
+          sleep 1
+          curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
+            -H 'Content-Type: application/json' \
+            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
+            -H 'Content-Type: application/json' \
+            -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/network-interfaces/eth0' \
+            -H 'Content-Type: application/json' \
+            -d "{\"iface_id\": \"eth0\", \"guest_mac\": \"$GUEST_MAC\", \"host_dev_name\": \"$TAP\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/machine-config' \
+            -H 'Content-Type: application/json' \
+            -d '{"vcpu_count": 1, "mem_size_mib": 256}'
+          curl --unix-socket $SOCK -X PUT 'http://localhost/vsock' \
+            -H 'Content-Type: application/json' \
+            -d "{\"guest_cid\": 3, \"uds_path\": \"$VSOCK_UDS\"}"
+          curl --unix-socket $SOCK -X PUT 'http://localhost/actions' \
+            -H 'Content-Type: application/json' \
+            -d '{"action_type": "InstanceStart"}'
+
+          echo "VM booted with NIC on $TAP, waiting for agent..."
+          sleep 8
+          echo "=== Serial console output ==="
+          cat $WORKDIR/serial.log || true
+          echo "=== End serial output ==="
+
+          # --- drive the guest: configure eth0 + resolver, run the four probes ---
+          go build -o /tmp/test-agent ./cmd/test-agent/
+          timeout 120 /tmp/test-agent --mode name-egress \
+            --guest-ip $GUEST_IP --prefix-len 30 --gateway $HOST_IP \
+            --resolver $RESOLVER_IP \
+            --allow-name egress.test:${ALLOWED_PORT} \
+            --wrong-port egress.test:${DENIED_PORT} \
+            --denied-name denied.test:${ALLOWED_PORT} \
+            --direct-ip ${DST_IP}:${ALLOWED_PORT} \
+            "$VSOCK_UDS" || {
+              echo "=== FAILURE: serial log ==="
+              cat $WORKDIR/serial.log || true
+              echo "=== net-smoke log ==="
+              cat $WORKDIR/net-smoke.log || true
+              echo "=== dns-stub log ==="
+              cat $WORKDIR/dns-stub.log || true
+              sudo nft list ruleset || true
+              exit 1
+            }
+
+          # --- cleanup ---
+          kill $FC_PID 2>/dev/null || true
+          kill $LISTENER_PID 2>/dev/null || true
+          kill $STUB_PID 2>/dev/null || true
+          sudo kill $NETSMOKE_PID 2>/dev/null || true
+          sudo /tmp/net-smoke teardown-one --tap $TAP --host-ip $HOST_IP || true
+          sudo ip addr del ${RESOLVER_IP}/32 dev lo 2>/dev/null || true
+          sudo ip netns del negress-dst 2>/dev/null || true
+          sudo ip link del veth-nhost 2>/dev/null || true
+
+          echo "================================"
+          echo "  Name-based egress proven (resolved allowlisted name reachable; wrong port, denied name, and un-resolved direct IP blocked)"
           echo "================================"
 
       # Jailer-boot proof: launch Firecracker via the jailer (mirroring the
