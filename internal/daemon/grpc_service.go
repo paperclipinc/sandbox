@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/paperclipinc/sandbox/internal/observability"
+	"github.com/paperclipinc/sandbox/internal/storecrypt"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -36,6 +37,15 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 		attribute.String("sandbox.id", req.SandboxId),
 	))
 	defer span.End()
+
+	// If the controller delivered an at-rest encryption key over the mTLS RPC,
+	// stash it for the engine to open the source template's encrypted container,
+	// and forget it once the fork returns. The key is a secret value: it is
+	// never logged and never recorded as a span attribute.
+	if len(req.EncryptionKey) > 0 && g.srv.keyProvider != nil {
+		g.srv.keyProvider.SetKey(req.SnapshotId, storecrypt.Key(req.EncryptionKey))
+		defer g.srv.keyProvider.ForgetKey(req.SnapshotId)
+	}
 
 	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.Volumes, req.ApiToken)
 	if err != nil {
@@ -114,6 +124,14 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	vols, err := volumeSpecs(req.Volumes)
 	if err != nil {
 		return nil, grpcError(err)
+	}
+	// If the controller delivered an at-rest encryption key over the mTLS RPC,
+	// stash it for the engine to build the snapshot inside an encrypted
+	// container, and forget it once the build returns. The key is a secret
+	// value: it is never logged and never recorded as a span attribute.
+	if len(req.EncryptionKey) > 0 && g.srv.keyProvider != nil {
+		g.srv.keyProvider.SetKey(req.TemplateId, storecrypt.Key(req.EncryptionKey))
+		defer g.srv.keyProvider.ForgetKey(req.TemplateId)
 	}
 	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols); err != nil {
 		return nil, grpcError(err)

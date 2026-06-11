@@ -467,6 +467,57 @@ func TestTerminateDoesNotShredSharedTemplateContainer(t *testing.T) {
 	}
 }
 
+// TestCreateTemplateFailsClosedWithoutKey proves that with encryption enabled
+// and a RequestKeyProvider that holds NO key for the scope, CreateTemplate
+// fails rather than silently building a plaintext snapshot, and creates no
+// container.
+func TestCreateTemplateFailsClosedWithoutKey(t *testing.T) {
+	fake := newFakeContainerManager()
+	e := newEncryptedTestEngine(t, fake)
+	// Swap the in-memory provider (which would generate a key) for a request
+	// provider with nothing stashed: the scope has no key.
+	e.keyProvider = NewRequestKeyProvider()
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+		t.Fatal("build must not run when no key is available (fail closed)")
+		return nil
+	}
+	rootfs := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed rootfs: %v", err)
+	}
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err == nil {
+		t.Fatal("CreateTemplate must fail closed when encryption is on but no key is available")
+	}
+	if len(fake.creates) != 0 {
+		t.Fatalf("no container should be created without a key, got %v", fake.creates)
+	}
+}
+
+// TestCreateTemplateUsesRequestKey proves the engine uses the request-delivered
+// key (stashed via SetKey) on the build path.
+func TestCreateTemplateUsesRequestKey(t *testing.T) {
+	fake := newFakeContainerManager()
+	e := newEncryptedTestEngine(t, fake)
+	prov := NewRequestKeyProvider()
+	e.keyProvider = prov
+	key := storecrypt.Key("0123456789abcdef0123456789abcdef")
+	prov.SetKey("tmpl1", key)
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
+		writeFakeSnapshot(t, e.dataDir, id)
+		return nil
+	}
+	rootfs := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(rootfs, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed rootfs: %v", err)
+	}
+	if err := e.CreateTemplate("tmpl1", rootfs, nil, nil); err != nil {
+		t.Fatalf("CreateTemplate with request key: %v", err)
+	}
+	if len(fake.creates) != 1 || fake.creates[0] != "tmpl1" {
+		t.Fatalf("expected one Create for tmpl1, got %v", fake.creates)
+	}
+}
+
 func TestInMemoryKeyProviderCachesPerScope(t *testing.T) {
 	p := NewInMemoryKeyProvider()
 	k1, err := p.KeyFor("a")

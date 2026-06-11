@@ -111,33 +111,37 @@ Format-freeze blockers:
   density datapoint. See docs/metering.md and BENCHMARKS.md. Open follow-ups:
   precise reflink/btrfs block accounting (apparent sizes today), PSS-based
   attribution, and per-tenant rollups tied to Workspace (#21).
-- ✅ Encryption at rest + crypto-shredding (#31), mechanism done and CI-proven;
-  key-custody hardening (PR2) is the remaining open piece. Each scope (a
-  template now; a workspace when #21 lands) gets its own LUKS2 container
-  (`internal/storecrypt`) backed by a sparse image file; the template snapshot
-  and volumes are built inside the mounted (decrypted) container, so the bytes
-  at rest are ciphertext. Because dm-crypt sits below the page cache, the mem
-  mmap CoW restore reads decrypted pages and CoW page sharing across forks is
-  preserved exactly as in the plaintext case. Erasure is crypto-shredding:
-  `luksErase` wipes the LUKS keyslots and the image is removed, so the
-  ciphertext is unrecoverable even with the key. Wired into the engine behind
-  `--enable-encryption` (default off): `CreateTemplate` builds into a per-scope
-  container, `Fork` opens it and restores from the decrypted mount,
-  `DeleteTemplate` crypto-shreds. The key is fed to cryptsetup on stdin, never
-  in argv or any log. Proven by unit tests and a KVM CI phase on real
-  cryptsetup: ciphertext at rest (marker absent on the raw image, present in the
-  decrypted mount), decrypt/restore works (reopen + read intact), and
-  crypto-shred makes the data unrecoverable (reopen with the original key fails,
-  image gone). See docs/encryption.md. Open: PR2 moves key custody off the node
-  data disk (a k8s Secret or KMS, controller-driven per-scope shred); PR1 holds
-  the key in node memory only (lost on restart, not escrowed). Further
-  follow-ups: per-workspace scope (#21), key rotation / re-encryption,
-  encrypting the CAS chunk store, and HSM/KMS integration.
+- ✅ Encryption at rest + crypto-shredding (#31), mechanism and key-custody
+  both done and CI-proven; issue #31 is addressed. Each scope (a template now;
+  a workspace when #21 lands) gets its own LUKS2 container (`internal/storecrypt`)
+  backed by a sparse image file; the template snapshot and volumes are built
+  inside the mounted (decrypted) container, so the bytes at rest are ciphertext.
+  Because dm-crypt sits below the page cache, the mem mmap CoW restore reads
+  decrypted pages and CoW page sharing across forks is preserved exactly as in
+  the plaintext case. Erasure is crypto-shredding: `luksErase` wipes the LUKS
+  keyslots and the image is removed, so the ciphertext is unrecoverable even with
+  the key. Wired into the engine behind `--enable-encryption` (default off):
+  `CreateTemplate` builds into a per-scope container, `Fork` opens it and restores
+  from the decrypted mount, `DeleteTemplate` crypto-shreds. The key is fed to
+  cryptsetup on stdin, never in argv or any log. PR1 mechanism proven by unit
+  tests and a KVM CI phase on real cryptsetup: ciphertext at rest (marker absent
+  on the raw image, present in the decrypted mount), decrypt/restore works (reopen
+  + read intact), and crypto-shred makes the data unrecoverable (reopen with the
+  original key fails, image gone). PR2 key custody: the controller generates a
+  per-template 256-bit key with `crypto/rand`, stores it in a `<template>-enc-key`
+  Secret owner-referenced to the `SandboxTemplate` for GC crypto-shred, and
+  delivers it to forkd over the mTLS gRPC `CreateTemplate` and `Fork` requests;
+  forkd holds the key in process memory only via `RequestKeyProvider` (never on
+  the node data disk), encryption enabled with no delivered key fails closed, the
+  key is never logged; proven by envtest (Secret lifecycle, key-over-RPC,
+  fail-closed, key-never-logged) and unit tests. See docs/encryption.md. Open
+  follow-ups: forkd container-shred-on-template-GC wiring (the TEARDOWN BOUNDARY
+  in enc_key_secret.go); KMS/HSM envelope encryption instead of a raw Secret;
+  key rotation / re-encryption; per-workspace scope (#21); encrypting the CAS
+  chunk store.
 
-With #32 (mechanism done), #33 (mechanism done), and #31 (mechanism + crypto-
-shred done, CI-proven), all three format-freeze blockers are now addressed
-enough to discuss freezing the on-disk format; #31 PR2 key-custody hardening is
-the remaining hardening, not a format change.
+With #32 (mechanism done), #33 (mechanism done), and #31 (mechanism + custody
+both done, CI-proven), all three format-freeze blockers are now fully addressed.
 
 ## 0. Make the claimed system real (in progress)
 

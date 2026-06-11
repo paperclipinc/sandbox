@@ -78,7 +78,13 @@ type CreateTemplateRequest struct {
 	// per volume into the snapshot at build time so each fork can rebind it to
 	// its own backing; the fork's ForkRequest.volumes must match this set by
 	// name. Empty means the template has no volumes.
-	Volumes       []*VolumeMount `protobuf:"bytes,6,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	Volumes []*VolumeMount `protobuf:"bytes,6,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// encryption_key is the per-template at-rest encryption key, a SECRET VALUE
+	// carried only over the mTLS RPC. The controller owns key custody (a
+	// Kubernetes Secret); the node never generates or persists it. It must NEVER
+	// be logged, placed in an error message, or written to the node data disk.
+	// Empty means the template is not encrypted.
+	EncryptionKey []byte `protobuf:"bytes,7,opt,name=encryption_key,json=encryptionKey,proto3" json:"encryption_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -151,6 +157,13 @@ func (x *CreateTemplateRequest) GetResources() *ResourceSpec {
 func (x *CreateTemplateRequest) GetVolumes() []*VolumeMount {
 	if x != nil {
 		return x.Volumes
+	}
+	return nil
+}
+
+func (x *CreateTemplateRequest) GetEncryptionKey() []byte {
+	if x != nil {
+		return x.EncryptionKey
 	}
 	return nil
 }
@@ -677,7 +690,14 @@ type ForkRequest struct {
 	// Volumes to prepare and attach to the fork. The node resolves the backing
 	// source for Snapshot/Share/Clone policies; the controller passes the policy
 	// and spec.
-	Volumes       []*VolumeMount `protobuf:"bytes,7,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	Volumes []*VolumeMount `protobuf:"bytes,7,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// encryption_key is the source template's at-rest encryption key, a SECRET
+	// VALUE carried only over the mTLS RPC, so the node can open the encrypted
+	// container before restoring the snapshot. The controller owns key custody (a
+	// Kubernetes Secret); the node never generates or persists it. It must NEVER
+	// be logged, placed in an error message, or written to the node data disk.
+	// Empty means the source template is not encrypted.
+	EncryptionKey []byte `protobuf:"bytes,8,opt,name=encryption_key,json=encryptionKey,proto3" json:"encryption_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -757,6 +777,13 @@ func (x *ForkRequest) GetApiToken() string {
 func (x *ForkRequest) GetVolumes() []*VolumeMount {
 	if x != nil {
 		return x.Volumes
+	}
+	return nil
+}
+
+func (x *ForkRequest) GetEncryptionKey() []byte {
+	if x != nil {
+		return x.EncryptionKey
 	}
 	return nil
 }
@@ -2421,7 +2448,7 @@ var File_proto_forkd_proto protoreflect.FileDescriptor
 
 const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/forkd.proto\x12\x05forkd\"\xf5\x01\n" +
+	"\x11proto/forkd.proto\x12\x05forkd\"\x9c\x02\n" +
 	"\x15CreateTemplateRequest\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12\x14\n" +
@@ -2430,7 +2457,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\vkernel_path\x18\x04 \x01(\tR\n" +
 	"kernelPath\x121\n" +
 	"\tresources\x18\x05 \x01(\v2\x13.forkd.ResourceSpecR\tresources\x12,\n" +
-	"\avolumes\x18\x06 \x03(\v2\x12.forkd.VolumeMountR\avolumes\"\x8c\x01\n" +
+	"\avolumes\x18\x06 \x03(\v2\x12.forkd.VolumeMountR\avolumes\x12%\n" +
+	"\x0eencryption_key\x18\a \x01(\fR\rencryptionKey\"\x8c\x01\n" +
 	"\x16CreateTemplateResponse\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12(\n" +
@@ -2465,7 +2493,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x15DeleteSnapshotRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\"\x18\n" +
-	"\x16DeleteSnapshotResponse\"\x95\x02\n" +
+	"\x16DeleteSnapshotResponse\"\xbc\x02\n" +
 	"\vForkRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12\x1d\n" +
@@ -2475,7 +2503,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\asecrets\x18\x04 \x03(\v2\x10.forkd.SecretVarR\asecrets\x12.\n" +
 	"\anetwork\x18\x05 \x01(\v2\x14.forkd.NetworkConfigR\anetwork\x12\x1b\n" +
 	"\tapi_token\x18\x06 \x01(\tR\bapiToken\x12,\n" +
-	"\avolumes\x18\a \x03(\v2\x12.forkd.VolumeMountR\avolumes\"\x92\x01\n" +
+	"\avolumes\x18\a \x03(\v2\x12.forkd.VolumeMountR\avolumes\x12%\n" +
+	"\x0eencryption_key\x18\b \x01(\fR\rencryptionKey\"\x92\x01\n" +
 	"\vVolumeMount\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +

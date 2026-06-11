@@ -72,13 +72,16 @@ rules:
   # reconcile the per-sandbox token Secret; create/update to mint and heal that
   # token Secret and the control plane PKI Secrets (EnsurePKI: agent-run-ca,
   # agent-run-forkd-tls, agent-run-controller-tls). Token and CA-key VALUES are
-  # never logged. No delete: owned Secrets are reaped by owner-reference GC.
+  # never logged. delete crypto-shreds a template's at-rest encryption key
+  # Secret on teardown (DeleteEncKey); owned Secrets are otherwise reaped by
+  # owner-reference GC.
   - apiGroups:
       - ""
     resources:
       - secrets
     verbs:
       - create
+      - delete
       - get
       - list
       - update

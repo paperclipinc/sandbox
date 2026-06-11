@@ -1,8 +1,12 @@
 package controller_test
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,10 +30,35 @@ var (
 	ctx          context.Context
 	cancel       context.CancelFunc
 	testRegistry *controller.NodeRegistry
+	// logBuf accumulates the controller's log output for the whole suite so a
+	// test can assert a secret value never appears in any log line. It is
+	// concurrency-safe because the manager logs from reconcile goroutines.
+	logBuf = &syncBuffer{}
 )
 
+// syncBuffer is a concurrency-safe io.Writer that accumulates everything
+// written and lets a test snapshot the bytes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
 func TestMain(m *testing.M) {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	// Tee the controller logs into logBuf (and still to stderr) so secret-leak
+	// assertions can scan everything the controller logged.
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.MultiWriter(os.Stderr, logBuf))))
 
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()

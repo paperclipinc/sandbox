@@ -90,6 +90,57 @@ func (p *InMemoryKeyProvider) hasKey(scopeID string) bool {
 	return ok
 }
 
+// RequestKeyProvider holds per-scope keys delivered by the controller over the
+// mTLS RPC (PR2 key custody). Unlike InMemoryKeyProvider it never generates a
+// key: the daemon stashes the request-supplied key with SetKey before invoking
+// the engine and ForgetKey after. KeyFor on a scope with no stashed key returns
+// an error so encryption FAILS CLOSED (the engine must not silently run
+// unencrypted). The key is a secret value: it is never logged, never formatted
+// into an error, and the type exposes no String() that could leak it. Safe for
+// concurrent use.
+type RequestKeyProvider struct {
+	mu   sync.Mutex
+	keys map[string]storecrypt.Key
+}
+
+// NewRequestKeyProvider returns an empty request-scoped key provider.
+func NewRequestKeyProvider() *RequestKeyProvider {
+	return &RequestKeyProvider{keys: make(map[string]storecrypt.Key)}
+}
+
+// SetKey stashes the key the controller delivered for scopeID for the duration
+// of the operation. The daemon calls it before invoking the engine; the key
+// value is never logged.
+func (p *RequestKeyProvider) SetKey(scopeID string, key storecrypt.Key) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.keys[scopeID] = key
+}
+
+// KeyFor returns the stashed key for scopeID. It returns an error when no key
+// is present so the engine fails closed rather than running unencrypted. The
+// error names only the scope, never any key material.
+func (p *RequestKeyProvider) KeyFor(scopeID string) (storecrypt.Key, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if k, ok := p.keys[scopeID]; ok {
+		return k, nil
+	}
+	return nil, fmt.Errorf("no encryption key available for scope %s: the request must carry the key over mTLS", scopeID)
+}
+
+// ForgetKey zeroizes the stashed key bytes for scopeID and deletes the entry.
+// After it returns the provider holds no copy of the key. A no-op for a scope
+// with no stashed key.
+func (p *RequestKeyProvider) ForgetKey(scopeID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if k, ok := p.keys[scopeID]; ok {
+		k.Zeroize()
+		delete(p.keys, scopeID)
+	}
+}
+
 // encryptionEnabled reports whether at-rest encryption is wired: the flag is set
 // and both a container manager and a key provider are present.
 func (e *Engine) encryptionEnabled() bool {

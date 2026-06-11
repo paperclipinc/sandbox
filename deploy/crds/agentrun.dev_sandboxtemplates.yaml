@@ -48,6 +48,15 @@ spec:
                 items:
                   type: string
                 type: array
+              encrypted:
+                default: false
+                description: |-
+                  Encrypted requests at-rest encryption of the template snapshot and every
+                  fork built from it. When true the controller owns the per-template
+                  encryption key as a Kubernetes Secret and delivers it to the node over the
+                  mTLS RPC; the node never generates or persists the key. Defaults to false
+                  (plaintext snapshots, unchanged behavior).
+                type: boolean
               env:
                 items:
                   description: EnvVar represents an environment variable present in

@@ -81,7 +81,7 @@ func main() {
 	flag.StringVar(&agentBin, "agent-bin", "", "Path to the guest agent binary injected as /init when a template is built from an OCI image. Required for image builds; unused for file-path rootfs templates. For now this binary must be present in the forkd image (a follow-up will go:embed it)")
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
-	flag.BoolVar(&enableEncryption, "enable-encryption", false, "Encrypt template snapshots at rest: each template is built inside a per-template LUKS2 container (requires cryptsetup) and crypto-shred at delete. Default false (plaintext snapshots on disk, exactly as before). PR1 KEY-CUSTODY LIMITATION: keys are generated and held in node memory only, are NOT escrowed, and are lost on restart (an existing encrypted template can then no longer be opened); a follow-up moves key custody to a Kubernetes Secret or KMS")
+	flag.BoolVar(&enableEncryption, "enable-encryption", false, "Encrypt template snapshots at rest: each template is built inside a per-template LUKS2 container (requires cryptsetup) and crypto-shred at delete. Default false (plaintext snapshots on disk, exactly as before). KEY CUSTODY: the per-template encryption key is supplied by the controller over the mTLS gRPC request (CreateTemplate/Fork), held in forkd memory only for the lifetime of an open container, and never written to the node data disk. REQUIRES mTLS: this flag refuses to start unless the gRPC server is configured with --tls-cert/--tls-key/--tls-ca (and the controller runs PKI bootstrap), so the key is never sent over an insecure channel")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
@@ -99,6 +99,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
 		os.Exit(1)
 	}
+	// Fail closed: at-rest encryption delivers the per-template key over the
+	// gRPC request, so it must only run over an mTLS channel. The gRPC server is
+	// secure only when all three TLS flags are set (see grpcServerOptions); any
+	// other state leaves the channel insecure and would leak the key in
+	// cleartext. Refuse to serve in that case.
+	tlsConfigured := tlsCert != "" && tlsKey != "" && tlsCA != ""
+	if err := requireTLSForEncryption(enableEncryption, tlsConfigured); err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
+		os.Exit(1)
+	}
 	// The otelgrpc server handler receives the controller's propagated trace
 	// context so forkd spans join the controller's trace. Harmless when
 	// tracing is disabled (global no-op provider).
@@ -108,6 +118,11 @@ func main() {
 	// dnsProxyServer is the node-level controlled resolver, set only when
 	// --enable-dns-egress and networking are both on. Nil otherwise.
 	var dnsProxyServer *dnsproxy.Server
+	// reqKeyProvider is the request-scoped encryption key provider, set only when
+	// --enable-encryption is on. The same instance is wired into the engine and
+	// the daemon server so the handlers can hand the controller-delivered key to
+	// the engine. Nil otherwise.
+	var reqKeyProvider *fork.RequestKeyProvider
 
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
@@ -140,11 +155,16 @@ func main() {
 		}
 		if enableEncryption {
 			engineOpts.EnableEncryption = true
-			// PR1 key custody: an in-memory provider generates and caches a key
-			// per template in node memory only (not escrowed; lost on restart).
-			// PR2 swaps in a Secret/KMS-backed provider.
-			engineOpts.KeyProvider = fork.NewInMemoryKeyProvider()
-			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR1: keys held in node memory only, not escrowed, lost on restart)")
+			// PR2 key custody: the controller owns the per-template key (a
+			// Kubernetes Secret in etcd) and delivers it on each mTLS RPC. The
+			// node neither generates nor persists the key; the RequestKeyProvider
+			// holds it only for the duration of a CreateTemplate/Fork call. The
+			// SAME provider instance is wired into both the engine (it reads the
+			// key via KeyFor) and the daemon server (the handlers stash the
+			// request key via SetKey and forget it after).
+			reqKeyProvider = fork.NewRequestKeyProvider()
+			engineOpts.KeyProvider = reqKeyProvider
+			fmt.Println("forkd: at-rest snapshot encryption ENABLED (PR2: key custody is the controller/etcd; the key arrives over the mTLS RPC, never generated or persisted on the node)")
 		}
 		if enableNet {
 			alloc, err := netconf.NewAllocator(sandboxSubnet, "sbtap")
@@ -208,6 +228,12 @@ func main() {
 	}
 	sandboxAPI.SetAuditor(auditor)
 	server := daemon.NewServer(engine, sandboxAPI)
+	// Wire the request-scoped key provider so the gRPC handlers can hand the
+	// controller-delivered encryption key to the engine for the duration of a
+	// CreateTemplate/Fork call. Same instance the engine reads from.
+	if reqKeyProvider != nil {
+		server.SetKeyProvider(reqKeyProvider)
+	}
 
 	// Start gRPC server (controller communication)
 	lis, err := net.Listen("tcp", listenAddr)
@@ -257,6 +283,20 @@ func main() {
 	<-stop
 	fmt.Println("forkd: shutting down")
 	grpcServer.GracefulStop()
+}
+
+// requireTLSForEncryption is the fail-closed guard for at-rest encryption: the
+// controller delivers the per-template key over the gRPC request, so the
+// channel must be mTLS. It returns a fatal error when encryption is enabled but
+// the gRPC server is not TLS-configured (the --tls-cert/--tls-key/--tls-ca
+// flags that drive the mTLS server are absent), and nil otherwise (encryption
+// off, or encryption on with TLS configured). The error carries actionable
+// remediation: configure the TLS flags and enable PKI bootstrap.
+func requireTLSForEncryption(enableEnc, tlsConfigured bool) error {
+	if enableEnc && !tlsConfigured {
+		return fmt.Errorf("--enable-encryption requires mTLS: the controller delivers the encryption key over the gRPC request, which must not travel over an insecure channel; set --tls-cert, --tls-key, and --tls-ca (and run the controller with PKI bootstrap) or disable encryption")
+	}
+	return nil
 }
 
 // grpcServerOptions builds transport security for the controller-facing

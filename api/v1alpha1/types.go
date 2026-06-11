@@ -25,6 +25,15 @@ type SandboxTemplateSpec struct {
 	Resources SandboxResources `json:"resources,omitempty"`
 	Volumes   []SandboxVolume  `json:"volumes,omitempty"`
 	Network   *NetworkPolicy   `json:"networkPolicy,omitempty"`
+
+	// Encrypted requests at-rest encryption of the template snapshot and every
+	// fork built from it. When true the controller owns the per-template
+	// encryption key as a Kubernetes Secret and delivers it to the node over the
+	// mTLS RPC; the node never generates or persists the key. Defaults to false
+	// (plaintext snapshots, unchanged behavior).
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Encrypted bool `json:"encrypted,omitempty"`
 }
 
 type SandboxResources struct {
