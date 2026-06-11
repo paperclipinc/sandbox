@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,16 +35,24 @@ var (
 	})
 	memoryShared = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "agentrun_memory_shared_bytes",
-		Help: "CoW shared memory across forks",
+		Help: "CoW-aware shared memory: each template's shared page set counted once",
 	})
 	memoryUnique = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "agentrun_memory_unique_bytes",
-		Help: "Per-fork unique memory (dirty pages)",
+		Help: "Per-fork unique memory (dirty pages) summed over all sandboxes",
+	})
+	cowMemorySavings = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "agentrun_cow_memory_savings_bytes",
+		Help: "Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware)",
+	})
+	meteredDisk = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "agentrun_metered_disk_bytes",
+		Help: "CoW-aware metered backing storage: template volume seeds counted once",
 	})
 )
 
 func init() {
-	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique)
+	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique, cowMemorySavings, meteredDisk)
 }
 
 type Server struct {
@@ -82,6 +91,16 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 		}
 	})
 
+	// Node-level CoW-aware metering report for operators/billing. This is
+	// node-scoped operational data (the same access class as /metrics and
+	// /healthz, which are served unauthenticated on this operational mux), NOT
+	// per-sandbox traffic, so it is deliberately NOT behind the per-sandbox
+	// bearer-token middleware that wraps the /v1/exec and /v1/files routes. A
+	// sandbox bearer token grants no access here, and this endpoint never
+	// returns secret values: only ids, template names, and byte counts. It is
+	// registered before the catch-all /v1/ handler so it takes precedence.
+	mux.Handle("GET /v1/metering", meteringHandler(engine))
+
 	// Sandbox exec/files API: this is what the SDK talks to
 	apiHandler := sandboxAPI.Handler()
 	mux.Handle("/v1/", apiHandler)
@@ -89,6 +108,21 @@ func ServeHTTP(addr string, engine ForkEngine, sandboxAPI *SandboxAPI) {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Printf("forkd: http server: %v", err)
 	}
+}
+
+// meteringHandler serves the node-level CoW-aware metering report as JSON. It
+// is operator/billing data, not per-sandbox traffic, so it carries no
+// per-sandbox bearer auth (it shares the access class of /metrics and
+// /healthz). The report holds only ids, template names, and byte counts, never
+// secret values.
+func meteringHandler(engine ForkEngine) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		report := engine.Metering()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			log.Printf("forkd: encode metering report: %v", err)
+		}
+	})
 }
 
 // Fork handles a fork request from the controller. apiToken is the bearer
@@ -342,10 +376,17 @@ func volumeSpecs(mounts []*forkdpb.VolumeMount) ([]volume.Spec, error) {
 	return specs, nil
 }
 
-// UpdateMetrics refreshes capacity metrics.
+// UpdateMetrics refreshes capacity and metering gauges. Memory gauges are
+// CoW-aware: shared is each template's shared set counted once, unique is the
+// per-fork dirty total. The disk gauge reflects CoW-aware metered backing
+// storage. ActiveSandboxes comes from the cheap capacity path; the rest from
+// the full metering report (which also stats backing files).
 func (s *Server) UpdateMetrics() {
-	cap := s.engine.GetCapacity()
-	activeSandboxes.Set(float64(cap.ActiveSandboxes))
-	memoryShared.Set(float64(cap.MemoryShared))
-	memoryUnique.Set(float64(cap.MemoryUsed - cap.MemoryShared))
+	activeSandboxes.Set(float64(s.engine.GetCapacity().ActiveSandboxes))
+
+	report := s.engine.Metering()
+	memoryShared.Set(float64(report.SharedOnceTotal()))
+	memoryUnique.Set(float64(report.TotalUnique))
+	cowMemorySavings.Set(float64(report.CoWSavings))
+	meteredDisk.Set(float64(report.DiskUsedCoWAware))
 }

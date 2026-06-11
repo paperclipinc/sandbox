@@ -978,6 +978,118 @@ func (e *Engine) memorySamplesLocked() []metering.Sample {
 	return samples
 }
 
+// meteringSnapshot is the immutable per-sandbox view Metering() copies out under
+// the lock so the (slower) disk stat work runs without holding e.mu.
+type meteringSnapshot struct {
+	id           string
+	template     string
+	memoryUnique int64
+	memoryShared int64
+	hasVolumes   bool
+	volumes      []volume.Spec
+}
+
+// Metering returns the full CoW-aware node metering report (per-sandbox and
+// per-template memory plus disk). Unlike GetCapacity (the hot heartbeat path,
+// memory-only), Metering also stats each sandbox's volume backing files and
+// template seeds, so it is meant for the operator/billing endpoint rather than
+// the fork hot path.
+//
+// Disk rule (honest v1): for each sandbox volume,
+//   - a Fresh volume's backing apparent size counts entirely as DiskUnique
+//     (nothing shared with siblings);
+//   - a Snapshot (reflink) volume shares the template seed, so the seed
+//     apparent size counts once per (template, volume) as DiskShared and the
+//     fork's divergence is approximated as max(0, forkBacking - seed) DiskUnique
+//     using os.Stat APPARENT sizes;
+//   - a Clone volume is a FULL byte-for-byte copy (no reflink), so its whole
+//     fork backing counts as DiskUnique with nothing shared;
+//   - a Share volume maps the seed directly, so the seed counts as DiskShared
+//     with no per-fork divergence.
+//
+// The apparent-size divergence is an approximation: precise reflink block
+// accounting (which blocks actually diverged) is a follow-up. We document it as
+// approximate rather than claim exact CoW disk numbers.
+func (e *Engine) Metering() metering.Report {
+	e.mu.RLock()
+	snaps := make([]meteringSnapshot, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		var vols []volume.Spec
+		if s.hasVolumes && len(s.volumes) > 0 {
+			vols = append(vols, s.volumes...)
+		}
+		snaps = append(snaps, meteringSnapshot{
+			id:           s.ID,
+			template:     s.TemplateID,
+			memoryUnique: s.MemoryUnique,
+			memoryShared: s.MemoryShared,
+			hasVolumes:   s.hasVolumes,
+			volumes:      vols,
+		})
+	}
+	e.mu.RUnlock()
+
+	samples := make([]metering.Sample, 0, len(snaps))
+	for _, sn := range snaps {
+		du, ds := e.diskFootprint(sn)
+		samples = append(samples, metering.Sample{
+			ID:           sn.id,
+			Template:     sn.template,
+			MemoryUnique: sn.memoryUnique,
+			MemoryShared: sn.memoryShared,
+			DiskUnique:   du,
+			DiskShared:   ds,
+		})
+	}
+	return metering.Aggregate(samples)
+}
+
+// diskFootprint returns this sandbox's (unique, shared) backing-storage bytes
+// using apparent file sizes. Returns zeros when volumes are disabled or no
+// backend is configured.
+func (e *Engine) diskFootprint(sn meteringSnapshot) (unique, shared int64) {
+	if !sn.hasVolumes || e.volBackend == nil {
+		return 0, 0
+	}
+	for _, spec := range sn.volumes {
+		seed := e.volBackend.TemplateVolumePath(sn.template, spec.Name)
+		seedSize := apparentSize(seed)
+		switch spec.Policy {
+		case volume.ForkPolicyFresh, volume.ForkPolicyClone:
+			// Fresh: empty per-fork backing. Clone: full byte-for-byte copy.
+			// Either way nothing is shared on disk with siblings.
+			unique += apparentSize(e.volBackend.VolumePath(sn.id, spec.Name))
+		case volume.ForkPolicyShare:
+			// Maps the seed directly: shared, no per-fork backing.
+			shared += seedSize
+		case volume.ForkPolicySnapshot:
+			shared += seedSize
+			forkSize := apparentSize(e.volBackend.VolumePath(sn.id, spec.Name))
+			if d := forkSize - seedSize; d > 0 {
+				unique += d
+			}
+		default:
+			// Unknown policy: count the fork backing as unique (conservative).
+			unique += apparentSize(e.volBackend.VolumePath(sn.id, spec.Name))
+		}
+	}
+	return unique, shared
+}
+
+// apparentSize is the os.Stat byte size of path, or 0 if it cannot be stat-ed.
+// "Apparent" because it is the logical file length, not the allocated blocks;
+// precise reflink-shared block accounting is a follow-up.
+func apparentSize(path string) int64 {
+	if path == "" {
+		return 0
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
 // CreateTemplate builds a template from an image ref or an existing rootfs file
 // path, boots it, runs each init command IN the VM (failing the build if any
 // command exits nonzero), snapshots it, then content-addresses the resulting

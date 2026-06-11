@@ -268,6 +268,24 @@ func (e *MockEngine) GetCapacity() Capacity {
 	}
 }
 
+// Metering returns the CoW-aware report for the mock's live sandboxes. The mock
+// prepares no real backing files, so disk fields are zero; memory is aggregated
+// exactly like the real engine (N forks of one template share the region once).
+func (e *MockEngine) Metering() metering.Report {
+	e.mu.RLock()
+	samples := make([]metering.Sample, 0, len(e.sandboxes))
+	for _, s := range e.sandboxes {
+		samples = append(samples, metering.Sample{
+			ID:           s.ID,
+			Template:     s.TemplateID,
+			MemoryUnique: s.MemoryUnique,
+			MemoryShared: s.MemoryShared,
+		})
+	}
+	e.mu.RUnlock()
+	return metering.Aggregate(samples)
+}
+
 func (e *MockEngine) findTemplateBySnapshot(snapshotID string) (*Template, bool) {
 	for _, t := range e.templates {
 		if t.ID == snapshotID {

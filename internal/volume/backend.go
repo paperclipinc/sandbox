@@ -112,6 +112,14 @@ func (b *Backend) volumePath(sandboxID, name string) string {
 	return filepath.Join(b.volumesDir(sandboxID), name+".ext4")
 }
 
+// VolumePath is the per-fork backing file for volume name under sandboxID. It
+// is the exported view of volumePath used by the metering path to stat a
+// fork's volume backing. The id and name come from validated fields, so they
+// are safe to log.
+func (b *Backend) VolumePath(sandboxID, name string) string {
+	return b.volumePath(sandboxID, name)
+}
+
 func (b *Backend) volumesDir(sandboxID string) string {
 	return filepath.Join(b.root, "sandboxes", sandboxID, "volumes")
 }
