@@ -270,10 +270,12 @@ or spoof.
 The DX gap against E2B/Daytona is the adoption bottleneck once the core is
 verified. In rough order of leverage:
 
-- ⬜ **MCP server interface**: expose sandboxes as an MCP tool server
-  (create/exec/files/fork as tools); every MCP-speaking agent becomes a user
-  with zero SDK integration. Candidate to pull forward as soon as the exec
-  path is verified end-to-end.
+- ✅ **MCP server interface**: `agentrun-mcp` exposes sandboxes as an MCP tool
+  server (create/exec/read/write/fork/terminate as tools with versioned JSON
+  schemas) over stdio JSON-RPC; every MCP-speaking agent becomes a user with
+  zero SDK integration. A conformance test drives the server as a real MCP
+  client in standard CI; see docs/mcp.md. Open: workspace tools (#21) and
+  capability-budget advertisement (#24).
 - ⬜ Streaming exec (stdout/stderr), stdin, **PTY mode**, file transfer,
   port forwarding, the daily-driver agent-harness needs
 - ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex

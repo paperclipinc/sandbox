@@ -181,7 +181,7 @@ spec:
 
 ## SDKs
 
-Python today (`sdk/python`, pre-PyPI: `pip install -e .`), TypeScript planned, MCP server planned so any MCP-speaking agent can use sandboxes with zero SDK integration ([#27](https://github.com/paperclipinc/sandbox/issues/27)). The target developer surface (three-line common path, git-shaped workspace verbs, capability-budgeted self-service for agents) is specified in [docs/api/v2-spec.md](docs/api/v2-spec.md).
+Python today (`sdk/python`, pre-PyPI: `pip install -e .`), TypeScript planned, and an MCP server (`agentrun-mcp`) that exposes sandboxes as MCP tools so any MCP-speaking agent can use them with zero SDK integration ([#27](https://github.com/paperclipinc/sandbox/issues/27)); see [docs/mcp.md](docs/mcp.md). The target developer surface (three-line common path, git-shaped workspace verbs, capability-budgeted self-service for agents) is specified in [docs/api/v2-spec.md](docs/api/v2-spec.md).
 
 ## Comparison
 
