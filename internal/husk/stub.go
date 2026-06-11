@@ -2,6 +2,7 @@ package husk
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,11 @@ import (
 	"github.com/paperclipinc/sandbox/internal/firecracker"
 	"github.com/paperclipinc/sandbox/internal/vsock"
 )
+
+// entropySize is the number of crypto/rand bytes generated per activation and
+// handed to the guest via NotifyForked to reseed the kernel CRNG. It matches
+// the fork engine's reseed size (internal/daemon notifyForked uses 32 bytes).
+const entropySize = 32
 
 // State is the husk stub lifecycle state.
 type State int
@@ -63,6 +69,55 @@ type starter func(cfg firecracker.VMConfig) (vmm, error)
 // vsockPath, or the timeout elapses. The production seam connects via
 // internal/vsock and pings; tests inject a fake.
 type guestReady func(vsockPath string, timeout time.Duration) error
+
+// notifier runs the post-restore fork-correctness handshake against the guest
+// agent at vsockPath: it delivers the fresh generation + entropy via
+// NotifyForked (so the guest reseeds its CRNG, steps its clock, and re-addresses
+// its NIC) and then delivers the claim-time env/secrets, mirroring the daemon's
+// deliverConfig. It FAILS CLOSED: it returns an error when the reseed handshake
+// fails or the guest reports it did not reseed, so a VM that still shares its
+// siblings' CRNG state is never served. The production seam connects via
+// internal/vsock; tests inject a fake. The entropy and secret VALUES are never
+// logged by any implementation.
+type notifier func(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
+
+// productionNotifier connects the vsock client to the guest agent at vsockPath
+// (the same AgentPort productionGuestReady pings) and runs the handshake in the
+// same order the daemon's deliverConfig does: NotifyForkedWithConfig first
+// (generation + entropy + per-fork network + volume table), then Configure with
+// env+secrets. It fails closed: any connect/handshake error, or a guest that
+// reports ReseededRNG=false, returns an error so the stub leaves the VM unserved.
+//
+// Entropy and secret VALUES never appear in any log line or error here: errors
+// carry only the operation and the underlying transport error.
+func productionNotifier(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
+	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
+	if err != nil {
+		return fmt.Errorf("connect guest agent for fork handshake: %w", err)
+	}
+	defer client.Close()
+
+	resp, err := client.NotifyForkedWithConfig(generation, entropy, req.Network, req.Volumes)
+	if err != nil {
+		return fmt.Errorf("notify guest of fork: %w", err)
+	}
+	// Fail closed: a guest that did not reseed shares CRNG state with its
+	// siblings, which is incorrect (not merely degraded). Do not serve it.
+	if resp == nil || !resp.ReseededRNG {
+		return fmt.Errorf("guest did not reseed its RNG after restore; refusing to serve a fork that shares CRNG state")
+	}
+
+	// Deliver claim-time env+secrets exactly as deliverConfig does: skip when
+	// there is nothing to deliver, otherwise hand them to the guest. Secret
+	// values are never logged.
+	if len(req.Env) == 0 && len(req.Secrets) == 0 {
+		return nil
+	}
+	if err := client.Configure(req.Env, req.Secrets); err != nil {
+		return fmt.Errorf("configure guest env/secrets: %w", err)
+	}
+	return nil
+}
 
 // productionStarter wraps firecracker.StartVM. *firecracker.Client satisfies
 // vmm (it has LoadSnapshotWithOverrides, VsockHostPath, and we adapt Kill to
@@ -118,6 +173,9 @@ type Options struct {
 	Start starter
 	// Ready waits for the guest agent. Nil uses the production seam.
 	Ready guestReady
+	// Notify runs the post-restore fork-correctness handshake. Nil uses the
+	// production seam (connect the vsock client and NotifyForked + Configure).
+	Notify notifier
 	// ReadyTimeout bounds the guest-readiness wait during Activate. Zero uses
 	// DefaultReadyTimeout.
 	ReadyTimeout time.Duration
@@ -133,12 +191,14 @@ const DefaultReadyTimeout = 10 * time.Second
 type Stub struct {
 	start        starter
 	ready        guestReady
+	notify       notifier
 	cfg          firecracker.VMConfig
 	readyTimeout time.Duration
 
-	mu    sync.Mutex
-	state State
-	vm    vmm
+	mu         sync.Mutex
+	state      State
+	vm         vmm
+	generation uint64
 }
 
 // New builds a Stub for the given VMConfig. By default it uses the production
@@ -147,6 +207,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	s := &Stub{
 		start:        opts.Start,
 		ready:        opts.Ready,
+		notify:       opts.Notify,
 		cfg:          cfg,
 		readyTimeout: opts.ReadyTimeout,
 		state:        StateNew,
@@ -156,6 +217,9 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.ready == nil {
 		s.ready = productionGuestReady
+	}
+	if s.notify == nil {
+		s.notify = productionNotifier
 	}
 	if s.readyTimeout == 0 {
 		s.readyTimeout = DefaultReadyTimeout
@@ -226,6 +290,27 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		// Fail closed: the snapshot loaded but the guest never answered, so we
 		// cannot vouch for the VM. Do NOT mark active or report a usable VM.
 		werr := fmt.Errorf("husk: guest not ready after activate: %w", err)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Fork-correctness handshake. The restored guest is a byte-for-byte copy of
+	// the snapshot, so it shares the snapshot's CRNG and clock state. Reseed it
+	// with fresh entropy and deliver claim-time env/secrets BEFORE marking the
+	// VM active. The entropy and secret values are held only in memory here and
+	// are NEVER logged.
+	entropy := make([]byte, entropySize)
+	if _, err := rand.Read(entropy); err != nil {
+		// Fail closed: without fresh entropy we cannot reseed, so the VM is not
+		// safe to serve. The error mentions no entropy bytes.
+		werr := fmt.Errorf("husk: generate fork entropy: %w", err)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+	s.generation++
+	if err := s.notify(vsockPath, s.generation, entropy, req); err != nil {
+		// Fail closed: the guest did not complete the reseed handshake, so it may
+		// still share its siblings' CRNG state. Leave the VM NOT active. The
+		// error carries no entropy or secret values.
+		werr := fmt.Errorf("husk: fork-correctness handshake failed: %w", err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 
