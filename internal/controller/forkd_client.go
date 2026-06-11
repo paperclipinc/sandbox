@@ -8,6 +8,8 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -61,8 +63,18 @@ func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sand
 // unset and forkd applies no per-fork egress ruleset. The policy and allowlist
 // entries (IPs/ports/names) are safe to log.
 func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string) (*forkResult, error) {
+	// controller.forkOnNode is the child span whose context the otelgrpc client
+	// handler injects over the wire so the forkd.Fork span joins this trace.
+	// Only node and snapshot (config, no secrets) are recorded.
+	ctx, span := tracer.Start(ctx, "controller.forkOnNode", trace.WithAttributes(
+		attribute.String("node", node.Name),
+		attribute.String("snapshot", snapshotID),
+	))
+	defer span.End()
+
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	resp, err := forkdpb.NewForkDaemonClient(conn).Fork(ctx, &forkdpb.ForkRequest{
@@ -75,6 +87,7 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		ApiToken:   apiToken,
 	})
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("forkd fork on %s: %w", node.Name, err)
 	}
 	return &forkResult{

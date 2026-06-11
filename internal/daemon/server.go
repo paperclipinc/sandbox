@@ -15,6 +15,8 @@ import (
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -106,6 +108,14 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: invalid volume spec: %w", sandboxID, err)
 	}
+	// engine.fork wraps the snapshot restore (the <2ms hot path) as a child of
+	// forkd.Fork. The engine signature takes no ctx, so the span is started
+	// here around the call rather than threaded into the engine. Only ids and
+	// the resulting fork time are recorded; no secret values.
+	_, engineSpan := tracer.Start(ctx, "engine.fork", trace.WithAttributes(
+		attribute.String("snapshot.id", snapshotID),
+		attribute.String("sandbox.id", sandboxID),
+	))
 	result, err := s.engine.Fork(snapshotID, sandboxID, fork.ForkOpts{
 		Env:     env,
 		Secrets: secrets,
@@ -113,8 +123,12 @@ func (s *Server) Fork(ctx context.Context, snapshotID, sandboxID string, env, se
 		Volumes: vols,
 	})
 	if err != nil {
+		engineSpan.RecordError(err)
+		engineSpan.End()
 		return nil, err
 	}
+	engineSpan.SetAttributes(attribute.Float64("fork_time_ms", result.ForkTimeMs))
+	engineSpan.End()
 
 	forkDuration.Observe(result.ForkTimeMs / 1000.0)
 	activeSandboxes.Inc()

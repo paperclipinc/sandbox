@@ -4,10 +4,16 @@ import (
 	"context"
 	"strings"
 
+	"github.com/paperclipinc/sandbox/internal/observability"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// tracer is the forkd component tracer; no-op unless tracing is configured.
+var tracer = observability.Tracer("agentrun-forkd")
 
 // grpcService implements forkdpb.ForkDaemonServer over Server.
 // Exec returns Unimplemented with a pointer to the HTTP sandbox API on the
@@ -22,10 +28,21 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 	if err := validateIDs(req.SnapshotId, req.SandboxId); err != nil {
 		return nil, err
 	}
+	// forkd.Fork is a child of the controller's forkOnNode span when the
+	// trace context propagated over gRPC (otelgrpc server handler). Only ids
+	// are recorded; env, secrets, and the api token are never attributes.
+	ctx, span := tracer.Start(ctx, "forkd.Fork", trace.WithAttributes(
+		attribute.String("snapshot.id", req.SnapshotId),
+		attribute.String("sandbox.id", req.SandboxId),
+	))
+	defer span.End()
+
 	result, err := g.srv.Fork(ctx, req.SnapshotId, req.SandboxId, envMap(req.Env), secretMap(req.Secrets), req.Network, req.Volumes, req.ApiToken)
 	if err != nil {
+		span.RecordError(err)
 		return nil, grpcError(err)
 	}
+	span.SetAttributes(attribute.Float64("fork_time_ms", result.ForkTimeMs))
 	return &forkdpb.ForkResponse{
 		SandboxId:         result.SandboxID,
 		Endpoint:          result.Endpoint,

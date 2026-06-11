@@ -13,6 +13,7 @@ import (
 
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/sandbox/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -61,7 +62,10 @@ func startFakeForkdNode(registry *NodeRegistry, nodeName string, serverTLS, clie
 		os.RemoveAll(dir)
 		return nil, nil, nil, err
 	}
-	var opts []grpc.ServerOption
+	// The otelgrpc server handler mirrors forkd's real gRPC server so the
+	// propagated trace context is honored: the forkd.Fork span joins the
+	// controller's trace, which the cross-process propagation test asserts.
+	opts := []grpc.ServerOption{grpc.StatsHandler(observability.GRPCServerStatsHandler())}
 	if serverTLS != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(serverTLS)))
 	}

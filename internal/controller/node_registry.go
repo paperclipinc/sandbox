@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/sandbox/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -243,6 +244,10 @@ func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) 
 	conn, err := grpc.NewClient(
 		node.Endpoint,
 		grpc.WithTransportCredentials(creds),
+		// Propagate trace context to forkd: the client handler injects the
+		// active span's W3C trace headers so the forkd.Fork span joins the
+		// controller's trace. No-op when tracing is disabled.
+		grpc.WithStatsHandler(observability.GRPCClientStatsHandler()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to forkd on %s: %w", nodeName, err)

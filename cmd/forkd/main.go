@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/netconf"
 	"github.com/paperclipinc/sandbox/internal/network"
+	"github.com/paperclipinc/sandbox/internal/observability"
 	"github.com/paperclipinc/sandbox/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -41,6 +43,7 @@ func main() {
 		busyboxBin      string
 		enableVolumes   bool
 		auditLog        string
+		otlpEndpoint    string
 	)
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
@@ -65,13 +68,25 @@ func main() {
 	flag.StringVar(&busyboxBin, "busybox-bin", "", "Optional path to a static busybox providing /bin/sh, injected when an image ships no shell. Empty means images without a shell cannot run init")
 	flag.BoolVar(&enableVolumes, "enable-volumes", false, "Enable per-fork volume drives: the template build bakes a placeholder drive per template volume and each fork prepares its own backing and rebinds the drive. Default false until proven on KVM CI")
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
+	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Parse()
+
+	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-forkd", otlpEndpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: tracing setup: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = shutdownTracing(context.Background()) }()
 
 	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
 		os.Exit(1)
 	}
+	// The otelgrpc server handler receives the controller's propagated trace
+	// context so forkd spans join the controller's trace. Harmless when
+	// tracing is disabled (global no-op provider).
+	grpcOpts = append(grpcOpts, grpc.StatsHandler(observability.GRPCServerStatsHandler()))
 
 	var engine daemon.ForkEngine
 
