@@ -46,6 +46,18 @@ export class HttpClient {
   }
 
   /**
+   * GETs `path` and decodes the JSON response into T. Throws AgentRunError on a
+   * non-2xx status.
+   */
+  async get<T>(path: string): Promise<T> {
+    const resp = await fetch(this.baseUrl + path, {
+      method: "GET",
+      headers: this.headers(false),
+    });
+    return this.handle<T>(resp);
+  }
+
+  /**
    * POSTs a JSON body to `path` and decodes the JSON response into T. Throws
    * AgentRunError on a non-2xx status.
    */
