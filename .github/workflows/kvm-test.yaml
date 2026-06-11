@@ -18,10 +18,13 @@ on:
       - 'cmd/tmpl-smoke/**'
       - 'cmd/vol-smoke/**'
       - 'cmd/crypt-smoke/**'
+      - 'cmd/pull-smoke/**'
       - 'internal/volume/**'
       - 'internal/ociroot/**'
       - 'internal/vsock/**'
       - 'internal/storecrypt/**'
+      - 'internal/pki/**'
+      - 'internal/daemon/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -493,6 +496,96 @@ jobs:
           }
 
           kill $FC_PID 2>/dev/null || true
+
+      # Snapshot distribution proof (#14, build-once-distribute). This phase
+      # proves a PEER pulls a template over the production CAS-serving path and
+      # forks from it. cmd/pull-smoke drives TWO real fork engines with TWO data
+      # dirs on this ONE machine:
+      #
+      #   node A  builds a template (Engine.CreateTemplate) into its CAS + data
+      #           dir, then serves that CAS under /cas over TLS gated by a peer
+      #           token, using the EXACT handler forkd mounts
+      #           (cas.RequirePullToken wrapping cas.NewHTTPHandler) with the
+      #           real internal/pki server TLS config (TLS 1.3, client cert
+      #           required and verified against the CA).
+      #   node B  runs engine.PullTemplate(templateID, digest, A's https CAS URL,
+      #           token): a real HTTPS pull that materializes the snapshot files,
+      #           runs the same digest verify + snapcompat the fork path uses,
+      #           and writes the verified marker. Then B FORKS a sandbox from the
+      #           PULLED template and execs inside it.
+      #
+      # SAN PINNING (the Task 1-2 constraint): the pull client pins
+      # pki.ServerName, so the holder's serving cert must carry that SAN. This is
+      # handled honestly, NOT with InsecureSkipVerify: pull-smoke issues node A a
+      # real cert via pki.Issue(pki.ServerName), so the pinned name is what the
+      # handshake verifies. node B presents a CA-signed client identity
+      # (pki.ControllerName), so the pull also rides forkd-to-forkd mTLS.
+      #
+      # Two layers GATE:
+      #   1. `pull-smoke verify` (no KVM): a WRONG token is rejected with 403 and
+      #      a WRONG/non-existent manifest digest fails the pull and leaves no
+      #      manifest on B (fail-closed). This runs first because it needs no VM.
+      #   2. `pull-smoke kvm`: the full build -> serve -> pull -> materialize ->
+      #      verify -> fork -> exec, proving the PULLED snapshot is bootable.
+      #
+      # HONEST SCOPE: both engines run in one process over a loopback TLS
+      # listener: a real cross-process-class HTTP-over-TLS CAS pull (two data
+      # dirs, two CAS stores, the production wire path), but the two hosts are
+      # the same machine. True cross-HOST distribution exercises the IDENTICAL
+      # PullTemplate + cas.Pull code path and is measured only on a multi-node
+      # testbed (docs/snapshot-distribution.md, issue #14). A build/boot failure
+      # here surfaces as a real FAIL; a missing cert/port is a SETUP error.
+      # This phase GATES: no continue-on-error.
+      - name: Snapshot distribution, a peer pulls a template over TLS and forks from it
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+
+          go build -o /tmp/pull-smoke ./cmd/pull-smoke/
+
+          # --- layer 1: auth + integrity gates (no KVM, runs anywhere) ---
+          echo "=== pull-smoke verify (403 on wrong token, fail-closed on wrong digest) ==="
+          rm -rf /tmp/agent-run-test/pull-verify
+          /tmp/pull-smoke verify --root /tmp/agent-run-test/pull-verify
+
+          # --- build a busybox + agent rootfs for the distributed template ---
+          # pull-smoke kvm builds the template from this rootfs path via
+          # Engine.CreateTemplate (agent as /init), exactly like the other KVM
+          # smoke drivers.
+          WORKDIR=/tmp/agent-run-test/pull-build
+          mkdir -p $WORKDIR
+          dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
+          mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
+          mkdir -p $WORKDIR/mnt
+          sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
+          sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
+          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo chmod +x $WORKDIR/mnt/init
+          sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
+            "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+          sudo chmod +x $WORKDIR/mnt/bin/busybox
+          for cmd in sh echo cat ls mkdir rm cp head date base64 tr; do
+            sudo ln -sf /bin/busybox $WORKDIR/mnt/bin/$cmd
+          done
+          echo "sandbox" | sudo tee $WORKDIR/mnt/etc/hostname > /dev/null
+          sudo umount $WORKDIR/mnt
+          sudo chmod 666 /dev/kvm
+
+          # --- layer 2: build A, serve over TLS, pull to B, fork on B + exec ---
+          echo "=== pull-smoke kvm (build A -> serve TLS -> pull B -> fork+exec) ==="
+          rm -rf /tmp/agent-run-test/pull-kvm
+          /tmp/pull-smoke kvm \
+            --root /tmp/agent-run-test/pull-kvm \
+            --image $WORKDIR/rootfs.ext4 \
+            --firecracker /usr/local/bin/firecracker \
+            --kernel /tmp/agent-run-test/vmlinux \
+            --agent-bin /tmp/agent-run-test/agent \
+            --expect-cmd 'ls /init'
+
+          echo "================================"
+          echo "  Snapshot distribution proven: peer pull over TLS + fork from the pulled snapshot"
+          echo "================================"
 
       # Fork-correctness proof: take ONE snapshot after the agent is up, restore
       # TWO VMs from it, and assert each fork reseeds its RNG (distinct urandom),

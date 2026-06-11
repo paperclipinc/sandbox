@@ -17,6 +17,14 @@ import (
 type SandboxPoolReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
+	// PeerToken is the shared bearer credential forkd accepts on its token-gated
+	// CAS surface. The controller passes it in every PullTemplate so a deficit
+	// node can pull a template from a holder. It must match forkd's --peer-token.
+	// Empty disables distribution by pull (every deficit node builds its own
+	// snapshot, the prior behavior). A SECRET VALUE: it is never logged. A
+	// per-pull minted token is a follow-up; the shared-token model matches the
+	// forkd side (Task 1).
+	PeerToken string
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed
@@ -102,23 +110,63 @@ func (r *SandboxPoolReconciler) readySnapshotCount(templateID string) int32 {
 	return int32(len(r.NodeRegistry.NodesWithTemplate(templateID)))
 }
 
-// createSnapshotsOnNodes asks up to deficit healthy nodes that lack the
-// template to build it. Returns how many builds were started.
+// createSnapshotsOnNodes ensures the template is present on up to deficit
+// additional healthy nodes and returns how many were added (built + pulled).
+//
+// Distribution policy (build once, distribute by pull):
+//   - Encrypted template: every deficit node BUILDS its own snapshot
+//     (CreateTemplate). The CAS chunks of a plaintext-on-the-wire pull would
+//     defeat at-rest encryption, so encrypted templates are not distributed by
+//     pull; this is the documented carve-out.
+//   - Plaintext template: ensure the template is BUILT on at least one node
+//     (CreateTemplate on the first eligible node when no node holds it yet),
+//     then for the remaining deficit nodes that lack it, PULL the snapshot from
+//     a holder's CAS surface instead of rebuilding it. A pull is O(network) and
+//     reuses the one expensive build, so the fleet converges far faster than N
+//     independent boots.
+//
+// The pull token is the shared peer credential the controller is configured
+// with; it is delivered to the deficit node over its mTLS gRPC and is never
+// logged.
 func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, encKey []byte, deficit int32) (int32, error) {
-	var created int32
+	var added int32
 	var errs []error
+
+	// Whether distribution by pull applies: plaintext template, a peer token is
+	// configured, and a holder reporting a content-addressed digest exists. An
+	// encrypted template always builds per node (the carve-out above).
+	distribute := len(encKey) == 0 && r.PeerToken != ""
+
 	for _, node := range r.NodeRegistry.ListNodes() {
-		if created >= deficit {
+		if added >= deficit {
 			break
 		}
 		if !node.isHealthy() || node.hasSnapshot(templateID) {
 			continue
 		}
-		// Fail closed: an encrypted template's key travels in CreateTemplate, so
-		// the node connection must be mTLS. Refuse to send the key in cleartext
-		// over an insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI
-		// bootstrap disabled); skip the node without setting the key and record
-		// the refusal. A plaintext template carries no key and is unaffected.
+
+		// Prefer a pull when distribution applies AND a holder exists. The build
+		// on the first node (when no holder exists yet) falls through to
+		// CreateTemplate below; once that build registers a digest, subsequent
+		// deficit nodes in this same pass pull from it.
+		if distribute {
+			if holder, casURL, digest, ok := r.NodeRegistry.TemplateSource(templateID); ok && holder.Name != node.Name {
+				if err := r.pullTemplateOnNode(ctx, node, templateID, digest, casURL, r.PeerToken); err != nil {
+					errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
+					continue
+				}
+				r.NodeRegistry.AddTemplateWithDigest(node.Name, templateID, digest)
+				added++
+				continue
+			}
+		}
+
+		// Build path. Fail closed: an encrypted template's key travels in
+		// CreateTemplate, so the node connection must be mTLS. Refuse to send the
+		// key in cleartext over an insecure channel (node.TLS nil and registry.TLS
+		// nil, i.e. PKI bootstrap disabled); skip the node without setting the key
+		// and record the refusal. A plaintext template carries no key and is
+		// unaffected.
 		if len(encKey) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
 			errs = append(errs, fmt.Errorf("node %s: refusing to deliver the encryption key over an insecure gRPC channel: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name))
 			continue
@@ -153,12 +201,12 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			continue
 		}
 		r.NodeRegistry.AddTemplateWithDigest(node.Name, templateID, resp.TemplateDigest)
-		created++
+		added++
 	}
-	if created == 0 && len(errs) > 0 {
+	if added == 0 && len(errs) > 0 {
 		return 0, errors.Join(errs...)
 	}
-	return created, nil
+	return added, nil
 }
 
 func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]int32 {

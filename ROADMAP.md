@@ -255,9 +255,26 @@ a differentiator.
   deltas, not whole images. Unit tests prove the incremental delta path.
 - ✅ Node cache eviction policy for bounded NVMe: mtime-LRU EvictToFit with
   pinned manifests protected, crash-safe via on-disk access times.
-- ⬜ P2P distribution between nodes (Spegel-style); publish
-  pool-update→all-nodes-ready at 10/50/100 nodes. OPEN and unmeasured: needs
-  a multi-node testbed; propagation-time numbers are not stated until then.
+- ✅ Build once, distribute by pull (#14): forkd serves its CAS under /cas over
+  TLS gated by a peer token plus forkd-to-forkd mTLS; Engine.PullTemplate pulls,
+  materializes, and verifies (digest + snapcompat) a template from a holder,
+  fail-closed on a bad/tampered source; the pool reconciler builds a
+  non-encrypted template ONCE and distributes by pull instead of rebuilding on
+  every node. CI-proven on TWO processes / two data dirs: a peer pulls + verifies
+  + forks + execs from the pulled snapshot, a wrong token is rejected (403), and
+  a wrong digest fails the pull fail-closed (cmd/pull-smoke). See
+  docs/snapshot-distribution.md.
+- ⬜ Measured cross-node propagation at 10/50/100 nodes (pool-update to
+  all-nodes-ready over a real network). OPEN and unmeasured: needs a multi-node
+  testbed; propagation-time numbers are not stated until then (#14).
+- ⬜ A shared registry/object-store mirror as a pull source (instead of
+  peer-to-peer pull from a holder node). OPEN: not built.
+- ⬜ Distributing ENCRYPTED templates: encrypted templates are built per node
+  and are NOT distributed; needs the CAS chunk store itself encrypted (#31).
+- ⬜ Per-node SAN pinning and per-pull minted tokens: today the holder serves
+  the one shared serving identity (pki.ServerName) and a single shared bearer
+  token. OPEN: a distinct verified identity per holder and short-lived per-pull
+  tokens are a follow-up.
 - ⬜ `prefetch: full | lazy` pool setting (serve forks from partially
   fetched snapshots). OPEN: lazy partial-fetch serving is not yet built.
 

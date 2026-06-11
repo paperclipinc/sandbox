@@ -53,6 +53,46 @@ func templateSnapshotFiles(dataDir, id string) map[string]string {
 	return files
 }
 
+// templateFilePath maps a manifest file entry's logical name back to its
+// on-disk path inside a template dir, the inverse of templateSnapshotFiles: the
+// snapshot pair lands under snapshot/, the rootfs as rootfs.ext4, and a volume
+// seed (logical name "volumes/<name>.ext4") at that relative path. An unknown
+// logical name is rejected, and the resolved path is confined to the template
+// dir so a crafted manifest name cannot escape it (path-traversal guard for the
+// receiving side of a pull).
+func templateFilePath(dir, name string) (string, error) {
+	var rel string
+	switch name {
+	case "mem", "vmstate":
+		rel = filepath.Join("snapshot", name)
+	case "rootfs":
+		rel = "rootfs.ext4"
+	default:
+		if !strings.HasPrefix(name, "volumes/") || !strings.HasSuffix(name, ".ext4") {
+			return "", fmt.Errorf("unexpected snapshot file %q", name)
+		}
+		rel = name
+	}
+	dst := filepath.Join(dir, rel)
+	cleanDir := filepath.Clean(dir)
+	if dst != cleanDir && !strings.HasPrefix(dst, cleanDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("snapshot file %q escapes template dir", name)
+	}
+	// Volume seeds must additionally stay UNDER the volumes/ subdir. A name like
+	// "volumes/../escape.ext4" passes the prefix/suffix check and, after Join,
+	// cleans to <dir>/escape.ext4: inside the template dir (so the escape guard
+	// above does not fire) but OUTSIDE volumes/, landing a volume seed where a
+	// snapshot file belongs. Confine it so a crafted volumes/ name cannot climb
+	// out of the volumes subtree.
+	if strings.HasPrefix(name, "volumes/") {
+		volDir := filepath.Join(cleanDir, "volumes")
+		if !strings.HasPrefix(dst, volDir+string(filepath.Separator)) {
+			return "", fmt.Errorf("snapshot file %q escapes template volumes dir", name)
+		}
+	}
+	return dst, nil
+}
+
 // recordTemplateDigest content-addresses a freshly built template's snapshot
 // files into the CAS store, pins the manifest, records the manifest digest to
 // disk, and writes the verified marker. The template was just built by this

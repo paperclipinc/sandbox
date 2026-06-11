@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +38,11 @@ type Engine struct {
 	// verification (issue #9) and incremental transfer (Task 4). Rooted at
 	// <casDir>, defaulting to <dataDir>/cas.
 	casStore *cas.Store
+	// pullClient is the HTTP client PullTemplate uses to fetch a peer's CAS over
+	// TLS. The daemon injects one carrying the control-plane CA trust; nil leaves
+	// http.DefaultClient (development / non-TLS, where the controller would not
+	// issue a pull). The pull token, never the client, carries the credential.
+	pullClient *http.Client
 	// allowUnverified, when true, lets Fork proceed on a snapshot that failed
 	// or skipped verification, after a loud one-time warning. Development
 	// escape hatch only; default false refuses unverified forks.
@@ -463,6 +469,11 @@ type EngineOpts struct {
 	// MemTotal. Nil uses the production reader (reads /proc/meminfo); tests
 	// inject canned contents or a failing reader for non-linux paths.
 	MeminfoReader func() (string, error)
+	// PullHTTPClient is the HTTP client PullTemplate uses to fetch a peer forkd's
+	// CAS over TLS. The daemon injects one trusting the control-plane CA. Nil
+	// leaves http.DefaultClient; PullTemplate still works against a plaintext
+	// test server, but production pulls are TLS, so the daemon always sets it.
+	PullHTTPClient *http.Client
 }
 
 type Template struct {
@@ -612,6 +623,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		sandboxes:            make(map[string]*Sandbox),
 		nextPort:             10000,
 		casStore:             store,
+		pullClient:           opts.PullHTTPClient,
 		allowUnverified:      opts.AllowUnverified,
 		allowIncompatible:    opts.AllowIncompatible,
 		env:                  env,
@@ -647,6 +659,108 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		return err
 	}
 	return e, nil
+}
+
+// CASStore returns the engine's content-addressed store so the daemon can mount
+// the CAS read surface (cas.NewHTTPHandler) for peer pulls. The store exposes
+// only digest-addressed bytes; the daemon gates access with a pull token over
+// TLS.
+func (e *Engine) CASStore() *cas.Store {
+	return e.casStore
+}
+
+// PullTemplate fetches a template's snapshot from a peer forkd's CAS surface,
+// materializes it into this node's template dir, verifies it, and records the
+// digest so GetCapacity reports the template. It is the receiving side of
+// build-once-distribute: the controller calls it for a deficit node, sourcing
+// from a node that already holds the template.
+//
+// Flow: construct an HTTPTransport to sourceURL with token attached to every
+// request (the token is a credential, never logged), cas.Pull the manifest
+// (manifestDigest) plus only the chunks this node is missing (each verified on
+// receipt) into the local CAS, materialize the snapshot files into the template
+// layout (<dataDir>/templates/<templateID>/{snapshot/{mem,vmstate},rootfs.ext4,
+// volumes/...}), then run the SAME digest verify and snapshot-compat check the
+// fork path uses and write the verified marker. On ANY failure the partial
+// template dir is removed and an error is returned (fail closed): a bad pull
+// never becomes a servable template.
+func (e *Engine) PullTemplate(ctx context.Context, templateID, manifestDigest, sourceURL, token string) (retErr error) {
+	digest := cas.Digest(manifestDigest)
+	if err := digest.Validate(); err != nil {
+		return fmt.Errorf("pull template %s: invalid manifest digest: %w", templateID, err)
+	}
+
+	dir := templateDir(e.dataDir, templateID)
+	// Fail closed: remove the partial template dir on any error so a failed pull
+	// never leaves a half-materialized, unverified snapshot a fork could pick up.
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(dir) //nolint:errcheck // best-effort partial cleanup
+			e.mu.Lock()
+			delete(e.templateDigests, templateID)
+			e.mu.Unlock()
+		}
+	}()
+
+	// The CAS HTTP handler routes /cas/... itself and the transport prepends
+	// /cas/ to its base URL, so a source URL that already carries the /cas
+	// suffix (the convention the controller derives from a holder's HTTP
+	// endpoint) is trimmed back to the server root to avoid /cas/cas.
+	base := strings.TrimSuffix(strings.TrimRight(sourceURL, "/"), "/cas")
+	// token is attached to every CAS request; it is never logged. The HTTP
+	// client comes from the daemon (TLS-configured) via pullClient.
+	transport := cas.NewHTTPTransport(base, e.pullClient).WithBearerToken(token)
+	if err := cas.Pull(ctx, e.casStore, transport, digest); err != nil {
+		return fmt.Errorf("pull template %s snapshot: %w", templateID, err)
+	}
+
+	if err := e.materializePulledTemplate(templateID, digest); err != nil {
+		return err
+	}
+
+	// Record the digest the holder reported so verifyTemplate compares the
+	// on-disk bytes against it, then run the same verify the fork path uses.
+	if err := writeDigestFile(e.dataDir, templateID, digest); err != nil {
+		return fmt.Errorf("record pulled template %s digest: %w", templateID, err)
+	}
+	if _, err := verifyTemplate(e.dataDir, templateID, e.manifestMetadata(firecracker.DefaultVMConfig())); err != nil {
+		return fmt.Errorf("verify pulled template %s: %w", templateID, err)
+	}
+	// Same compatibility gate the fork path applies, run before the template is
+	// ever served so an incompatible pulled snapshot is refused at pull time.
+	if err := e.ensureCompatible(templateID); err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	e.templateDigests[templateID] = digest
+	e.mu.Unlock()
+	return nil
+}
+
+// materializePulledTemplate reconstructs the pulled snapshot's files from the
+// local CAS into the on-disk template layout the fork path expects. The
+// manifest file entries are the logical names recordTemplateDigest stored
+// (mem, vmstate, rootfs, and any volume seeds named volumes/<name>.ext4), so
+// each is placed at its template-relative path. Materialize verifies every
+// chunk's digest as it writes, so a corrupt chunk fails here before the
+// template is recorded.
+func (e *Engine) materializePulledTemplate(templateID string, digest cas.Digest) error {
+	m, err := e.casStore.GetManifest(digest)
+	if err != nil {
+		return fmt.Errorf("load pulled manifest for template %s: %w", templateID, err)
+	}
+	dir := templateDir(e.dataDir, templateID)
+	for _, fe := range m.Files {
+		dst, err := templateFilePath(dir, fe.Name)
+		if err != nil {
+			return fmt.Errorf("place pulled file %q for template %s: %w", fe.Name, templateID, err)
+		}
+		if err := e.casStore.MaterializeFileTo(digest, fe.Name, dst); err != nil {
+			return fmt.Errorf("materialize pulled file %q for template %s: %w", fe.Name, templateID, err)
+		}
+	}
+	return nil
 }
 
 // manifestMetadata builds the CAS manifest metadata stamped into a template's

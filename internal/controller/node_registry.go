@@ -36,7 +36,13 @@ type NodeInfo struct {
 	Endpoint string
 	// HTTPEndpoint is the forkd HTTP sandbox API (exec/files), e.g. "10.0.3.7:9091".
 	// This is what claim status endpoints point at.
-	HTTPEndpoint    string
+	HTTPEndpoint string
+	// CASEndpoint is the forkd DEDICATED token-gated TLS CAS listener
+	// (e.g. "10.0.3.7:9092"), the source a peer pulls templates from. It is a
+	// SEPARATE port from HTTPEndpoint: CAS distribution is served over TLS on its
+	// own listener so the sandbox HTTP API scheme is unchanged. Populated by
+	// discovery from the same pod IP as HTTPEndpoint with the CAS port.
+	CASEndpoint     string
 	ActiveSandboxes int32
 	MaxSandboxes    int32
 	MemoryTotal     int64
@@ -258,6 +264,49 @@ func (r *NodeRegistry) NodesWithTemplate(templateID string) []*NodeInfo {
 		}
 	}
 	return out
+}
+
+// TemplateSource picks a healthy node that holds the template AND reports a
+// content-addressed digest for it, and returns the holder, its CAS-serving base
+// URL, and the digest. It is the source the pool reconciler distributes from:
+// a deficit node pulls the manifest (by digest) from this holder's CAS surface.
+// ok is false when no holder reports a digest (e.g. only a mock-engine holder
+// with an empty digest, which cannot be a pull source). The holder is chosen
+// deterministically by node name so repeated reconciles pick the same source.
+func (r *NodeRegistry) TemplateSource(templateID string) (holder *NodeInfo, casURL, digest string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var best *NodeInfo
+	var bestDigest string
+	for _, n := range r.nodes {
+		if !n.isHealthy() || !n.hasSnapshot(templateID) {
+			continue
+		}
+		d := n.TemplateDigests[templateID]
+		if d == "" || n.CASEndpoint == "" {
+			continue
+		}
+		if best == nil || n.Name < best.Name {
+			best = n
+			bestDigest = d
+		}
+	}
+	if best == nil {
+		return nil, "", "", false
+	}
+	return best, best.casBaseURL(), bestDigest, true
+}
+
+// casBaseURL derives the node's CAS-serving base URL from its DEDICATED CAS
+// endpoint. The CAS surface is served under /cas on its OWN listener (a separate
+// port from the sandbox HTTP API), over TLS only (template distribution requires
+// mTLS), so the scheme is https. Returns "" when the node reports no CAS
+// endpoint.
+func (n *NodeInfo) casBaseURL() string {
+	if n.CASEndpoint == "" {
+		return ""
+	}
+	return "https://" + n.CASEndpoint + "/cas"
 }
 
 // AddTemplate records that a node now holds the given template snapshot.

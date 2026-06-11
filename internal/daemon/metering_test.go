@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,9 @@ func (f *fakeMeteringEngine) GetCapacity() fork.Capacity {
 }
 func (f *fakeMeteringEngine) ListSandboxes() []fork.SandboxRecord { return nil }
 func (f *fakeMeteringEngine) CreateTemplate(string, string, []string, []volume.Spec) error {
+	panic("not used")
+}
+func (f *fakeMeteringEngine) PullTemplate(context.Context, string, string, string, string) error {
 	panic("not used")
 }
 

@@ -268,14 +268,47 @@ func (s *Store) Materialize(manifestDigest Digest, dstDir string) error {
 	return nil
 }
 
+// MaterializeFileTo reconstructs a single named file entry from the manifest to
+// an explicit destination path, verifying each chunk's digest as it reads. It
+// is the building block a caller uses when the on-disk layout does not match the
+// manifest's flat logical names (e.g. forkd places "mem" under snapshot/mem and
+// "rootfs" as rootfs.ext4). Parent directories are created. On any error the
+// partial destination is removed. A name not present in the manifest is an
+// error.
+func (s *Store) MaterializeFileTo(manifestDigest Digest, name, dstPath string) error {
+	if err := manifestDigest.Validate(); err != nil {
+		return err
+	}
+	m, err := s.GetManifest(manifestDigest)
+	if err != nil {
+		return err
+	}
+	for _, fe := range m.Files {
+		if fe.Name != name {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", dstPath, err)
+		}
+		return s.materializeFileAt(fe, dstPath)
+	}
+	return fmt.Errorf("manifest %s has no file %q", manifestDigest, name)
+}
+
 // materializeFile reconstructs a single file by concatenating its verified
 // chunks, then updates each chunk's access time (mtime) for LRU tracking. On
 // ANY error (chunk digest mismatch, missing chunk, copy or sync failure) the
 // partially written destination file is removed before returning, so a verify
 // failure never leaves corrupt bytes behind for a caller to consume.
-func (s *Store) materializeFile(fe FileEntry, dstDir string) (err error) {
-	dst := filepath.Join(dstDir, fe.Name)
-	out, err := os.Create(dst) //nolint:gosec // dst derived from manifest name
+func (s *Store) materializeFile(fe FileEntry, dstDir string) error {
+	return s.materializeFileAt(fe, filepath.Join(dstDir, fe.Name))
+}
+
+// materializeFileAt is materializeFile with the destination path made explicit
+// so a single entry can be reconstructed to a layout that differs from the
+// manifest's flat logical names. Same verify-and-cleanup contract.
+func (s *Store) materializeFileAt(fe FileEntry, dst string) (err error) {
+	out, err := os.Create(dst) //nolint:gosec // dst derived from manifest name / caller-validated path
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}

@@ -70,9 +70,18 @@ func main() {
 
 	nodeRegistry := controller.NewNodeRegistry()
 
+	// The peer token forkd accepts on its token-gated CAS surface. The controller
+	// passes it in every PullTemplate so a deficit node can pull a template from a
+	// holder; it must match forkd's --peer-token. Sourced from the environment
+	// (not a flag) so it is never exposed in the process argv. Empty disables
+	// distribution by pull (every node builds its own snapshot). A credential:
+	// never logged.
+	peerToken := os.Getenv("FORKD_PEER_TOKEN")
+
 	if err := (&controller.SandboxPoolReconciler{
 		Client:       mgr.GetClient(),
 		NodeRegistry: nodeRegistry,
+		PeerToken:    peerToken,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)

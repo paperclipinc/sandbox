@@ -1,6 +1,9 @@
 package fork
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -50,6 +53,25 @@ type MockEngine struct {
 	// to 16 GiB; SetMemoryTotal overrides it (Task 3 envtests shrink it to
 	// force capacity exhaustion).
 	memoryTotalBytes int64
+	// pulls records every PullTemplate call the mock received, in call order, so
+	// distribution tests can assert the controller issued a pull (source URL +
+	// digest) instead of a second build. The pull token is NEVER recorded: only
+	// its presence/length, so a test can confirm a token was carried without the
+	// value touching test state.
+	pulls []MockPullCall
+	// templateDigests maps each template id to a fabricated stable content
+	// address so the mock can stand in for a CAS-addressed holder; GetCapacity
+	// surfaces it as the real engine does.
+	templateDigests map[string]string
+}
+
+// MockPullCall is one recorded PullTemplate the mock engine received. TokenLen
+// records the token length only; the token value is never stored.
+type MockPullCall struct {
+	TemplateID     string
+	ManifestDigest string
+	SourceURL      string
+	TokenLen       int
 }
 
 // LastInitCommands returns the init commands passed to the most recent
@@ -201,7 +223,61 @@ func (e *MockEngine) CreateTemplate(id string, image string, initCommands []stri
 		CreatedAt:   time.Now(),
 		Ready:       true,
 	}
+	// Report a deterministic content-address per template so the distribution
+	// path has a digest to pull against (the real engine returns a true CAS
+	// digest; the mock fabricates a stable one). 64 hex chars to match the
+	// sha256 shape the registry and CRD status expect.
+	if e.templateDigests == nil {
+		e.templateDigests = make(map[string]string)
+	}
+	e.templateDigests[id] = mockTemplateDigest(id)
 	return nil
+}
+
+// mockTemplateDigest fabricates a stable 64-char hex digest for a template id so
+// the mock can stand in for a CAS-addressed holder in distribution tests.
+func mockTemplateDigest(id string) string {
+	sum := sha256.Sum256([]byte("mock-template:" + id))
+	return hex.EncodeToString(sum[:])
+}
+
+// PullTemplate records the pull and registers the template as present, so a
+// fake forkd node backed by the mock reports the template after a distribution
+// pull. It records the source URL and digest (safe to log) and the token length
+// only, never the token value. The mock does no real transfer.
+func (e *MockEngine) PullTemplate(_ context.Context, templateID, manifestDigest, sourceURL, token string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pulls = append(e.pulls, MockPullCall{
+		TemplateID:     templateID,
+		ManifestDigest: manifestDigest,
+		SourceURL:      sourceURL,
+		TokenLen:       len(token),
+	})
+	e.templates[templateID] = &Template{
+		ID:          templateID,
+		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", templateID),
+		CreatedAt:   time.Now(),
+		Ready:       true,
+	}
+	// A pulled template carries the holder's digest, so the receiving node also
+	// reports it as a content-addressed holder.
+	if e.templateDigests == nil {
+		e.templateDigests = make(map[string]string)
+	}
+	e.templateDigests[templateID] = manifestDigest
+	return nil
+}
+
+// PullCalls returns the PullTemplate calls the mock received, in call order.
+// Tests use it to assert the controller distributed by pull (source + digest)
+// rather than issuing a second build.
+func (e *MockEngine) PullCalls() []MockPullCall {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]MockPullCall, len(e.pulls))
+	copy(out, e.pulls)
+	return out
 }
 
 // InjectSandbox seeds a live sandbox directly into the engine with a chosen
@@ -270,6 +346,10 @@ func (e *MockEngine) GetCapacity() Capacity {
 	}
 	active := int32(len(e.sandboxes))
 	memTotal := e.memoryTotalBytes
+	digests := make(map[string]string, len(e.templateDigests))
+	for id, d := range e.templateDigests {
+		digests[id] = d
+	}
 	e.mu.RUnlock()
 
 	report := metering.Aggregate(samples)
@@ -301,6 +381,7 @@ func (e *MockEngine) GetCapacity() Capacity {
 		MemoryUsed:        report.UsedCoWAware,
 		MemoryShared:      report.SharedOnceTotal(),
 		TemplateIDs:       templateIDs,
+		TemplateDigests:   digests,
 		TemplateEstimates: estimates,
 		KVMAvailable:      false,
 	}

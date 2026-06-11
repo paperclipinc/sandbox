@@ -27,6 +27,7 @@ type ForkdDiscovery struct {
 	Interval  time.Duration // default 15s
 	GRPCPort  int           // default 9090
 	HTTPPort  int           // default 9091
+	CASPort   int           // default 9092 (dedicated token-gated TLS CAS listener)
 	// TLS, when set, is the controller's mTLS client config; discovery uses
 	// it for its own capacity dials and stamps it onto every NodeInfo it
 	// registers so registry dials to discovered nodes use mTLS too. Nil
@@ -46,6 +47,9 @@ func (d *ForkdDiscovery) Start(ctx context.Context) error {
 	}
 	if d.HTTPPort == 0 {
 		d.HTTPPort = 9091
+	}
+	if d.CASPort == 0 {
+		d.CASPort = 9092
 	}
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
@@ -79,7 +83,7 @@ func (d *ForkdDiscovery) sync(ctx context.Context) {
 // syncPods registers every running forkd pod and refreshes its capacity.
 func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 	for _, pod := range pods {
-		info, ok := NodeInfoFromPod(pod, d.GRPCPort, d.HTTPPort)
+		info, ok := NodeInfoFromPod(pod, d.GRPCPort, d.HTTPPort, d.CASPort)
 		if !ok {
 			continue
 		}
@@ -135,8 +139,11 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
 }
 
 // NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod
-// is not running, has no IP, or has no node assignment yet.
-func NodeInfoFromPod(pod corev1.Pod, grpcPort, httpPort int) (*NodeInfo, bool) {
+// is not running, has no IP, or has no node assignment yet. The CAS endpoint is
+// the same pod IP as the HTTP endpoint with the dedicated CAS port (casPort):
+// CAS distribution is served on its own TLS listener, a separate port from the
+// sandbox HTTP API.
+func NodeInfoFromPod(pod corev1.Pod, grpcPort, httpPort, casPort int) (*NodeInfo, bool) {
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || pod.Spec.NodeName == "" {
 		return nil, false
 	}
@@ -144,5 +151,6 @@ func NodeInfoFromPod(pod corev1.Pod, grpcPort, httpPort int) (*NodeInfo, bool) {
 		Name:         pod.Spec.NodeName,
 		Endpoint:     fmt.Sprintf("%s:%d", pod.Status.PodIP, grpcPort),
 		HTTPEndpoint: fmt.Sprintf("%s:%d", pod.Status.PodIP, httpPort),
+		CASEndpoint:  fmt.Sprintf("%s:%d", pod.Status.PodIP, casPort),
 	}, true
 }

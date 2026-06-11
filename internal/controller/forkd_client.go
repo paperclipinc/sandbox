@@ -143,6 +143,30 @@ func (r *SandboxForkReconciler) forkRunningOnNode(ctx context.Context, node *Nod
 	}, nil
 }
 
+// pullTemplateOnNode asks the forkd on node to pull a template's snapshot from a
+// holder's CAS surface over the node's mTLS gRPC. sourceURL is the holder's CAS
+// base URL, digest the manifest digest to verify against, and token the shared
+// peer credential the holder requires. The token is a secret value: it is sent
+// only over the mTLS channel and is NEVER logged or recorded as a span
+// attribute. The source URL and digest are content addresses, safe to log.
+func (r *SandboxPoolReconciler) pullTemplateOnNode(ctx context.Context, node *NodeInfo, templateID, digest, sourceURL, token string) error {
+	conn, err := r.NodeRegistry.GetConnection(node.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := forkdpb.NewForkDaemonClient(conn).PullTemplate(ctx, &forkdpb.PullTemplateRequest{
+		TemplateId:     templateID,
+		ManifestDigest: digest,
+		SourceUrl:      sourceURL,
+		// PullToken is the credential the holder's CAS surface requires. Never
+		// logged.
+		PullToken: token,
+	}); err != nil {
+		return fmt.Errorf("forkd pull template on %s: %w", node.Name, err)
+	}
+	return nil
+}
+
 // clientEndpoint prefers the node's HTTP sandbox API; the engine-reported
 // endpoint is an internal placeholder until guest networking exists.
 func clientEndpoint(node *NodeInfo, engineEndpoint string) string {

@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -55,7 +57,12 @@ func main() {
 		auditLog          string
 		otlpEndpoint      string
 		memReserveBytes   int64
+		casListen         string
 	)
+	// peerToken is read from the environment, NOT a flag: a flag is visible in
+	// /proc/<pid>/cmdline, and the token is a credential. The controller already
+	// reads the same FORKD_PEER_TOKEN env var, so the two sides match by config.
+	peerToken := os.Getenv("FORKD_PEER_TOKEN")
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
 	flag.StringVar(&httpAddr, "http", ":9091", "HTTP listen address (metrics + sandbox exec/files API)")
@@ -85,6 +92,19 @@ func main() {
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
+	flag.StringVar(&casListen, "cas-listen", ":9092", "Listen address for the DEDICATED token-gated TLS CAS listener used for peer template distribution. The CAS surface is served here, on its OWN port, NOT on the sandbox HTTP port (--http): the sandbox exec/files/metrics/healthz API keeps its existing scheme so SDK clients are unaffected. Effective only when CAS distribution is enabled (FORKD_PEER_TOKEN set together with mTLS). The controller derives this port to build each holder's CAS source URL")
+	// peerToken (FORKD_PEER_TOKEN env) is the shared bearer token a peer forkd
+	// (driven by the controller) must present to pull templates from this node's
+	// content-addressed store. It is read from the ENVIRONMENT, not a flag, so it
+	// is never exposed in /proc/<pid>/cmdline (the token is a credential and is
+	// never logged). When set together with mTLS (--tls-cert/--tls-key/--tls-ca),
+	// the token-gated CAS surface is served on the dedicated --cas-listen TLS
+	// port and template distribution is enabled. REQUIRES mTLS: the surface is
+	// served over TLS only so the token stays confidential; chunks are
+	// digest-addressed so integrity is channel-independent, but the token gates
+	// enumeration/pull. The controller must be configured with the SAME token
+	// (it reads the same FORKD_PEER_TOKEN env var). SIMPLEST defensible model; a
+	// per-pull minted token / forkd-peer mTLS identity is a follow-up.
 	flag.Parse()
 
 	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-forkd", otlpEndpoint)
@@ -123,6 +143,10 @@ func main() {
 	// the daemon server so the handlers can hand the controller-delivered key to
 	// the engine. Nil otherwise.
 	var reqKeyProvider *fork.RequestKeyProvider
+	// casServing, when set, enables the token-gated TLS CAS surface for peer
+	// template distribution. Set only on the real engine when mTLS and a peer
+	// token are both configured. Nil leaves the HTTP server plaintext as before.
+	var casServing *daemon.CASServing
 
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
@@ -149,6 +173,20 @@ func main() {
 			BusyboxPath:        busyboxBin,
 			EnableVolumes:      enableVolumes,
 			MemoryReserveBytes: memReserveBytes,
+		}
+		// Template distribution: when mTLS and a peer token are configured, build
+		// the HTTP client PullTemplate dials a holder forkd's CAS with. It presents
+		// this forkd's own client identity (the same cert pair the gRPC server
+		// uses) and trusts the control-plane CA, so the pull rides forkd-to-forkd
+		// mTLS; the peer token is the additional gate the holder enforces. The
+		// token, not the client, carries the credential.
+		if tlsConfigured && peerToken != "" {
+			pullClient, perr := pullHTTPClient(tlsCert, tlsKey, tlsCA)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "forkd: build template-pull client: %v\n", perr)
+				os.Exit(1)
+			}
+			engineOpts.PullHTTPClient = pullClient
 		}
 		if enableVolumes {
 			fmt.Println("forkd: per-fork volumes ENABLED")
@@ -215,6 +253,23 @@ func main() {
 			os.Exit(1)
 		}
 		engine = real
+
+		// Enable CAS peer distribution only when mTLS AND a peer token are set:
+		// the surface serves digest-addressed bytes over TLS, gated by the shared
+		// token. It is served on its OWN listener (--cas-listen), NOT the sandbox
+		// HTTP port, so the sandbox API scheme is unchanged. The CAS listener
+		// serves HTTPS using the same cert pair as the gRPC server.
+		if tlsConfigured && peerToken != "" {
+			httpTLS, terr := serverHTTPTLSConfig(tlsCert, tlsKey, tlsCA)
+			if terr != nil {
+				fmt.Fprintf(os.Stderr, "forkd: build CAS server TLS: %v\n", terr)
+				os.Exit(1)
+			}
+			casServing = &daemon.CASServing{Store: real.CASStore(), Token: peerToken, TLS: httpTLS, Addr: casListen}
+		} else if peerToken != "" {
+			// A token without mTLS would serve it in cleartext: refuse to enable.
+			fmt.Fprintln(os.Stderr, "forkd: FORKD_PEER_TOKEN set without mTLS (--tls-cert/--tls-key/--tls-ca); CAS distribution stays DISABLED so the token is never served in cleartext")
+		}
 	}
 
 	sandboxAPI := daemon.NewSandboxAPI(dataDir)
@@ -245,8 +300,11 @@ func main() {
 	grpcServer := grpc.NewServer(grpcOpts...)
 	daemon.RegisterForkDaemonServer(grpcServer, server)
 
-	// Start HTTP server (metrics + sandbox exec/files API)
-	go daemon.ServeHTTP(httpAddr, engine, sandboxAPI)
+	// Start HTTP server (metrics + sandbox exec/files API). When CAS
+	// distribution is enabled, ServeHTTP also starts the dedicated token-gated
+	// TLS CAS listener (--cas-listen) in its own goroutine; the sandbox HTTP API
+	// scheme stays unchanged so SDK clients are unaffected.
+	go daemon.ServeHTTP(httpAddr, engine, sandboxAPI, casServing)
 
 	// Start the controlled DNS resolver (node-level Runnable) when enabled. It
 	// binds the resolver IP on port 53 (udp + tcp); a listen failure is fatal
@@ -297,6 +355,54 @@ func requireTLSForEncryption(enableEnc, tlsConfigured bool) error {
 		return fmt.Errorf("--enable-encryption requires mTLS: the controller delivers the encryption key over the gRPC request, which must not travel over an insecure channel; set --tls-cert, --tls-key, and --tls-ca (and run the controller with PKI bootstrap) or disable encryption")
 	}
 	return nil
+}
+
+// serverHTTPTLSConfig builds the TLS config the HTTP server uses for the
+// token-gated CAS surface. It reuses forkd's own mTLS cert pair and requires a
+// verified client certificate (a peer forkd or the controller), so CAS pulls
+// ride forkd-to-forkd mTLS and the peer token is the additional gate. A bad
+// pull token is rejected by the middleware; a peer without a CA-signed cert is
+// rejected at the TLS handshake.
+func serverHTTPTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
+	certPEM, keyPEM, caPEM, err := readTLSFiles(certPath, keyPath, caPath)
+	if err != nil {
+		return nil, err
+	}
+	return pki.ServerTLSConfig(certPEM, keyPEM, caPEM)
+}
+
+// pullHTTPClient builds the HTTP client PullTemplate dials a holder forkd's CAS
+// with. It presents forkd's own client identity and trusts the control-plane
+// CA. The pinned ServerName (pki.ServerName) means the holder's serving cert
+// must carry that SAN; per-node SAN pinning is a follow-up tracked with the
+// per-pull token work.
+func pullHTTPClient(certPath, keyPath, caPath string) (*http.Client, error) {
+	certPEM, keyPEM, caPEM, err := readTLSFiles(certPath, keyPath, caPath)
+	if err != nil {
+		return nil, err
+	}
+	clientTLS, err := pki.ClientTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Transport: &http.Transport{TLSClientConfig: clientTLS},
+		Timeout:   30 * time.Minute,
+	}, nil
+}
+
+// readTLSFiles reads the three mTLS PEM files. It does not log their contents.
+func readTLSFiles(certPath, keyPath, caPath string) (certPEM, keyPEM, caPEM []byte, err error) {
+	if certPEM, err = os.ReadFile(certPath); err != nil {
+		return nil, nil, nil, fmt.Errorf("read --tls-cert: %w", err)
+	}
+	if keyPEM, err = os.ReadFile(keyPath); err != nil {
+		return nil, nil, nil, fmt.Errorf("read --tls-key: %w", err)
+	}
+	if caPEM, err = os.ReadFile(caPath); err != nil {
+		return nil, nil, nil, fmt.Errorf("read --tls-ca: %w", err)
+	}
+	return certPEM, keyPEM, caPEM, nil
 }
 
 // grpcServerOptions builds transport security for the controller-facing

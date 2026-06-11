@@ -22,6 +22,7 @@ const (
 	ForkDaemon_CreateTemplate_FullMethodName = "/forkd.ForkDaemon/CreateTemplate"
 	ForkDaemon_DeleteTemplate_FullMethodName = "/forkd.ForkDaemon/DeleteTemplate"
 	ForkDaemon_ListTemplates_FullMethodName  = "/forkd.ForkDaemon/ListTemplates"
+	ForkDaemon_PullTemplate_FullMethodName   = "/forkd.ForkDaemon/PullTemplate"
 	ForkDaemon_CreateSnapshot_FullMethodName = "/forkd.ForkDaemon/CreateSnapshot"
 	ForkDaemon_DeleteSnapshot_FullMethodName = "/forkd.ForkDaemon/DeleteSnapshot"
 	ForkDaemon_Fork_FullMethodName           = "/forkd.ForkDaemon/Fork"
@@ -44,6 +45,11 @@ type ForkDaemonClient interface {
 	CreateTemplate(ctx context.Context, in *CreateTemplateRequest, opts ...grpc.CallOption) (*CreateTemplateResponse, error)
 	DeleteTemplate(ctx context.Context, in *DeleteTemplateRequest, opts ...grpc.CallOption) (*DeleteTemplateResponse, error)
 	ListTemplates(ctx context.Context, in *ListTemplatesRequest, opts ...grpc.CallOption) (*ListTemplatesResponse, error)
+	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over the
+	// peer's token-gated, TLS-only /cas surface, materializes it into this node's
+	// template dir, verifies it, and records the digest. The controller calls this
+	// to distribute a template that was built once on another node.
+	PullTemplate(ctx context.Context, in *PullTemplateRequest, opts ...grpc.CallOption) (*PullTemplateResponse, error)
 	// Snapshot management
 	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
@@ -95,6 +101,16 @@ func (c *forkDaemonClient) ListTemplates(ctx context.Context, in *ListTemplatesR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListTemplatesResponse)
 	err := c.cc.Invoke(ctx, ForkDaemon_ListTemplates_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forkDaemonClient) PullTemplate(ctx context.Context, in *PullTemplateRequest, opts ...grpc.CallOption) (*PullTemplateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PullTemplateResponse)
+	err := c.cc.Invoke(ctx, ForkDaemon_PullTemplate_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +254,11 @@ type ForkDaemonServer interface {
 	CreateTemplate(context.Context, *CreateTemplateRequest) (*CreateTemplateResponse, error)
 	DeleteTemplate(context.Context, *DeleteTemplateRequest) (*DeleteTemplateResponse, error)
 	ListTemplates(context.Context, *ListTemplatesRequest) (*ListTemplatesResponse, error)
+	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over the
+	// peer's token-gated, TLS-only /cas surface, materializes it into this node's
+	// template dir, verifies it, and records the digest. The controller calls this
+	// to distribute a template that was built once on another node.
+	PullTemplate(context.Context, *PullTemplateRequest) (*PullTemplateResponse, error)
 	// Snapshot management
 	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
 	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
@@ -273,6 +294,9 @@ func (UnimplementedForkDaemonServer) DeleteTemplate(context.Context, *DeleteTemp
 }
 func (UnimplementedForkDaemonServer) ListTemplates(context.Context, *ListTemplatesRequest) (*ListTemplatesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTemplates not implemented")
+}
+func (UnimplementedForkDaemonServer) PullTemplate(context.Context, *PullTemplateRequest) (*PullTemplateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PullTemplate not implemented")
 }
 func (UnimplementedForkDaemonServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSnapshot not implemented")
@@ -381,6 +405,24 @@ func _ForkDaemon_ListTemplates_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForkDaemonServer).ListTemplates(ctx, req.(*ListTemplatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ForkDaemon_PullTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PullTemplateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForkDaemonServer).PullTemplate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ForkDaemon_PullTemplate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForkDaemonServer).PullTemplate(ctx, req.(*PullTemplateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -612,6 +654,10 @@ var ForkDaemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListTemplates",
 			Handler:    _ForkDaemon_ListTemplates_Handler,
+		},
+		{
+			MethodName: "PullTemplate",
+			Handler:    _ForkDaemon_PullTemplate_Handler,
 		},
 		{
 			MethodName: "CreateSnapshot",

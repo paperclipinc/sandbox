@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/metering"
 	"github.com/paperclipinc/sandbox/internal/volume"
@@ -22,4 +24,8 @@ type ForkEngine interface {
 	// declared volumes; the engine bakes one placeholder drive per volume into
 	// the snapshot. Nil leaves the template drive-less (only the rootfs).
 	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec) error
+	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over
+	// the peer's token-gated TLS surface, materializes it, verifies it, and
+	// records the digest. token is a credential and must never be logged.
+	PullTemplate(ctx context.Context, templateID, manifestDigest, sourceURL, token string) error
 }

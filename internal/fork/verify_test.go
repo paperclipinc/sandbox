@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/paperclipinc/sandbox/internal/cas"
@@ -175,5 +176,65 @@ func TestIsVerifiedReflectsMarker(t *testing.T) {
 	}
 	if !isVerified(dataDir, id) {
 		t.Fatal("template should be verified after recording")
+	}
+}
+
+// TestTemplateFilePathRejectsTraversal is the direct guard for the path
+// traversal hazard on the receiving side of a pull: a crafted manifest file
+// name (especially in the volumes/ branch, which accepts volumes/*.ext4 by
+// prefix/suffix) must never resolve to a path OUTSIDE the template dir. The
+// filepath.Join + prefix-check at the end of templateFilePath is what blocks it;
+// this asserts that guard rejects traversal names and accepts only legitimate
+// ones that resolve inside the dir.
+func TestTemplateFilePathRejectsTraversal(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "templates", "py")
+	cleanDir := filepath.Clean(dir)
+
+	// Every one of these must be REJECTED with an error and resolve to no path
+	// outside the template dir. The volumes/ branch is the load-bearing case: it
+	// accepts volumes/*.ext4 by prefix/suffix, so only the Join + prefix-check
+	// stops volumes/../../etc/x.ext4 from escaping.
+	rejected := []string{
+		"volumes/../../etc/shadow.ext4",
+		"volumes/../escape.ext4",
+		"/etc/x.ext4",
+		"../mem",
+		"unknown",
+		"volumes/no-suffix",
+	}
+	for _, name := range rejected {
+		t.Run("reject/"+name, func(t *testing.T) {
+			got, err := templateFilePath(dir, name)
+			if err == nil {
+				t.Fatalf("templateFilePath(%q) = %q, want error", name, got)
+			}
+			// Belt and suspenders: even on the error path, no returned path may
+			// land outside the template dir.
+			if got != "" && got != cleanDir && !strings.HasPrefix(got, cleanDir+string(filepath.Separator)) {
+				t.Fatalf("templateFilePath(%q) returned escaping path %q", name, got)
+			}
+		})
+	}
+
+	// Legitimate names must be ACCEPTED and resolve INSIDE the template dir.
+	accepted := map[string]string{
+		"mem":               filepath.Join(cleanDir, "snapshot", "mem"),
+		"vmstate":           filepath.Join(cleanDir, "snapshot", "vmstate"),
+		"rootfs":            filepath.Join(cleanDir, "rootfs.ext4"),
+		"volumes/data.ext4": filepath.Join(cleanDir, "volumes", "data.ext4"),
+	}
+	for name, want := range accepted {
+		t.Run("accept/"+name, func(t *testing.T) {
+			got, err := templateFilePath(dir, name)
+			if err != nil {
+				t.Fatalf("templateFilePath(%q): unexpected error %v", name, err)
+			}
+			if got != want {
+				t.Fatalf("templateFilePath(%q) = %q, want %q", name, got, want)
+			}
+			if got != cleanDir && !strings.HasPrefix(got, cleanDir+string(filepath.Separator)) {
+				t.Fatalf("templateFilePath(%q) = %q, escapes template dir %q", name, got, cleanDir)
+			}
+		})
 	}
 }

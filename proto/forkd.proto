@@ -9,6 +9,11 @@ service ForkDaemon {
   rpc CreateTemplate(CreateTemplateRequest) returns (CreateTemplateResponse);
   rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  // PullTemplate fetches a template's snapshot from a peer forkd's CAS over the
+  // peer's token-gated, TLS-only /cas surface, materializes it into this node's
+  // template dir, verifies it, and records the digest. The controller calls this
+  // to distribute a template that was built once on another node.
+  rpc PullTemplate(PullTemplateRequest) returns (PullTemplateResponse);
 
   // Snapshot management
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
@@ -68,6 +73,30 @@ message DeleteTemplateRequest {
 }
 
 message DeleteTemplateResponse {}
+
+message PullTemplateRequest {
+  // template_id is the id the pulled snapshot is materialized under on this node.
+  string template_id = 1;
+  // manifest_digest is the content-addressed digest of the source manifest to
+  // pull and verify against. The pull fails closed if the materialized snapshot
+  // does not re-derive to this digest.
+  string manifest_digest = 2;
+  // source_url is the base URL of the holder forkd's CAS surface, e.g.
+  // "https://10.0.3.7:9091/cas". TLS only.
+  string source_url = 3;
+  // pull_token is the bearer credential the holder forkd requires on its
+  // token-gated CAS surface. It is a SECRET VALUE: it must NEVER be logged,
+  // placed in an error message, or recorded as a span attribute, and it travels
+  // only over TLS.
+  string pull_token = 4;
+}
+
+message PullTemplateResponse {
+  string template_id = 1;
+  // template_digest echoes the verified manifest digest of the pulled snapshot
+  // (a content address, safe to log).
+  string template_digest = 2;
+}
 
 message ListTemplatesRequest {}
 

@@ -20,7 +20,7 @@ func TestNodeInfoFromPod(t *testing.T) {
 		Status: corev1.PodStatus{PodIP: "10.0.3.7", Phase: corev1.PodRunning},
 	}
 
-	info, ok := NodeInfoFromPod(pod, 9090, 9091)
+	info, ok := NodeInfoFromPod(pod, 9090, 9091, 9092)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -33,6 +33,11 @@ func TestNodeInfoFromPod(t *testing.T) {
 	if info.HTTPEndpoint != "10.0.3.7:9091" {
 		t.Fatalf("httpEndpoint = %q", info.HTTPEndpoint)
 	}
+	// The CAS endpoint is the same pod IP with the dedicated CAS port, a SEPARATE
+	// port from the sandbox HTTP API.
+	if info.CASEndpoint != "10.0.3.7:9092" {
+		t.Fatalf("casEndpoint = %q, want 10.0.3.7:9092", info.CASEndpoint)
+	}
 }
 
 func TestNodeInfoFromPodSkipsNotReady(t *testing.T) {
@@ -41,7 +46,7 @@ func TestNodeInfoFromPodSkipsNotReady(t *testing.T) {
 		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodPending}, Spec: corev1.PodSpec{NodeName: "w"}},
 		{Status: corev1.PodStatus{PodIP: "10.0.0.1", Phase: corev1.PodRunning}, Spec: corev1.PodSpec{NodeName: ""}},
 	} {
-		if _, ok := NodeInfoFromPod(pod, 9090, 9091); ok {
+		if _, ok := NodeInfoFromPod(pod, 9090, 9091, 9092); ok {
 			t.Fatalf("expected not ok for pod %+v", pod.Status)
 		}
 	}
