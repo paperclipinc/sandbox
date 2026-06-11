@@ -277,3 +277,81 @@ func TestHTTPBackendNeverLeaksToken(t *testing.T) {
 		t.Fatalf("token leaked into error: %q", err.Error())
 	}
 }
+
+// TestHTTPBackendUnsafeIDRejected asserts that Terminate and Exec with a
+// path-traversal sandbox id return an error without sending any HTTP request.
+func TestHTTPBackendUnsafeIDRejected(t *testing.T) {
+	var got []capturedRequest
+	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
+		return http.StatusOK, map[string]any{"status": "ok"}
+	})
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok", srv.Client())
+
+	unsafeIDs := []string{"../../x", "../etc/passwd", "", "sbx/bad", "sbx..bad"}
+	for _, id := range unsafeIDs {
+		err := b.Terminate(context.Background(), id)
+		if err == nil {
+			t.Errorf("Terminate(%q): expected error, got nil", id)
+		}
+		_, err = b.Exec(context.Background(), id, "echo", 0)
+		if err == nil {
+			t.Errorf("Exec(%q): expected error, got nil", id)
+		}
+	}
+	if len(got) != 0 {
+		t.Errorf("backend sent %d requests, want 0", len(got))
+	}
+}
+
+// TestHTTPBackendForkPartialIDsInError asserts that when a mid-loop fork fails,
+// the returned error names the sandbox ids that were already created so the
+// caller can terminate them.
+func TestHTTPBackendForkPartialIDsInError(t *testing.T) {
+	call := 0
+	var got []capturedRequest
+	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
+		call++
+		if call == 1 {
+			// First fork succeeds; capture the id it used.
+			return http.StatusOK, map[string]any{"id": cr.Body["id"]}
+		}
+		// Second fork fails.
+		return http.StatusInternalServerError, map[string]any{"error": "quota exceeded"}
+	})
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok", srv.Client())
+	ids, err := b.Fork(context.Background(), "sbx-src", 2)
+	if err == nil {
+		t.Fatal("expected error on second fork, got nil")
+	}
+	// The error must name the id created in the first (successful) call.
+	if len(ids) != 1 {
+		t.Fatalf("expected 1 partial id returned, got %d: %v", len(ids), ids)
+	}
+	if !strings.Contains(err.Error(), ids[0]) {
+		t.Errorf("error %q does not mention created id %q", err.Error(), ids[0])
+	}
+}
+
+// TestHTTPBackendTerminatePathEscape asserts that a valid sandbox id that
+// contains URL-special chars (none allowed by validSandboxID, but an id whose
+// PathEscape is a no-op for safe chars) is embedded correctly.
+func TestHTTPBackendTerminatePathEscape(t *testing.T) {
+	var got []capturedRequest
+	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
+		return http.StatusOK, nil
+	})
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok", srv.Client())
+	// sbx-abc is valid and path-safe; confirm the path is built correctly.
+	if err := b.Terminate(context.Background(), "sbx-abc"); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != "/v1/sandboxes/sbx-abc" {
+		t.Fatalf("path = %q, want /v1/sandboxes/sbx-abc", got[0].Path)
+	}
+}

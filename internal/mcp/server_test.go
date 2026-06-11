@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
+	"time"
 )
 
 // callServer invokes a single request against a Server via handle and returns
@@ -243,5 +245,85 @@ func TestUnknownMethodReturnsJSONRPCError(t *testing.T) {
 	}
 	if resp.Error.Code != codeMethodNotFound {
 		t.Errorf("code = %d, want %d", resp.Error.Code, codeMethodNotFound)
+	}
+}
+
+// TestRunReturnsOnCtxCancel verifies that Server.Run returns promptly when the
+// context is cancelled while the reader is blocked waiting for input. The write
+// end of the pipe stays open so the scan goroutine remains blocked on Read; the
+// ctx cancel must unblock Run independently.
+func TestRunReturnsOnCtxCancel(t *testing.T) {
+	s := New(NewFakeBackend(), Options{})
+
+	// Pipe whose write end we never close during the test body.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Run(ctx, pr, io.Discard)
+	}()
+
+	// Give Run a moment to reach the blocking select, then cancel.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after ctx cancel")
+	}
+}
+
+// TestWriteFileEmptyContent asserts that sandbox_write_file with content=""
+// dispatches to the backend and does not return missing_required_argument.
+func TestWriteFileEmptyContent(t *testing.T) {
+	fb := NewFakeBackend()
+	s := New(fb, Options{})
+
+	resp := callServer(t, s, "tools/call", toolsCallParams{
+		Name:      ToolSandboxWriteFile,
+		Arguments: json.RawMessage(`{"sandbox":"sbx-1","path":"/tmp/empty","content":""}`),
+	})
+	tr := decodeToolResult(t, resp)
+	if tr.IsError {
+		t.Fatalf("expected success for empty content, got error: %+v", tr)
+	}
+
+	calls := fb.RecordedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 backend call, got %d", len(calls))
+	}
+	c := calls[0]
+	if c.Method != "write_file" {
+		t.Errorf("method = %q, want write_file", c.Method)
+	}
+	if c.Content != "" {
+		t.Errorf("content = %q, want empty string", c.Content)
+	}
+}
+
+// TestWriteFileMissingContentStillFails asserts that a genuinely absent content
+// field (not present in JSON at all) still fails validation.
+func TestWriteFileMissingContentStillFails(t *testing.T) {
+	fb := NewFakeBackend()
+	s := New(fb, Options{})
+
+	resp := callServer(t, s, "tools/call", toolsCallParams{
+		Name:      ToolSandboxWriteFile,
+		Arguments: json.RawMessage(`{"sandbox":"sbx-1","path":"/tmp/x"}`),
+	})
+	tr := decodeToolResult(t, resp)
+	e := decodeLLMError(t, tr)
+	if e.Code != "missing_required_argument" {
+		t.Errorf("code = %q, want missing_required_argument", e.Code)
+	}
+	if len(fb.RecordedCalls()) != 0 {
+		t.Errorf("backend should not be called on validation failure")
 	}
 }

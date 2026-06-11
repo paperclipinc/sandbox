@@ -9,8 +9,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 )
+
+// sandboxIDRe is the allowlist for sandbox ids received from tool arguments
+// (LLM-controlled). It matches the same pattern used by daemon/validate.go and
+// firecracker/validate.go: start with alphanumeric, then up to 63 alphanumeric,
+// underscore, or hyphen characters.
+var sandboxIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// validSandboxID reports whether id is an acceptable sandbox id to embed in a
+// URL path. An empty string, any id containing "/" or "..", or any id that does
+// not match the allowlist pattern is rejected.
+func validSandboxID(id string) bool {
+	return sandboxIDRe.MatchString(id)
+}
 
 // HTTPBackend implements SandboxBackend over the standalone sandbox-server REST
 // API (cmd/sandbox-server). It is the simplest real backend: one process, plain
@@ -146,6 +161,9 @@ type execResponse struct {
 // Exec runs command in the sandbox via POST /v1/exec. A timeoutSec of 0 omits
 // the field so the server default applies.
 func (b *HTTPBackend) Exec(ctx context.Context, sandboxID, command string, timeoutSec int) (ExecResult, error) {
+	if !validSandboxID(sandboxID) {
+		return ExecResult{}, fmt.Errorf("exec: invalid sandbox id %q", sandboxID)
+	}
 	reqBody := map[string]any{
 		"sandbox": sandboxID,
 		"command": command,
@@ -166,6 +184,9 @@ type readFileResponse struct {
 
 // ReadFile reads path from the sandbox via POST /v1/files/read.
 func (b *HTTPBackend) ReadFile(ctx context.Context, sandboxID, path string) (string, error) {
+	if !validSandboxID(sandboxID) {
+		return "", fmt.Errorf("read_file: invalid sandbox id %q", sandboxID)
+	}
 	var resp readFileResponse
 	if err := b.do(ctx, http.MethodPost, "/v1/files/read", map[string]any{
 		"sandbox": sandboxID,
@@ -178,6 +199,9 @@ func (b *HTTPBackend) ReadFile(ctx context.Context, sandboxID, path string) (str
 
 // WriteFile writes content to path in the sandbox via POST /v1/files/write.
 func (b *HTTPBackend) WriteFile(ctx context.Context, sandboxID, path, content string) error {
+	if !validSandboxID(sandboxID) {
+		return fmt.Errorf("write_file: invalid sandbox id %q", sandboxID)
+	}
 	return b.do(ctx, http.MethodPost, "/v1/files/write", map[string]any{
 		"sandbox": sandboxID,
 		"path":    path,
@@ -192,7 +216,13 @@ func (b *HTTPBackend) WriteFile(ctx context.Context, sandboxID, path, content st
 // fork-of-a-fork therefore requires that key to resolve to a known template.
 // The richer k8s SandboxFork path (true fork-of-a-running-sandbox) belongs to
 // the future k8s backend. A replicas value below 1 is treated as 1.
+//
+// On a mid-loop failure, the error wraps the already-created ids so callers can
+// terminate them: "fork created [id1 id2] before failing: <cause>".
 func (b *HTTPBackend) Fork(ctx context.Context, sandboxID string, replicas int) ([]string, error) {
+	if !validSandboxID(sandboxID) {
+		return nil, fmt.Errorf("fork: invalid sandbox id %q", sandboxID)
+	}
 	if replicas < 1 {
 		replicas = 1
 	}
@@ -204,7 +234,7 @@ func (b *HTTPBackend) Fork(ctx context.Context, sandboxID string, replicas int) 
 			"template": sandboxID,
 			"id":       id,
 		}, &resp); err != nil {
-			return ids, err
+			return ids, fmt.Errorf("fork created %v before failing: %w", ids, err)
 		}
 		if resp.ID != "" {
 			ids = append(ids, resp.ID)
@@ -215,7 +245,13 @@ func (b *HTTPBackend) Fork(ctx context.Context, sandboxID string, replicas int) 
 	return ids, nil
 }
 
-// Terminate destroys the sandbox via DELETE /v1/sandboxes/{id}.
+// Terminate destroys the sandbox via DELETE /v1/sandboxes/{id}. The sandbox id
+// is validated against the allowlist and path-escaped before being embedded in
+// the URL so an LLM-controlled id cannot redirect the DELETE to an unintended
+// path.
 func (b *HTTPBackend) Terminate(ctx context.Context, sandboxID string) error {
-	return b.do(ctx, http.MethodDelete, "/v1/sandboxes/"+sandboxID, nil, nil)
+	if !validSandboxID(sandboxID) {
+		return fmt.Errorf("terminate: invalid sandbox id %q", sandboxID)
+	}
+	return b.do(ctx, http.MethodDelete, "/v1/sandboxes/"+url.PathEscape(sandboxID), nil, nil)
 }

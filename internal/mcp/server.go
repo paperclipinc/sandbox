@@ -8,6 +8,12 @@ import (
 	"io"
 )
 
+// scanResult carries one line from the scan goroutine or the terminal error.
+type scanResult struct {
+	line []byte
+	err  error
+}
+
 // Protocol and server identity constants.
 const (
 	// protocolVersion is the MCP protocol revision this server speaks.
@@ -106,40 +112,65 @@ type llmError struct {
 	Remediation string `json:"remediation"`
 }
 
-// Run drives the stdio JSON-RPC loop, reading newline-delimited requests from in
-// and writing responses to out until in reaches EOF or ctx is cancelled.
+// Run drives the stdio JSON-RPC loop, reading newline-delimited requests from
+// in and writing responses to out until in reaches EOF or ctx is cancelled.
+//
+// The scan loop runs in a separate goroutine so that a cancelled ctx unblocks
+// promptly without waiting for the next line on the reader. When ctx is
+// cancelled, Run returns ctx.Err() (or nil if EOF and ctx are both done). The
+// scan goroutine will remain blocked on its next Read until the caller closes
+// in (the normal behavior for a stdio process receiving SIGTERM), which is
+// acceptable; the goroutine does not leak any other resources.
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	reader := newFrameReader(in)
 	writer := newFrameWriter(out)
 
+	lines := make(chan scanResult, 1)
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		for {
+			raw, err := reader.Read()
+			select {
+			case lines <- scanResult{line: raw, err: err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case sr := <-lines:
+			if errors.Is(sr.err, io.EOF) {
+				return nil
+			}
+			if sr.err != nil {
+				return fmt.Errorf("read request: %w", sr.err)
+			}
 
-		raw, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read request: %w", err)
-		}
+			var req Request
+			if uerr := json.Unmarshal(sr.line, &req); uerr != nil {
+				// Cannot recover an id from an unparseable request.
+				if werr := writer.Write(errorResponse(nil, codeParseError, "parse error")); werr != nil {
+					return werr
+				}
+				continue
+			}
 
-		var req Request
-		if uerr := json.Unmarshal(raw, &req); uerr != nil {
-			// Cannot recover an id from an unparseable request.
-			if werr := writer.Write(errorResponse(nil, codeParseError, "parse error")); werr != nil {
+			resp, hasResp := s.handle(ctx, &req)
+			if !hasResp {
+				continue // notification: no response
+			}
+			if werr := writer.Write(resp); werr != nil {
 				return werr
 			}
-			continue
-		}
-
-		resp, hasResp := s.handle(ctx, &req)
-		if !hasResp {
-			continue // notification: no response
-		}
-		if werr := writer.Write(resp); werr != nil {
-			return werr
 		}
 	}
 }
@@ -233,11 +264,11 @@ func parseArgs(tool Tool, raw json.RawMessage) (parsedArgs, *llmError) {
 
 	for _, reqField := range tool.InputSchema.Required {
 		v, present := m[reqField]
-		if !present || v == nil || v == "" {
+		if !present || v == nil {
 			return parsedArgs{}, &llmError{
 				Code:        "missing_required_argument",
-				Cause:       fmt.Sprintf("Tool %q requires the %q argument, which was missing or empty.", tool.Name, reqField),
-				Remediation: fmt.Sprintf("Retry the call including a non-empty %q value; see the tool inputSchema for all required fields.", reqField),
+				Cause:       fmt.Sprintf("Tool %q requires the %q argument, which was missing or null.", tool.Name, reqField),
+				Remediation: fmt.Sprintf("Retry the call including a %q value; see the tool inputSchema for all required fields.", reqField),
 			}
 		}
 	}
@@ -305,7 +336,7 @@ func (s *Server) dispatch(ctx context.Context, name string, a parsedArgs) toolRe
 	case ToolSandboxFork:
 		ids, err := s.backend.Fork(ctx, a.sandbox, a.replicas)
 		if err != nil {
-			return backendErrorResult(name, err)
+			return backendForkErrorResult(err)
 		}
 		payload, _ := json.Marshal(ids)
 		return textResult(string(payload))
@@ -349,6 +380,17 @@ func backendErrorResult(tool string, err error) toolResult {
 		Code:        "backend_error",
 		Cause:       fmt.Sprintf("The %s operation failed: %s", tool, err.Error()),
 		Remediation: "Verify the sandbox id and arguments, check sandbox status, and retry; if it persists the backend may be unavailable.",
+	})
+}
+
+// backendForkErrorResult maps a fork backend error to an LLM-legible tool
+// error. The error string is expected to name any partially-created sandbox ids
+// so the LLM can terminate them.
+func backendForkErrorResult(err error) toolResult {
+	return toolErrorResult(llmError{
+		Code:        "backend_error",
+		Cause:       fmt.Sprintf("The %s operation failed: %s", ToolSandboxFork, err.Error()),
+		Remediation: "The error message names any sandbox ids that were created before the failure; terminate them to avoid resource leaks, then retry.",
 	})
 }
 
