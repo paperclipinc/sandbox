@@ -76,6 +76,16 @@ func StartFakeForkdNodeEncRecording(registry *NodeRegistry, nodeName string, tem
 	return stop, rec, err
 }
 
+// StartFakeForkdNodeEncRecordingTLS is StartFakeForkdNodeEncRecording over
+// mTLS: the gRPC listener is terminated by serverTLS and the registered
+// NodeInfo carries clientTLS, so dials to THIS node use TLS. The encryption key
+// delivery guard requires an mTLS node, so the happy-path enc tests run here.
+func StartFakeForkdNodeEncRecordingTLS(registry *NodeRegistry, nodeName string, serverTLS, clientTLS *tls.Config, templates ...string) (stop func(), rec *EncKeyRecorder, err error) {
+	rec = &EncKeyRecorder{}
+	stop, _, _, err = startFakeForkdNodeOpts(registry, nodeName, serverTLS, clientTLS, rec.interceptor(), templates...)
+	return stop, rec, err
+}
+
 // StartFakeForkdNode runs an in-process forkd gRPC server backed by a
 // MockEngine with the given templates, registers it in the registry, and
 // returns a stop function.

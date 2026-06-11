@@ -72,6 +72,16 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 	))
 	defer span.End()
 
+	// Fail closed: an encrypted template's key travels in this request, so the
+	// node connection must be mTLS. Refuse to send the key in cleartext over an
+	// insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI bootstrap
+	// disabled). A plaintext template carries no key and is unaffected.
+	if len(encKey) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
+		err := fmt.Errorf("refusing to deliver the encryption key over an insecure gRPC channel to node %s: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name)
+		span.RecordError(err)
+		return nil, err
+	}
+
 	conn, err := r.NodeRegistry.GetConnection(node.Name)
 	if err != nil {
 		span.RecordError(err)

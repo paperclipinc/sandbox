@@ -365,6 +365,22 @@ func (r *NodeRegistry) GetConnection(nodeName string) (*grpc.ClientConn, error) 
 	return conn, nil
 }
 
+// NodeMTLS reports whether dials to the named node use mTLS, mirroring the
+// transport-credential choice in GetConnection: a per-node NodeInfo.TLS or the
+// registry-level TLS config means the channel is mTLS; both nil means insecure.
+// An unregistered node is reported insecure (false). This is the fail-closed
+// gate for delivering the at-rest encryption key: the key may only be sent over
+// a channel this reports true for.
+func (r *NodeRegistry) NodeMTLS(nodeName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	node, ok := r.nodes[nodeName]
+	if !ok {
+		return false
+	}
+	return node.TLS != nil || r.TLS != nil
+}
+
 // ListNodes returns all registered nodes.
 func (r *NodeRegistry) ListNodes() []*NodeInfo {
 	r.mu.RLock()

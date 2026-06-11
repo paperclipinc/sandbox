@@ -114,6 +114,15 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		if !node.isHealthy() || node.hasSnapshot(templateID) {
 			continue
 		}
+		// Fail closed: an encrypted template's key travels in CreateTemplate, so
+		// the node connection must be mTLS. Refuse to send the key in cleartext
+		// over an insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI
+		// bootstrap disabled); skip the node without setting the key and record
+		// the refusal. A plaintext template carries no key and is unaffected.
+		if len(encKey) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
+			errs = append(errs, fmt.Errorf("node %s: refusing to deliver the encryption key over an insecure gRPC channel: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name))
+			continue
+		}
 		conn, err := r.NodeRegistry.GetConnection(node.Name)
 		if err != nil {
 			errs = append(errs, err)

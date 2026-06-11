@@ -31,7 +31,10 @@ func waitFor(d time.Duration, cond func() bool) bool {
 // is Encrypted causes the controller to create the <template>-enc-key Secret and
 // deliver a non-empty EncryptionKey to forkd's CreateTemplate.
 func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
-	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-node-1")
+	// The key delivery guard requires an mTLS node, so this happy-path test runs
+	// the fake forkd over mTLS.
+	serverTLS, clientTLS := newTestMTLSPair(t)
+	stop, rec, err := controller.StartFakeForkdNodeEncRecordingTLS(testRegistry, "enc-node-1", serverTLS, clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +100,10 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 // TestEncryptedClaimDeliversKeyOnFork proves that a claim against an encrypted
 // template delivers the key in the Fork RPC.
 func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
-	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-node-2", "enc-tmpl-claim")
+	// The key delivery guard requires an mTLS node, so this happy-path test runs
+	// the fake forkd over mTLS.
+	serverTLS, clientTLS := newTestMTLSPair(t)
+	stop, rec, err := controller.StartFakeForkdNodeEncRecordingTLS(testRegistry, "enc-node-2", serverTLS, clientTLS, "enc-tmpl-claim")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +145,106 @@ func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
 	}) {
 		seen, n := rec.ForkKeyLen()
 		t.Fatalf("Fork did not receive a 32-byte key (seen=%v len=%d)", seen, n)
+	}
+}
+
+// TestEncryptedPoolRefusesKeyOverInsecureNode proves the fail-closed delivery
+// guard: an encrypted template targeting a node whose connection is insecure
+// (NodeInfo.TLS nil, registry.TLS nil) is refused. The build does not run, so
+// CreateTemplate never carries the key (the fake forkd records no key), and the
+// pool never reaches Ready.
+func TestEncryptedPoolRefusesKeyOverInsecureNode(t *testing.T) {
+	// An insecure fake node (no serverTLS/clientTLS): dials to it are not mTLS.
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-insecure-node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-tmpl"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	// Give the pool reconciler ample time to run and be refused, then assert the
+	// key was never delivered to the insecure node.
+	time.Sleep(3 * time.Second)
+	if seen, n := rec.CreateTemplateKeyLen(); seen {
+		t.Fatalf("CreateTemplate was called on an insecure node (key delivered, seen=%v len=%d); the guard must refuse before the RPC", seen, n)
+	}
+}
+
+// TestEncryptedClaimRefusesKeyOverInsecureNode proves the fork-path delivery
+// guard: a claim against an encrypted template whose node connection is
+// insecure fails and the Fork RPC never carries the key. The node is seeded
+// with the snapshot so the claim reaches the fork call, where the guard refuses.
+func TestEncryptedClaimRefusesKeyOverInsecureNode(t *testing.T) {
+	stop, rec, err := controller.StartFakeForkdNodeEncRecording(testRegistry, "enc-insecure-node-2", "enc-insecure-claim-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Encrypted: true},
+	}
+	if err := k8sClient.Create(ctx, template); err != nil {
+		t.Fatal(err)
+	}
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim-pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxPoolSpec{
+			TemplateRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-claim-tmpl"},
+			Replicas:    1,
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	claim := &v1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "enc-insecure-claim", Namespace: "default"},
+		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "enc-insecure-claim-pool"}},
+	}
+	if err := k8sClient.Create(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, claim)
+		_ = k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, template)
+	})
+
+	// The claim must fail (the fork is refused over the insecure channel), and the
+	// Fork RPC must never have carried the key.
+	if !waitFor(15*time.Second, func() bool {
+		var got v1alpha1.SandboxClaim
+		if k8sClient.Get(ctx, types.NamespacedName{Name: "enc-insecure-claim", Namespace: "default"}, &got) != nil {
+			return false
+		}
+		return got.Status.Phase == v1alpha1.SandboxFailed
+	}) {
+		t.Fatal("encrypted claim against an insecure node did not fail; the fork-path guard must refuse to deliver the key")
+	}
+	if seen, n := rec.ForkKeyLen(); seen {
+		t.Fatalf("Fork was called on an insecure node (key delivered, seen=%v len=%d); the guard must refuse before the RPC", seen, n)
 	}
 }
 
