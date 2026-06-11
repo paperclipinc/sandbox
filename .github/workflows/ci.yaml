@@ -132,6 +132,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -f Dockerfile.controller -t agent-run-controller:ci .
       - run: docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+      # The husk-stub image runs the dormant VMM inside each husk pod (the
+      # pod-native default, issue #18). It is referenced by the controller
+      # Deployment's --husk-stub-image, so it must build cleanly here.
+      - run: docker build -f Dockerfile.husk-stub -t agent-run-husk-stub:ci .
 
   kind-e2e:
     runs-on: ubuntu-latest

@@ -1,7 +1,10 @@
 # Dev controller: mock control plane on kind, no KVM, no PKI.
 # --disable-pki-bootstrap makes the controller dial forkd over insecure gRPC,
-# matching the no-TLS dev forkd. --mock is a documented no-op (mock mode lives in
-# forkd). A single replica is enough for local dev.
+# matching the no-TLS dev forkd. --mock forces the raw-forkd run path (the
+# pod-native husk-pods default needs real KVM nodes, which the kind/no-KVM dev
+# path lacks); --enable-raw-forkd is passed too as belt and suspenders so the
+# dev overlay is explicit about running fork-per-claim, not husk pods. A single
+# replica is enough for local dev.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +34,7 @@ spec:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
             - --mock
+            - --enable-raw-forkd
             - --disable-pki-bootstrap
           ports:
             - name: metrics
