@@ -160,19 +160,113 @@ func TestExtractImageRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
-func TestSymlinkStaysInside(t *testing.T) {
-	dest := "/var/lib/root"
+func TestExtractImageBlocksWriteThroughSymlinkedParent(t *testing.T) {
+	// Classic parent-symlink-traversal: an earlier entry creates a directory
+	// symlink that points outside destDir, then a later entry writes a file
+	// "through" that symlink (a/x). A lexical join would happily write to
+	// a/x and follow the symlink at extraction time, landing outside destDir.
+	// SecureJoin resolves the symlinked parent on disk and must keep the write
+	// inside destDir (or reject it), never touching the escape target.
+	outside := t.TempDir()
+	escapeDir := filepath.Join(outside, "escape")
 
-	if !symlinkStaysInside(dest, filepath.Join(dest, "bin/sh"), "busybox") {
+	img := imageFromEntries(t, []tarEntry{
+		{name: "a", typeflag: tar.TypeSymlink, linkname: escapeDir},
+		{name: "a/x", typeflag: tar.TypeReg, mode: 0o644, body: "pwned"},
+	})
+
+	dest := t.TempDir()
+	// The symlink entry itself must be rejected (absolute target), so the
+	// write-through never gets a symlinked parent to follow.
+	if err := ExtractImage(img, dest); err == nil {
+		t.Fatal("ExtractImage accepted a symlinked-parent write-through, want error")
+	}
+
+	// Nothing may be written through the escaping symlink.
+	if _, err := os.Stat(filepath.Join(escapeDir, "x")); !os.IsNotExist(err) {
+		t.Fatalf("write-through symlink landed outside destDir at %s (err=%v)", filepath.Join(escapeDir, "x"), err)
+	}
+}
+
+func TestExtractImageBlocksWriteThroughRelativeSymlinkedParent(t *testing.T) {
+	// Same class, but the symlinked parent uses a relative target that escapes
+	// destDir via "..". mutate.Extract strips "../" symlink targets, so this
+	// test drives extractEntry directly to exercise the on-disk guard without
+	// the flattening layer scrubbing the target first.
+	dest := t.TempDir()
+	sibling := filepath.Join(filepath.Dir(dest), "ociroot-escape-sibling")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(sibling) }()
+
+	// "a" -> "../ociroot-escape-sibling" (escapes dest).
+	rel := filepath.Join("..", filepath.Base(sibling))
+	linkHdr := &tar.Header{Name: "a", Typeflag: tar.TypeSymlink, Linkname: rel}
+	if err := extractEntry(dest, nil, linkHdr); err == nil {
+		t.Fatal("extractEntry accepted an escaping relative symlink, want error")
+	}
+
+	// Even if a later writer targets a/x, SecureJoin must keep it inside dest.
+	body := "pwned"
+	fileHdr := &tar.Header{Name: "a/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}
+	_ = extractEntry(dest, bytes.NewReader([]byte(body)), fileHdr)
+	if _, err := os.Stat(filepath.Join(sibling, "x")); !os.IsNotExist(err) {
+		t.Fatalf("write-through relative symlink landed outside destDir at %s (err=%v)", filepath.Join(sibling, "x"), err)
+	}
+}
+
+func TestExtractEntryResolvesWriteThroughInTreeSymlinkedParent(t *testing.T) {
+	// An in-tree directory symlink (real -> realdir) exists, then a later entry
+	// writes through it (real/x). secureJoin must resolve the symlinked parent
+	// on disk so the write lands at realdir/x, inside destDir, and never
+	// escapes. This drives extractEntry directly to exercise the SecureJoin
+	// on-disk walk on the accept path, independent of how mutate.Extract may
+	// reorder or scrub write-through entries during flattening.
+	dest := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dest, "realdir"), 0o755); err != nil {
+		t.Fatalf("mkdir realdir: %v", err)
+	}
+	if err := os.Symlink("realdir", filepath.Join(dest, "real")); err != nil {
+		t.Fatalf("symlink real: %v", err)
+	}
+
+	body := "inside"
+	hdr := &tar.Header{Name: "real/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}
+	if err := extractEntry(dest, bytes.NewReader([]byte(body)), hdr); err != nil {
+		t.Fatalf("extractEntry: %v", err)
+	}
+
+	// The write must have resolved through the symlink into realdir.
+	got, err := os.ReadFile(filepath.Join(dest, "realdir", "x"))
+	if err != nil {
+		t.Fatalf("read realdir/x: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("realdir/x = %q, want %q", got, body)
+	}
+}
+
+func TestSymlinkTargetStaysInside(t *testing.T) {
+	// Use a real temp dir because symlinkTargetStaysInside resolves on disk.
+	dest := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dest, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dest, "a", "b"), 0o755); err != nil {
+		t.Fatalf("mkdir a/b: %v", err)
+	}
+
+	if !symlinkTargetStaysInside(dest, filepath.Join(dest, "bin/sh"), "busybox") {
 		t.Error("relative in-tree symlink target rejected")
 	}
-	if !symlinkStaysInside(dest, filepath.Join(dest, "a/b/link"), "../c/file") {
+	if !symlinkTargetStaysInside(dest, filepath.Join(dest, "a/b/link"), "../c/file") {
 		t.Error("relative target that stays inside rejected")
 	}
-	if symlinkStaysInside(dest, filepath.Join(dest, "evil"), "/etc/passwd") {
+	if symlinkTargetStaysInside(dest, filepath.Join(dest, "evil"), "/etc/passwd") {
 		t.Error("absolute symlink target accepted")
 	}
-	if symlinkStaysInside(dest, filepath.Join(dest, "evil"), "../../etc/passwd") {
+	if symlinkTargetStaysInside(dest, filepath.Join(dest, "evil"), "../../etc/passwd") {
 		t.Error("relative target escaping dest accepted")
 	}
 }

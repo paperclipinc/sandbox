@@ -10,8 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
+	securejoin "github.com/cyphar/filepath-securejoin"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
@@ -20,45 +20,78 @@ import (
 // mount the standard pseudo filesystems and the workspace volume.
 var mountPoints = []string{"proc", "sys", "dev", "tmp", "run", "workspace"}
 
-// secureJoin joins entryName onto destDir and guarantees the result stays
-// inside destDir. It rejects absolute paths and any cleaned path that escapes
-// destDir via "..". Image tars are untrusted input, so this is the single
-// chokepoint every extracted path must pass through.
+// secureJoin resolves entryName against destDir and returns an on-disk path
+// guaranteed to stay inside destDir even when a parent component is an
+// already-extracted symlink. It first rejects the obviously malicious shapes
+// (absolute names, and names that lexically escape via "..") so callers get a
+// hard error instead of a silently clamped path, then delegates to
+// filepath-securejoin, which walks the remaining path on disk and resolves any
+// existing symlink components against destDir. That on-disk walk is what closes
+// the parent-symlink-traversal gap a purely lexical join cannot: an earlier
+// entry that created a symlinked directory can no longer be written through.
+// Image tars are untrusted input, so this is the single chokepoint every
+// extracted path must pass through.
 func secureJoin(destDir, entryName string) (string, error) {
 	if filepath.IsAbs(entryName) {
 		return "", fmt.Errorf("ociroot: absolute path entry rejected: %q", entryName)
 	}
-	joined := filepath.Join(destDir, entryName)
-	// Clean destDir for a stable prefix comparison.
-	cleanDest := filepath.Clean(destDir)
-	rel, err := filepath.Rel(cleanDest, joined)
-	if err != nil {
-		return "", fmt.Errorf("ociroot: cannot relativize entry %q: %w", entryName, err)
+	if escapesLexically(destDir, filepath.Join(destDir, entryName)) {
+		return "", fmt.Errorf("ociroot: path traversal entry rejected: %q", entryName)
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	joined, err := securejoin.SecureJoin(destDir, entryName)
+	if err != nil {
+		return "", fmt.Errorf("ociroot: secure join entry %q: %w", entryName, err)
+	}
+	if escapesLexically(destDir, joined) {
 		return "", fmt.Errorf("ociroot: path traversal entry rejected: %q", entryName)
 	}
 	return joined, nil
 }
 
-// symlinkStaysInside reports whether a symlink at linkPath pointing to target
-// would resolve to a location inside destDir. Relative targets are resolved
-// against the link's own directory; absolute targets are rejected because they
-// would point at the host filesystem when the rootfs is mounted elsewhere.
-func symlinkStaysInside(destDir, linkPath, target string) bool {
+// symlinkTargetStaysInside reports whether a symlink whose on-disk location is
+// linkPath (already resolved through secureJoin) and whose stored target is
+// target would, when followed, resolve to a location inside destDir. Absolute
+// targets are rejected outright because they would point at the host
+// filesystem when the rootfs is mounted elsewhere. Relative targets are
+// resolved both lexically (to reject an escaping "..") and through SecureJoin
+// from the link's own directory (to resolve any symlinked parent on disk);
+// the symlink is accepted only when both agree it stays inside destDir.
+func symlinkTargetStaysInside(destDir, linkPath, target string) bool {
 	if filepath.IsAbs(target) {
 		return false
 	}
-	resolved := filepath.Join(filepath.Dir(linkPath), target)
-	cleanDest := filepath.Clean(destDir)
-	rel, err := filepath.Rel(cleanDest, resolved)
-	if err != nil {
+	// Lexical check: a relative target may legitimately use ".." to climb
+	// within destDir, but it must not climb above it.
+	lexical := filepath.Join(filepath.Dir(linkPath), target)
+	if escapesLexically(destDir, lexical) {
 		return false
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	// On-disk check: resolve the link's directory relative to destDir and
+	// SecureJoin the target so a symlinked parent cannot redirect the result
+	// outside destDir.
+	linkDirRel, err := filepath.Rel(filepath.Clean(destDir), filepath.Dir(linkPath))
+	if err != nil || linkDirRel == ".." || hasDotDotPrefix(linkDirRel) {
+		return false
+	}
+	resolved, err := securejoin.SecureJoin(destDir, filepath.Join(linkDirRel, target))
+	if err != nil || escapesLexically(destDir, resolved) {
 		return false
 	}
 	return true
+}
+
+// escapesLexically reports whether the cleaned path p falls outside destDir.
+func escapesLexically(destDir, p string) bool {
+	rel, err := filepath.Rel(filepath.Clean(destDir), p)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || hasDotDotPrefix(rel)
+}
+
+// hasDotDotPrefix reports whether p starts with a ".." path component.
+func hasDotDotPrefix(p string) bool {
+	return len(p) >= 3 && p[0] == '.' && p[1] == '.' && p[2] == os.PathSeparator
 }
 
 // ExtractImage flattens img with mutate.Extract and untars the result into
@@ -89,7 +122,7 @@ func ExtractImage(img v1.Image, destDir string) error {
 	return nil
 }
 
-func extractEntry(destDir string, tr *tar.Reader, hdr *tar.Header) error {
+func extractEntry(destDir string, tr io.Reader, hdr *tar.Header) error {
 	target, err := secureJoin(destDir, hdr.Name)
 	if err != nil {
 		return err
@@ -112,7 +145,7 @@ func extractEntry(destDir string, tr *tar.Reader, hdr *tar.Header) error {
 		applyOwnership(target, hdr)
 
 	case tar.TypeSymlink:
-		if !symlinkStaysInside(destDir, target, hdr.Linkname) {
+		if !symlinkTargetStaysInside(destDir, target, hdr.Linkname) {
 			return fmt.Errorf("ociroot: symlink %q -> %q escapes dest dir", hdr.Name, hdr.Linkname)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {

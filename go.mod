@@ -3,6 +3,7 @@ module github.com/paperclipinc/sandbox
 go 1.24.0
 
 require (
+	github.com/cyphar/filepath-securejoin v0.6.1
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-containerregistry v0.20.6
 	github.com/prometheus/client_golang v1.20.5
@@ -52,7 +53,6 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/vbatts/tar-split v0.12.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
