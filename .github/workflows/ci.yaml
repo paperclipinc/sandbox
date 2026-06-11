@@ -188,6 +188,18 @@ jobs:
         # a no-KVM node is the correct, honest behavior.
         run: |
           set -euo pipefail
+          # On any failure below, dump pod state, the DaemonSet description, and
+          # all-container logs so the root cause is visible in the log (the
+          # rollout gate alone reports only "N of M updated pods are available"
+          # and hides why the pods never became Ready).
+          dump_diagnostics() {
+            echo "=== device-plugin diagnostics ==="
+            kubectl -n agent-run get pods -o wide || true
+            kubectl -n agent-run describe ds agent-run-kvm-device-plugin || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin \
+              --tail=50 --all-containers || true
+          }
+          trap 'dump_diagnostics' ERR
           kubectl -n agent-run rollout status daemonset/agent-run-kvm-device-plugin --timeout=180s
           sleep 15
           restarts=$(kubectl -n agent-run get pods \

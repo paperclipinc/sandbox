@@ -26,9 +26,13 @@ import (
 	"github.com/paperclipinc/sandbox/internal/deviceplugin"
 )
 
-// kvmDevicePath is the host device node the plugin probes for presence and
-// injects into requesting containers.
-const kvmDevicePath = "/dev/kvm"
+// defaultKVMDevicePath is the default container path the plugin stat(2)s to
+// decide whether KVM is present. The DaemonSet mounts the host /dev read-only
+// at /host-dev (NOT at the container's own /dev: mounting a read-only /dev over
+// the container root shadows the kubelet-created /dev/termination-log and makes
+// the container fail to start), so the host /dev/kvm is visible at
+// /host-dev/kvm. Overridable with --kvm-device-path.
+const defaultKVMDevicePath = "/host-dev/kvm"
 
 // defaultDeviceCount is the number of synthetic slots advertised when /dev/kvm
 // is present and --device-count is left at 0 (auto). /dev/kvm is shareable, so
@@ -38,21 +42,24 @@ const defaultDeviceCount = 100
 
 func main() {
 	var (
-		resourceName string
-		deviceCount  int
-		devicePaths  string
-		kubeletDir   string
+		resourceName  string
+		deviceCount   int
+		devicePaths   string
+		kubeletDir    string
+		kvmDevicePath string
 	)
 	flag.StringVar(&resourceName, "resource-name", "agentrun.dev/kvm", "Extended resource name the plugin advertises; pods request it under resources.limits")
 	flag.IntVar(&deviceCount, "device-count", 0, "Number of synthetic device slots to advertise when /dev/kvm is present; 0 means auto (a sane default). /dev/kvm is shareable, so this is a soft per-node concurrency cap, not a physical device count")
 	flag.StringVar(&devicePaths, "device-paths", "/dev/kvm,/dev/net/tun", "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw)")
 	flag.StringVar(&kubeletDir, "kubelet-dir", "/var/lib/kubelet/device-plugins", "Kubelet device-plugins directory: the plugin serves its socket here and dials the kubelet registry socket (kubelet.sock) here")
+	flag.StringVar(&kvmDevicePath, "kvm-device-path", defaultKVMDevicePath, "Container path the plugin stat(2)s to decide whether KVM is present; the DaemonSet mounts the host /dev read-only here (not over the container /dev)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	// kvmPresent probes the host /dev/kvm at each ListAndWatch call. A node
-	// without it advertises zero (honest scheduler truth).
+	// kvmPresent probes the host /dev/kvm (visible at kvmDevicePath via the
+	// read-only /dev mount) at each ListAndWatch call. A node without it
+	// advertises zero (honest scheduler truth).
 	kvmPresent := func() bool {
 		_, err := os.Stat(kvmDevicePath)
 		return err == nil

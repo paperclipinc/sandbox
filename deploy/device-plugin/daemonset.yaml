@@ -45,6 +45,12 @@ spec:
             - --device-count=0
             - --device-paths=/dev/kvm,/dev/net/tun
             - --kubelet-dir=/var/lib/kubelet/device-plugins
+            # Probe the host /dev/kvm at /host-dev/kvm: the host /dev is mounted
+            # read-only at /host-dev (NOT over the container's own /dev). A
+            # read-only /dev mounted at /dev shadows the kubelet-created
+            # /dev/termination-log and makes the container fail to start
+            # (RunContainerError), so the mount is kept off the container /dev.
+            - --kvm-device-path=/host-dev/kvm
           # Minimal privileges. This is NOT the privileged forkd: it needs only
           # to (1) write its plugin socket into the kubelet device-plugins dir
           # and dial kubelet.sock there, and (2) stat /dev/kvm to decide whether
@@ -75,11 +81,15 @@ spec:
             # the one hostPath the plugin requires.
             - name: device-plugins
               mountPath: /var/lib/kubelet/device-plugins
-            # /dev mounted read-only so the plugin can stat /dev/kvm to decide
-            # whether KVM is present. Read-only: the plugin never creates device
-            # nodes (the kubelet injects /dev/kvm into requesting containers).
+            # Host /dev mounted read-only at /host-dev (NOT at the container's
+            # own /dev) so the plugin can stat /host-dev/kvm to decide whether
+            # KVM is present. Mounting a read-only /dev over the container root
+            # would shadow the kubelet-created /dev/termination-log and break
+            # container start; /host-dev avoids that. Read-only: the plugin
+            # never creates device nodes (the kubelet injects /dev/kvm into
+            # requesting containers on Allocate).
             - name: dev
-              mountPath: /dev
+              mountPath: /host-dev
               readOnly: true
       volumes:
         - name: device-plugins
