@@ -24,6 +24,22 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   (Pss/Rss + cgroup-v2 accounting test). Deliverable: `docs/husk-pods.md` +
   device plugin + stub + migrated controllers + before/after benchmarks.
   Raw-forkd mode stays behind a flag.
+  - ✅ Load-bearing claim verified: CoW page sharing survives cgroup v2 memcg
+    boundaries, measured in CI. The `husk-probe` phase
+    (`.github/workflows/kvm-test.yaml`) forks 4 sandboxes from one snapshot into
+    4 separate cgroup v2 memory controllers and proves (gated on `CoWSurvives`)
+    that the shared snapshot set is counted ~once across the memcgs while each
+    fork's private dirty is charged to its own memcg. `docs/husk-pods.md` records
+    the cgroup v2 charging model, the measured numbers, and the honest
+    first-faulter nuance (fair per-tenant accounting uses the CoW-aware metering
+    #33, not raw `memory.current`).
+  - ⬜ Still open (rest of #18): the `/dev/kvm` device plugin (vs privileged),
+    the dormant-VMM stub binary + control channel, migrating the pool/claim/fork
+    controllers to husk pods, the conformance suite (scheduler truth,
+    ResourceQuota/LimitRange, NetworkPolicy/PSA-restricted, `kubectl get pods`,
+    eviction/preemption/PDB/drain), and the P99 claim-to-first-exec <= 10ms
+    warm-pool benchmark delta. Sandboxes are NOT pods today; this milestone
+    verified the precondition for the migration, it did not perform it.
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
   SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
   their e2e suite into CI, document justified exceptions in
