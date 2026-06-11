@@ -52,6 +52,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Update status
+	setPoolReadySnapshots(pool.Name, readySnapshots)
 	pool.Status.ReadySnapshots = readySnapshots
 	pool.Status.TotalSnapshots = readySnapshots
 	pool.Status.NodeDistribution = r.nodeDistribution(templateID)

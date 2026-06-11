@@ -189,6 +189,7 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 				logger.Error(err, "terminate orphan sandbox", "node", node.Name, "sandbox", sb.SandboxId)
 				continue
 			}
+			recordOrphanSweep()
 			logger.Info("terminated orphan sandbox", "node", node.Name, "sandbox", sb.SandboxId)
 		}
 	}

@@ -82,6 +82,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		logger.Error(err, "no node with ready snapshot")
 		claim.Status.Phase = v1alpha1.SandboxPending
+		recordClaimPending()
 		// Best-effort status write; the return below already requeues or surfaces the error.
 		_ = r.Status().Update(ctx, &claim)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
@@ -96,6 +97,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "secret")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
@@ -136,6 +138,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 		logger.Error(err, "fork failed", "node", node.Name)
+		recordClaimError(claim.Spec.PoolRef.Name, "fork")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
@@ -152,6 +155,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// retry the Secret. The token exists only in this Secret.
 	if err := ensureSandboxTokenSecret(ctx, r.Client, &claim, claim.Name+tokenSecretSuffix, apiToken, result.Endpoint); err != nil {
 		logger.Error(err, "token secret write failed")
+		recordClaimError(claim.Spec.PoolRef.Name, "token")
 		now := metav1.Now()
 		claim.Status.Phase = v1alpha1.SandboxFailed
 		// Stamp FinishedAt so the GC TTL pass can reap this terminal claim;
