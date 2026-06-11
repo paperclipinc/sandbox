@@ -192,7 +192,9 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 - 🔨 Clock resync after restore (NotifyForked steps CLOCK_REALTIME from the
   host wall clock, 500ms tolerance); kvm-test asserts each fork wall clock
   within 2s of the runner (post-snapshot TLS cert validation follow-up)
-- ⬜ Live-fork secret policy: reject without `allowSecretInheritance: true`
+- ✅ Live-fork secret policy: a fork of a secret-holding claim is rejected
+  without `allowSecretInheritance: true`, with a `SecretInheritanceDenied`
+  condition; envtest-proven in internal/controller/fork_secrets_test.go.
 - 🔨 Firecracker under jailer (per-VM UID, chroot, cgroup); forkd drops
   `privileged: true` for an explicit capability list (implemented; kvm-test
   jailer-boot phase restores a snapshot under the jailer to prove the
