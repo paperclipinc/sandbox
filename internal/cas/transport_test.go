@@ -60,7 +60,7 @@ func TestPullInProcessDeltaOnly(t *testing.T) {
 	storeA := newStore(t)
 	storeB := newStore(t)
 
-	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, "v1", 1000)
+	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, Metadata{VMMVersion: "v1", CreatedUnix: 1000})
 	if err != nil {
 		t.Fatalf("PutSnapshot A: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestPullInProcessDeltaOnly(t *testing.T) {
 	// disk chunks should transfer.
 	newDiskData := bytes.Repeat([]byte{0x33}, 6<<20)
 	newDisk := writeFile(t, srcA, "disk2", newDiskData)
-	mA2, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": newDisk}, "v1", 1001)
+	mA2, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": newDisk}, Metadata{VMMVersion: "v1", CreatedUnix: 1001})
 	if err != nil {
 		t.Fatalf("PutSnapshot A2: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestPullOverHTTPDeltaOnlyAndByteIdentical(t *testing.T) {
 	storeA := newStore(t)
 	storeB := newStore(t)
 
-	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, "v1", 2000)
+	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": disk}, Metadata{VMMVersion: "v1", CreatedUnix: 2000})
 	if err != nil {
 		t.Fatalf("PutSnapshot A: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestPullOverHTTPDeltaOnlyAndByteIdentical(t *testing.T) {
 	// Delta-only over HTTP: second snapshot shares mem.
 	newDiskData := bytes.Repeat([]byte{0x66}, 5<<20)
 	newDisk := writeFile(t, srcA, "disk2", newDiskData)
-	mA2, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": newDisk}, "v1", 2001)
+	mA2, err := storeA.PutSnapshot(map[string]string{"mem": mem, "disk": newDisk}, Metadata{VMMVersion: "v1", CreatedUnix: 2001})
 	if err != nil {
 		t.Fatalf("PutSnapshot A2: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestPullRejectsTamperedChunk(t *testing.T) {
 
 	storeA := newStore(t)
 	storeB := newStore(t)
-	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem}, "v1", 3000)
+	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 3000})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPullRejectsTamperedChunkOverHTTP(t *testing.T) {
 
 	storeA := newStore(t)
 	storeB := newStore(t)
-	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem}, "v1", 4000)
+	mA, err := storeA.PutSnapshot(map[string]string{"mem": mem}, Metadata{VMMVersion: "v1", CreatedUnix: 4000})
 	if err != nil {
 		t.Fatalf("PutSnapshot: %v", err)
 	}

@@ -16,11 +16,28 @@ type FileEntry struct {
 	Chunks []ChunkRef
 }
 
+// CurrentSnapshotFormatVersion is the snapshot compatibility format version this
+// build produces and can restore. It is stamped into every manifest at template
+// build and checked on load (see internal/snapcompat). Bump it whenever the
+// snapshot layout or restore contract changes incompatibly.
+const CurrentSnapshotFormatVersion = 1
+
 // Manifest describes a complete snapshot as a set of files plus metadata.
+//
+// SnapshotFormatVersion, VMMVersion, CPUModel, and KernelVersion describe the
+// environment that produced the snapshot. They are part of the content-addressed
+// digest on purpose: the producing environment is part of a snapshot's identity,
+// so a snapshot built under a different Firecracker or CPU never collides with
+// one built here. ConfigHash binds the snapshot to the microvm machine config it
+// was captured under.
 type Manifest struct {
-	Files       []FileEntry
-	VMMVersion  string
-	CreatedUnix int64
+	Files                 []FileEntry
+	VMMVersion            string
+	CreatedUnix           int64
+	SnapshotFormatVersion int
+	CPUModel              string
+	KernelVersion         string
+	ConfigHash            string
 }
 
 // Canonical returns a deterministic byte encoding of the manifest. Files are
@@ -33,6 +50,17 @@ func (m Manifest) Canonical() []byte {
 
 	var buf bytes.Buffer
 	buf.WriteByte('{')
+
+	// Fixed field order, alphabetical by JSON key, so the encoding never depends
+	// on struct or map iteration order. Keep this order stable: it is part of the
+	// content-addressed digest.
+	buf.WriteString(`"configHash":`)
+	writeJSONString(&buf, m.ConfigHash)
+	buf.WriteByte(',')
+
+	buf.WriteString(`"cpuModel":`)
+	writeJSONString(&buf, m.CPUModel)
+	buf.WriteByte(',')
 
 	buf.WriteString(`"createdUnix":`)
 	writeJSONInt(&buf, m.CreatedUnix)
@@ -64,6 +92,14 @@ func (m Manifest) Canonical() []byte {
 	}
 	buf.WriteString(`],`)
 
+	buf.WriteString(`"kernelVersion":`)
+	writeJSONString(&buf, m.KernelVersion)
+	buf.WriteByte(',')
+
+	buf.WriteString(`"snapshotFormatVersion":`)
+	writeJSONInt(&buf, int64(m.SnapshotFormatVersion))
+	buf.WriteByte(',')
+
 	buf.WriteString(`"vmmVersion":`)
 	writeJSONString(&buf, m.VMMVersion)
 
@@ -87,10 +123,24 @@ func (m Manifest) Digest() Digest {
 	return digestBytes(m.Canonical())
 }
 
+// Metadata carries the non-file manifest fields a caller stamps when building a
+// snapshot: the producing environment (format version, Firecracker, CPU, kernel),
+// the machine config hash, and the build time. All of these except CreatedUnix
+// are part of the content-addressed digest; CreatedUnix is recorded for humans
+// and is conventionally fixed at 0 for reproducible template digests.
+type Metadata struct {
+	SnapshotFormatVersion int
+	VMMVersion            string
+	CPUModel              string
+	KernelVersion         string
+	ConfigHash            string
+	CreatedUnix           int64
+}
+
 // BuildManifest chunks each file in the name to path map and assembles a
 // manifest. The manifest is deterministic in the input map: file order does
 // not affect the resulting digest.
-func BuildManifest(files map[string]string, vmmVersion string, createdUnix int64) (Manifest, error) {
+func BuildManifest(files map[string]string, meta Metadata) (Manifest, error) {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
@@ -115,9 +165,20 @@ func BuildManifest(files map[string]string, vmmVersion string, createdUnix int64
 		})
 	}
 
+	return manifestFrom(entries, meta), nil
+}
+
+// manifestFrom assembles a Manifest from file entries and metadata. It is the
+// single place that maps Metadata onto the manifest fields, so BuildManifest and
+// the store's PutSnapshot stay in lockstep.
+func manifestFrom(entries []FileEntry, meta Metadata) Manifest {
 	return Manifest{
-		Files:       entries,
-		VMMVersion:  vmmVersion,
-		CreatedUnix: createdUnix,
-	}, nil
+		Files:                 entries,
+		VMMVersion:            meta.VMMVersion,
+		CreatedUnix:           meta.CreatedUnix,
+		SnapshotFormatVersion: meta.SnapshotFormatVersion,
+		CPUModel:              meta.CPUModel,
+		KernelVersion:         meta.KernelVersion,
+		ConfigHash:            meta.ConfigHash,
+	}
 }

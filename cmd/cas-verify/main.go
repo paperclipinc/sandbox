@@ -144,7 +144,7 @@ func runPut(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func runCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}
@@ -223,7 +223,7 @@ func runTamperCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := store.PutSnapshot(files, c.vmmVersion, 0)
+	m, err := store.PutSnapshot(files, cas.Metadata{VMMVersion: c.vmmVersion})
 	if err != nil {
 		return err
 	}

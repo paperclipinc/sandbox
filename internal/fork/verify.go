@@ -64,9 +64,9 @@ func templateSnapshotFiles(dataDir, id string) map[string]string {
 // from the same on-disk bytes yields the same digest. The CAS createdUnix is
 // fixed at 0 here for that reason; build time is not part of the snapshot
 // identity.
-func recordTemplateDigest(store *cas.Store, dataDir, id, vmmVersion string) (cas.Digest, error) {
+func recordTemplateDigest(store *cas.Store, dataDir, id string, meta cas.Metadata) (cas.Digest, error) {
 	files := templateSnapshotFiles(dataDir, id)
-	m, err := store.PutSnapshot(files, vmmVersion, 0)
+	m, err := store.PutSnapshot(files, meta)
 	if err != nil {
 		return "", fmt.Errorf("content-address template %s: %w", id, err)
 	}
@@ -89,15 +89,16 @@ func recordTemplateDigest(store *cas.Store, dataDir, id, vmmVersion string) (cas
 // and does NOT write the marker. This is the verify-on-load gate used for
 // templates this process did not build (e.g. discovered on disk after a
 // restart).
-func verifyTemplate(dataDir, id, vmmVersion string) (cas.Digest, error) {
+func verifyTemplate(dataDir, id string, meta cas.Metadata) (cas.Digest, error) {
 	want, err := readDigestFile(dataDir, id)
 	if err != nil {
 		return "", fmt.Errorf("read recorded digest for template %s: %w", id, err)
 	}
 	files := templateSnapshotFiles(dataDir, id)
 	// Same neutral metadata as recordTemplateDigest so the digest reflects
-	// the on-disk bytes alone and is reproducible across processes.
-	m, err := cas.BuildManifest(files, vmmVersion, 0)
+	// the on-disk bytes (and stamped environment) alone and is reproducible
+	// across processes.
+	m, err := cas.BuildManifest(files, meta)
 	if err != nil {
 		return "", fmt.Errorf("re-derive manifest for template %s: %w", id, err)
 	}

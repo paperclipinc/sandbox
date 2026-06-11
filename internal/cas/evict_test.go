@@ -41,7 +41,7 @@ func TestEvictToFitRespectsPinAndLRU(t *testing.T) {
 		bytes.Repeat([]byte{0xA2}, ChunkSize)...,
 	)
 	pf := writeFile(t, src, "pinned", pinnedData)
-	pinnedM, err := store.PutSnapshot(map[string]string{"mem": pf}, "v1", 1)
+	pinnedM, err := store.PutSnapshot(map[string]string{"mem": pf}, Metadata{VMMVersion: "v1", CreatedUnix: 1})
 	if err != nil {
 		t.Fatalf("PutSnapshot pinned: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestEvictToFitRespectsPinAndLRU(t *testing.T) {
 		bytes.Repeat([]byte{0xB3}, ChunkSize),
 	}, nil)
 	uf := writeFile(t, src, "unpinned", unpinnedData)
-	unpinnedM, err := store.PutSnapshot(map[string]string{"mem": uf}, "v1", 2)
+	unpinnedM, err := store.PutSnapshot(map[string]string{"mem": uf}, Metadata{VMMVersion: "v1", CreatedUnix: 2})
 	if err != nil {
 		t.Fatalf("PutSnapshot unpinned: %v", err)
 	}

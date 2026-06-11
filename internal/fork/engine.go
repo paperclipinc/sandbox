@@ -525,6 +525,14 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	return e, nil
 }
 
+// manifestMetadata builds the CAS manifest metadata stamped into a template's
+// snapshot manifest. CreatedUnix is fixed at 0 so the digest is a pure content
+// address (build time is not part of the snapshot identity). Task 2 expands this
+// to stamp the detected environment and the config hash.
+func (e *Engine) manifestMetadata(_ firecracker.VMConfig) cas.Metadata {
+	return cas.Metadata{VMMVersion: e.vmmVersion}
+}
+
 func validateKVM() error {
 	info, err := os.Stat("/dev/kvm")
 	if err != nil {
@@ -972,7 +980,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	if err := e.runTemplateBuild(id, cfg, initCommands); err != nil {
 		return err
 	}
-	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.vmmVersion)
+	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))
 	if err != nil {
 		return fmt.Errorf("record template %s digest: %w", id, err)
 	}
@@ -990,7 +998,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 // discovered on disk after a forkd restart. It is intentionally NOT called per
 // fork: see verify.go for the verify-once-at-registration rationale.
 func (e *Engine) VerifyTemplate(id string) error {
-	d, err := verifyTemplate(e.dataDir, id, e.vmmVersion)
+	d, err := verifyTemplate(e.dataDir, id, e.manifestMetadata(firecracker.DefaultVMConfig()))
 	if err != nil {
 		return err
 	}
