@@ -162,13 +162,31 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     fully pod-native snapshot delivery (CAS pull into the pod) plus removing forkd
     entirely (it stays the builder).
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
-  SIG `agent-sandbox` API (`agents.x-k8s.io/v1beta1`) on our engine; vendor
-  their e2e suite into CI, document justified exceptions in
-  `docs/facade-conformance.md`, never silently diverge. Depends on W1 (their
-  API implies pod semantics). Includes the naming-collision ADR
-  (our SandboxTemplate/SandboxClaim vs theirs; rename to
-  ForkTemplate/ForkClaim/ForkPool is the preferred candidate; decide before
-  1.0).
+  SIG `agent-sandbox` API (`agents.x-k8s.io/v1alpha1`, the real group/version;
+  the issue text guessed v1beta1) on our engine; vendor their e2e suite into
+  CI, document justified exceptions in `docs/facade-conformance.md`, never
+  silently diverge. Depends on W1 (their API implies pod semantics).
+  - ✅ FOUNDATION (slice 1, this slice): the facade controller maps an upstream
+    `Sandbox` onto our husk-backed run path (`internal/facade` +
+    `cmd/facade`, a separate opt-in binary): replicas 1 creates/owns our
+    `SandboxClaim` via the `agentrun.dev/pool` bridge annotation (or a
+    `--default-pool`), the claim Ready phase mirrors into the Sandbox Ready
+    condition + replicas + serviceFQDN, replicas 0 / deletion terminates.
+    Proven in envtest (the create -> Ready -> delete lifecycle). The faithful
+    path was taken: we vendor their Go types after a verified go 1.24 -> 1.26
+    bump (both lint runs clean). The naming-collision ADR
+    (`docs/adr/0001-facade-and-naming.md`) records the facade approach and
+    defers the our-vs-their rename (ForkTemplate/ForkClaim/ForkPool, the
+    preferred candidate) to the API v2 migration to avoid two breaking renames.
+    The conformance approach (vendor their examples + e2e, run in CI, no silent
+    divergence, pause/resume as a memory snapshot documented) is in
+    `docs/facade-conformance.md`.
+  - OPEN (later slices): the full upstream conformance e2e harness run in CI
+    (their manifests unchanged, identical behavior, latest-two-minors matrix);
+    pause/resume as a memory snapshot/restore plus the milliseconds-vs-
+    hibernation bench in `bench/facade/`; the SandboxWarmPool -> our pool and
+    SandboxClaim -> our fork-from-snapshot extension mappings; full podTemplate
+    fidelity; executing the deferred rename with API v2.
 - **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge

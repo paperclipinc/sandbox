@@ -62,7 +62,7 @@ jobs:
         # talos-validate job, so they are excluded here.
         run: |
           kubeconform -strict -summary -ignore-missing-schemas \
-            crds/ controller/ rbac/ daemon/ device-plugin/
+            crds/ controller/ rbac/ daemon/ device-plugin/ facade/
         working-directory: deploy
       - name: kustomize base resolves
         run: kubectl kustomize deploy/ > /dev/null
