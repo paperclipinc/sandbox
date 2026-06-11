@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/sandbox/internal/fork"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -84,8 +87,9 @@ func TestGRPCPullTemplateRejectsMalformedID(t *testing.T) {
 	}
 }
 
-// TestCASServingEnabledGate asserts CASServing.enabled requires all three of
-// store, token, and TLS, so a token without TLS never mounts the surface.
+// TestCASServingEnabledGate asserts CASServing.enabled requires all of store,
+// token, TLS, AND a dedicated CAS listen address, so a token without TLS (or
+// without a CAS listener) never mounts the surface.
 func TestCASServingEnabledGate(t *testing.T) {
 	store, err := cas.New(t.TempDir())
 	if err != nil {
@@ -99,7 +103,8 @@ func TestCASServingEnabledGate(t *testing.T) {
 		{"nil", nil, false},
 		{"token only", &CASServing{Token: "t"}, false},
 		{"store+token no tls", &CASServing{Store: store, Token: "t"}, false},
-		{"all set", &CASServing{Store: store, Token: "t", TLS: minimalTLS()}, true},
+		{"all but addr", &CASServing{Store: store, Token: "t", TLS: minimalTLS()}, false},
+		{"all set", &CASServing{Store: store, Token: "t", TLS: minimalTLS(), Addr: ":9092"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,6 +112,76 @@ func TestCASServingEnabledGate(t *testing.T) {
 				t.Fatalf("enabled() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSandboxHTTPNotForcedToTLSWhenCASEnabled is the regression guard for the
+// review finding: enabling CAS distribution must NOT force the sandbox HTTP API
+// (exec/files/metrics/healthz) onto TLS, and must NOT mount /cas/ on that mux.
+// SDK clients connect over http://, so the sandbox server's scheme must be
+// unchanged. ServeHTTP serves the sandbox mux in plaintext and the CAS surface
+// on a SEPARATE TLS listener (ServeCAS), so this test starts ServeHTTP with CAS
+// enabled and asserts an http:// healthz works while /cas/ is absent.
+func TestSandboxHTTPNotForcedToTLSWhenCASEnabled(t *testing.T) {
+	store, err := cas.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cas.New: %v", err)
+	}
+	engine := fork.NewMockEngine()
+	sandboxAPI := NewSandboxAPI(t.TempDir())
+
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen http: %v", err)
+	}
+	httpAddr := httpLn.Addr().String()
+	_ = httpLn.Close()
+	casLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen cas: %v", err)
+	}
+	casAddr := casLn.Addr().String()
+	_ = casLn.Close()
+
+	cfg := &CASServing{Store: store, Token: "peer-secret", TLS: minimalTLS(), Addr: casAddr}
+	if !cfg.enabled() {
+		t.Fatal("CASServing not enabled for the test setup")
+	}
+	go ServeHTTP(httpAddr, engine, sandboxAPI, cfg)
+
+	// Wait for the sandbox HTTP listener to come up, then prove it answers over
+	// PLAINTEXT http:// (not TLS): an https:// or TLS-forced server would fail
+	// this plaintext GET.
+	base := "http://" + httpAddr
+	var resp *http.Response
+	for attempt := 0; attempt < 50; attempt++ {
+		resp, err = http.Get(base + "/healthz") //nolint:noctx,bodyclose // test
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("plaintext GET /healthz failed (sandbox API was forced to TLS?): %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz status %d, want 200", resp.StatusCode)
+	}
+
+	// The /cas/ surface must NOT be mounted on the sandbox mux: a request for it
+	// here must not be the token-gated CAS handler. The sandbox mux has no /cas/
+	// route, so it 404s rather than 403s (the CAS handler's no-token response).
+	casResp, err := http.Get(base + "/cas/manifest/deadbeef") //nolint:noctx,bodyclose // test
+	if err != nil {
+		t.Fatalf("GET /cas on sandbox mux: %v", err)
+	}
+	_ = casResp.Body.Close()
+	if casResp.StatusCode == http.StatusForbidden {
+		t.Fatal("the token-gated CAS handler is mounted on the sandbox mux (403); it must live only on the separate CAS listener")
+	}
+	if casResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/cas on sandbox mux: status %d, want 404 (no route)", casResp.StatusCode)
 	}
 }
 

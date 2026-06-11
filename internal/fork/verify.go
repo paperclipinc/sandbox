@@ -78,6 +78,18 @@ func templateFilePath(dir, name string) (string, error) {
 	if dst != cleanDir && !strings.HasPrefix(dst, cleanDir+string(filepath.Separator)) {
 		return "", fmt.Errorf("snapshot file %q escapes template dir", name)
 	}
+	// Volume seeds must additionally stay UNDER the volumes/ subdir. A name like
+	// "volumes/../escape.ext4" passes the prefix/suffix check and, after Join,
+	// cleans to <dir>/escape.ext4: inside the template dir (so the escape guard
+	// above does not fire) but OUTSIDE volumes/, landing a volume seed where a
+	// snapshot file belongs. Confine it so a crafted volumes/ name cannot climb
+	// out of the volumes subtree.
+	if strings.HasPrefix(name, "volumes/") {
+		volDir := filepath.Join(cleanDir, "volumes")
+		if !strings.HasPrefix(dst, volDir+string(filepath.Separator)) {
+			return "", fmt.Errorf("snapshot file %q escapes template volumes dir", name)
+		}
+	}
 	return dst, nil
 }
 

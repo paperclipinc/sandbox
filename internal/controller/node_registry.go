@@ -36,7 +36,13 @@ type NodeInfo struct {
 	Endpoint string
 	// HTTPEndpoint is the forkd HTTP sandbox API (exec/files), e.g. "10.0.3.7:9091".
 	// This is what claim status endpoints point at.
-	HTTPEndpoint    string
+	HTTPEndpoint string
+	// CASEndpoint is the forkd DEDICATED token-gated TLS CAS listener
+	// (e.g. "10.0.3.7:9092"), the source a peer pulls templates from. It is a
+	// SEPARATE port from HTTPEndpoint: CAS distribution is served over TLS on its
+	// own listener so the sandbox HTTP API scheme is unchanged. Populated by
+	// discovery from the same pod IP as HTTPEndpoint with the CAS port.
+	CASEndpoint     string
 	ActiveSandboxes int32
 	MaxSandboxes    int32
 	MemoryTotal     int64
@@ -277,7 +283,7 @@ func (r *NodeRegistry) TemplateSource(templateID string) (holder *NodeInfo, casU
 			continue
 		}
 		d := n.TemplateDigests[templateID]
-		if d == "" || n.HTTPEndpoint == "" {
+		if d == "" || n.CASEndpoint == "" {
 			continue
 		}
 		if best == nil || n.Name < best.Name {
@@ -291,15 +297,16 @@ func (r *NodeRegistry) TemplateSource(templateID string) (holder *NodeInfo, casU
 	return best, best.casBaseURL(), bestDigest, true
 }
 
-// casBaseURL derives the node's CAS-serving base URL from its HTTP sandbox API
-// endpoint. The CAS surface is mounted under /cas on the same HTTP port and is
-// served over TLS only (template distribution requires mTLS), so the scheme is
-// https. Returns "" when the node reports no HTTP endpoint.
+// casBaseURL derives the node's CAS-serving base URL from its DEDICATED CAS
+// endpoint. The CAS surface is served under /cas on its OWN listener (a separate
+// port from the sandbox HTTP API), over TLS only (template distribution requires
+// mTLS), so the scheme is https. Returns "" when the node reports no CAS
+// endpoint.
 func (n *NodeInfo) casBaseURL() string {
-	if n.HTTPEndpoint == "" {
+	if n.CASEndpoint == "" {
 		return ""
 	}
-	return "https://" + n.HTTPEndpoint + "/cas"
+	return "https://" + n.CASEndpoint + "/cas"
 }
 
 // AddTemplate records that a node now holds the given template snapshot.

@@ -57,8 +57,12 @@ func main() {
 		auditLog          string
 		otlpEndpoint      string
 		memReserveBytes   int64
-		peerToken         string
+		casListen         string
 	)
+	// peerToken is read from the environment, NOT a flag: a flag is visible in
+	// /proc/<pid>/cmdline, and the token is a credential. The controller already
+	// reads the same FORKD_PEER_TOKEN env var, so the two sides match by config.
+	peerToken := os.Getenv("FORKD_PEER_TOKEN")
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
 	flag.StringVar(&httpAddr, "http", ":9091", "HTTP listen address (metrics + sandbox exec/files API)")
@@ -88,7 +92,19 @@ func main() {
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
-	flag.StringVar(&peerToken, "peer-token", "", "Shared bearer token a peer forkd (driven by the controller) must present to pull templates from this node's content-addressed store. When set together with mTLS (--tls-cert/--tls-key/--tls-ca), the token-gated CAS surface is mounted under /cas on the HTTP port and template distribution is enabled. REQUIRES mTLS: the surface is served over TLS only so the token stays confidential; chunks are digest-addressed so integrity is channel-independent, but the token gates enumeration/pull. The controller must be configured with the SAME token (its --peer-token). The token is a credential and is never logged. SIMPLEST defensible model; a per-pull minted token / forkd-peer mTLS identity is a follow-up")
+	flag.StringVar(&casListen, "cas-listen", ":9092", "Listen address for the DEDICATED token-gated TLS CAS listener used for peer template distribution. The CAS surface is served here, on its OWN port, NOT on the sandbox HTTP port (--http): the sandbox exec/files/metrics/healthz API keeps its existing scheme so SDK clients are unaffected. Effective only when CAS distribution is enabled (FORKD_PEER_TOKEN set together with mTLS). The controller derives this port to build each holder's CAS source URL")
+	// peerToken (FORKD_PEER_TOKEN env) is the shared bearer token a peer forkd
+	// (driven by the controller) must present to pull templates from this node's
+	// content-addressed store. It is read from the ENVIRONMENT, not a flag, so it
+	// is never exposed in /proc/<pid>/cmdline (the token is a credential and is
+	// never logged). When set together with mTLS (--tls-cert/--tls-key/--tls-ca),
+	// the token-gated CAS surface is served on the dedicated --cas-listen TLS
+	// port and template distribution is enabled. REQUIRES mTLS: the surface is
+	// served over TLS only so the token stays confidential; chunks are
+	// digest-addressed so integrity is channel-independent, but the token gates
+	// enumeration/pull. The controller must be configured with the SAME token
+	// (it reads the same FORKD_PEER_TOKEN env var). SIMPLEST defensible model; a
+	// per-pull minted token / forkd-peer mTLS identity is a follow-up.
 	flag.Parse()
 
 	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-forkd", otlpEndpoint)
@@ -240,18 +256,19 @@ func main() {
 
 		// Enable CAS peer distribution only when mTLS AND a peer token are set:
 		// the surface serves digest-addressed bytes over TLS, gated by the shared
-		// token. The HTTP server then serves HTTPS using the same cert pair as the
-		// gRPC server.
+		// token. It is served on its OWN listener (--cas-listen), NOT the sandbox
+		// HTTP port, so the sandbox API scheme is unchanged. The CAS listener
+		// serves HTTPS using the same cert pair as the gRPC server.
 		if tlsConfigured && peerToken != "" {
 			httpTLS, terr := serverHTTPTLSConfig(tlsCert, tlsKey, tlsCA)
 			if terr != nil {
 				fmt.Fprintf(os.Stderr, "forkd: build CAS server TLS: %v\n", terr)
 				os.Exit(1)
 			}
-			casServing = &daemon.CASServing{Store: real.CASStore(), Token: peerToken, TLS: httpTLS}
+			casServing = &daemon.CASServing{Store: real.CASStore(), Token: peerToken, TLS: httpTLS, Addr: casListen}
 		} else if peerToken != "" {
 			// A token without mTLS would serve it in cleartext: refuse to enable.
-			fmt.Fprintln(os.Stderr, "forkd: --peer-token set without mTLS (--tls-cert/--tls-key/--tls-ca); CAS distribution stays DISABLED so the token is never served in cleartext")
+			fmt.Fprintln(os.Stderr, "forkd: FORKD_PEER_TOKEN set without mTLS (--tls-cert/--tls-key/--tls-ca); CAS distribution stays DISABLED so the token is never served in cleartext")
 		}
 	}
 
@@ -283,8 +300,10 @@ func main() {
 	grpcServer := grpc.NewServer(grpcOpts...)
 	daemon.RegisterForkDaemonServer(grpcServer, server)
 
-	// Start HTTP server (metrics + sandbox exec/files API, plus the token-gated
-	// TLS CAS surface when distribution is enabled).
+	// Start HTTP server (metrics + sandbox exec/files API). When CAS
+	// distribution is enabled, ServeHTTP also starts the dedicated token-gated
+	// TLS CAS listener (--cas-listen) in its own goroutine; the sandbox HTTP API
+	// scheme stays unchanged so SDK clients are unaffected.
 	go daemon.ServeHTTP(httpAddr, engine, sandboxAPI, casServing)
 
 	// Start the controlled DNS resolver (node-level Runnable) when enabled. It

@@ -44,7 +44,7 @@ func distMTLSPair(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 // startFakeForkdNodeTLSDist is startFakeForkdNode with the gRPC listener
 // terminated by serverTLS and the NodeInfo carrying clientTLS, so dials to this
 // node use mTLS (NodeMTLS reports true).
-func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, httpEndpoint string, serverTLS, clientTLS *tls.Config, heldTemplates ...string) *fork.MockEngine {
+func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, httpEndpoint, casEndpoint string, serverTLS, clientTLS *tls.Config, heldTemplates ...string) *fork.MockEngine {
 	t.Helper()
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
@@ -68,6 +68,7 @@ func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, h
 		Name:            nodeName,
 		Endpoint:        lis.Addr().String(),
 		HTTPEndpoint:    httpEndpoint,
+		CASEndpoint:     casEndpoint,
 		TemplateIDs:     heldTemplates,
 		TemplateDigests: digests,
 		MaxSandboxes:    100,
@@ -82,7 +83,7 @@ func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, h
 // backing engine so a test can read recorded PullTemplate calls. The gRPC
 // listener is insecure; distribution does not require the controller-to-forkd
 // channel to be mTLS for a plaintext template.
-func startDistForkdNode(t *testing.T, registry *NodeRegistry, nodeName, httpEndpoint string, heldTemplates ...string) *fork.MockEngine {
+func startDistForkdNode(t *testing.T, registry *NodeRegistry, nodeName, httpEndpoint, casEndpoint string, heldTemplates ...string) *fork.MockEngine {
 	t.Helper()
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
@@ -107,6 +108,7 @@ func startDistForkdNode(t *testing.T, registry *NodeRegistry, nodeName, httpEndp
 		Name:            nodeName,
 		Endpoint:        lis.Addr().String(),
 		HTTPEndpoint:    httpEndpoint,
+		CASEndpoint:     casEndpoint,
 		TemplateIDs:     heldTemplates,
 		TemplateDigests: digests,
 		MaxSandboxes:    100,
@@ -123,8 +125,8 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	const token = "peer-secret"
 	r := &SandboxPoolReconciler{NodeRegistry: registry, PeerToken: token}
 
-	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "T")
-	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091")
+	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
+	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
 
 	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, 1)
 	if err != nil {
@@ -140,7 +142,9 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	if len(pulls) != 1 {
 		t.Fatalf("node B recorded %d pulls, want 1", len(pulls))
 	}
-	wantURL := "https://10.0.0.1:9091/cas"
+	// The pull source is the holder's DEDICATED CAS endpoint (port 9092), NOT its
+	// sandbox HTTP port: CAS distribution is served on its own TLS listener.
+	wantURL := "https://10.0.0.1:9092/cas"
 	wantDigest := engineA.GetCapacity().TemplateDigests["T"]
 	if pulls[0].SourceURL != wantURL {
 		t.Fatalf("pull source = %q, want %q", pulls[0].SourceURL, wantURL)
@@ -172,9 +176,9 @@ func TestDistributeNoHolderBuildsThenPulls(t *testing.T) {
 
 	// Three empty nodes, none holds T.
 	engines := map[string]*fork.MockEngine{
-		"node-a": startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091"),
-		"node-b": startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091"),
-		"node-c": startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091"),
+		"node-a": startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092"),
+		"node-b": startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092"),
+		"node-c": startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091", "10.0.0.3:9092"),
 	}
 
 	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, 3)
@@ -221,8 +225,8 @@ func TestDistributeEncryptedBuildsEverywhere(t *testing.T) {
 	// by the existing guard, so register both nodes with per-node TLS to allow
 	// the build to proceed and prove no pull happens.
 	serverTLS, clientTLS := distMTLSPair(t)
-	engineA := startFakeForkdNodeTLSDist(t, registry, "node-a", "10.0.0.1:9091", serverTLS, clientTLS, "T")
-	engineB := startFakeForkdNodeTLSDist(t, registry, "node-b", "10.0.0.2:9091", serverTLS, clientTLS)
+	engineA := startFakeForkdNodeTLSDist(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", serverTLS, clientTLS, "T")
+	engineB := startFakeForkdNodeTLSDist(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092", serverTLS, clientTLS)
 	_ = engineA
 
 	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), 1)

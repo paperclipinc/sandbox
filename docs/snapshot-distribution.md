@@ -87,18 +87,27 @@ before it ever serves a fork from it.
 
 ### CAS serving and auth
 
-Each forkd optionally serves its content-addressed store under `/cas` on its
-HTTP port. The surface is the read-only `Transport` handler
-(`cas.NewHTTPHandler`: `GetManifest`, `HasChunks`, `GetChunk`) wrapped by
-`cas.RequirePullToken`, and it is enabled only when ALL of a store, a peer
-token, and a TLS config are set (`daemon.CASServing`). The auth is two layers:
+Each forkd optionally serves its content-addressed store under `/cas` on a
+DEDICATED listener, the `--cas-listen` port (default `:9092`), SEPARATE from the
+sandbox HTTP API (`--http`, default `:9091`). This separation is deliberate: the
+sandbox exec/files/metrics/healthz API keeps its existing scheme (SDK clients
+connect over `http://`), while the CAS surface is served on its own port over
+TLS only. CAS distribution never forces the sandbox API onto TLS. The surface is
+the read-only `Transport` handler (`cas.NewHTTPHandler`: `GetManifest`,
+`HasChunks`, `GetChunk`) wrapped by `cas.RequirePullToken`, and it is enabled
+only when ALL of a store, a peer token, a TLS config, and a CAS listen address
+are set (`daemon.CASServing`). The controller derives the CAS port (the same pod
+IP as the sandbox HTTP endpoint with the CAS port) to build each holder's CAS
+source URL. The auth is two layers:
 
-- `--peer-token`: a shared bearer credential a pull must present. The compare is
-  constant-time, so a wrong token leaks no timing signal, and an absent or wrong
-  token is rejected with 403 before any store access. The controller is
-  configured with the SAME token and attaches it to every pull request
-  (`HTTPTransport.WithBearerToken`). The token is a credential: it is never
-  logged, never put in an error or condition message.
+- `FORKD_PEER_TOKEN`: a shared bearer credential a pull must present, read from
+  the ENVIRONMENT (not a flag) so it is never exposed in `/proc/<pid>/cmdline`.
+  The compare is constant-time, so a wrong token leaks no timing signal, and an
+  absent or wrong token is rejected with 403 before any store access. The
+  controller is configured with the SAME `FORKD_PEER_TOKEN` and attaches it to
+  every pull request (`HTTPTransport.WithBearerToken`). The token is a
+  credential: it is never logged, never put in an error or condition message,
+  and never passed on the command line.
 - forkd-to-forkd mTLS: the surface is served ONLY over TLS, using the same
   control-plane cert pair the gRPC server uses, with `RequireAndVerifyClientCert`
   against the control-plane CA. A peer without a CA-signed client cert is
@@ -106,7 +115,7 @@ token, and a TLS config are set (`daemon.CASServing`). The auth is two layers:
   enforces on top. TLS-only is what keeps the bearer token confidential on the
   wire (the chunks themselves are digest-addressed, so chunk integrity does not
   depend on the channel, but the token does). forkd refuses to enable the
-  surface if a `--peer-token` is set without mTLS, so the token is never served
+  surface if `FORKD_PEER_TOKEN` is set without mTLS, so the token is never served
   in cleartext.
 
 SAN pinning: the pull client pins `pki.ServerName` (the single forkd serving

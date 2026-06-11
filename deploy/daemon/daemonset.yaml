@@ -42,6 +42,14 @@ spec:
             - --firecracker=/usr/local/bin/firecracker
             - --kernel=/var/lib/agent-run/vmlinux
             - --http=:9091
+            # Dedicated token-gated TLS listener for peer template
+            # distribution. It is a SEPARATE port from --http: the CAS
+            # surface is served here over TLS, while the sandbox
+            # exec/files/metrics/healthz API on :9091 keeps its scheme
+            # unchanged so SDK clients are unaffected. Effective only
+            # when FORKD_PEER_TOKEN is set (with mTLS); the controller
+            # derives this port to build each holder's CAS source URL.
+            - --cas-listen=:9092
             - --tls-cert=/etc/forkd/tls/tls.crt
             - --tls-key=/etc/forkd/tls/tls.key
             - --tls-ca=/etc/forkd/ca/ca.crt
@@ -53,11 +61,28 @@ spec:
             - --jailer=/usr/local/bin/jailer
             - --chroot-base=/var/lib/agent-run/jailer
             - --uid-range=64000-64999
+          # FORKD_PEER_TOKEN is the shared bearer credential a peer
+          # forkd must present to pull templates from this node's CAS.
+          # It is read from the ENVIRONMENT, not a flag, so it is never
+          # exposed in /proc/<pid>/cmdline (it is a credential). The
+          # controller reads the SAME FORKD_PEER_TOKEN. Set it via a
+          # Secret to enable the token-gated TLS CAS listener; left
+          # unset, CAS distribution stays disabled. Example:
+          # env:
+          #   - name: FORKD_PEER_TOKEN
+          #     valueFrom:
+          #       secretKeyRef:
+          #         name: agent-run-peer-token
+          #         key: token
           ports:
             - name: grpc
               containerPort: 9090
             - name: metrics
               containerPort: 9091
+            # Dedicated token-gated TLS CAS listener (--cas-listen) for
+            # peer template distribution; separate from the sandbox API.
+            - name: cas
+              containerPort: 9092
           # forkd runs as root with an explicit capability list instead
           # of privileged: true. Each retained capability is annotated
           # with why the jailer (or forkd itself) needs it; everything
