@@ -664,9 +664,16 @@ verified. In rough order of leverage:
   port forwarding, the daily-driver agent-harness needs
 - ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex
   sandbox integrations)
-- ✅ `kubectl sandbox` plugin: ls (SandboxClaims) and ps (SandboxForks) are
-  done (pure table formatter unit-tested in CI; live listing over kubeconfig).
-  OPEN: top/tree/exec/cp/logs/port-forward for operators.
+- ✅ `kubectl sandbox` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
+  fork/lineage DAG), top (per-sandbox CoW-aware metering from forkd
+  `/v1/metering`, honestly labeled, a dash on a missing datum), logs (the husk
+  stub pod console plus the guest-console #18 note), and exec (token-scoped
+  operator exec over the sandbox API using the claim's `<claim>-sandbox-token`
+  Secret, the same gate the SDK uses) are done (pure formatters + the metering
+  match and exec/token resolution unit-tested in CI; live over kubeconfig; the
+  kind-e2e smoke proves ls/ps/tree object-level, with exec/top/logs of a running
+  sandbox as the KVM/bare-metal tail). OPEN: cp (file copy) and port-forward for
+  operators, and the PTY-mode streaming exec on the SDK side.
 - ✅ TypeScript SDK (`@agentrun/sdk`): `Sandbox` exec/fork/terminate/files over
   the forkd HTTP API with bearer auth; `SandboxServer` direct mode;
   `AgentRun` cluster mode over a mockable `K8sApi` interface;

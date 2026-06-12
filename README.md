@@ -226,19 +226,19 @@ The target developer surface (three-line common path, git-shaped workspace verbs
 
 The honest version: a numbers table belongs here only when our benchmark harness can regenerate it against the actual competitors on the same hardware, with scripts in this repo so anyone can reproduce or refute it. That harness is [#15](https://github.com/paperclipinc/sandbox/issues/15). Until then, the qualitative pareto map across every alternative we know of:
 
-| | sandbox | E2B | Modal | Daytona | Morph | Cloudflare | Agent Sandbox (k8s-sigs) | Kata/KubeVirt | raw Firecracker |
-|---|---|---|---|---|---|---|---|---|---|
-| Hardware isolation per session | KVM microVM | microVM | gVisor | container/VM | microVM | V8 isolate | Kata option | KVM | KVM |
-| Snapshot fork of running state | yes, core primitive | snapshot/resume | memory snapshots | no | yes (Infinibranch) | no | no | no | build it yourself |
-| Warm-pool millisecond claims | yes (design center) | warm pools | warm pools | workspaces | yes | instant isolates | 1-3s cold | seconds | build it yourself |
-| Durable forkable workspaces | Workspace CRD (in design, [#21](https://github.com/paperclipinc/sandbox/issues/21)) | no | volumes | workspaces | yes, proprietary | no | PVCs | PVCs | no |
-| Kubernetes-native API | CRDs | SaaS API | SaaS API | SaaS/OSS | SaaS API | SaaS API | CRDs | CRDs | no |
-| Self-hostable | yes, any KVM cluster | partial OSS | no | OSS core | no | no | yes | yes | yes |
-| Hosted option | planned (same engine) | yes | yes | yes | yes | yes | no | no | no |
-| Your data stays on your infra | yes (self-hosted) | no | no | partial | no | no | yes | yes | yes |
-| Open source | Apache 2.0 | partial | no | partial | no | no | Apache 2.0 | Apache 2.0 | Apache 2.0 |
+| | sandbox | E2B | Modal | Daytona | Morph | Cloudflare | Box (box.ascii.dev) | Agent Sandbox (k8s-sigs) | Kata/KubeVirt | raw Firecracker |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hardware isolation per session | KVM microVM | microVM | gVisor | container/VM | microVM | V8 isolate | VM | Kata option | KVM | KVM |
+| Snapshot fork of running state | yes, core primitive | snapshot/resume | memory snapshots | no | yes (Infinibranch) | no | disk fork (`box fork`) | no | no | build it yourself |
+| Warm-pool millisecond claims | yes (design center) | warm pools | warm pools | workspaces | yes | instant isolates | not published | 1-3s cold | seconds | build it yourself |
+| Durable forkable workspaces | Workspace CRD (in design, [#21](https://github.com/paperclipinc/sandbox/issues/21)) | no | volumes | workspaces | yes, proprietary | yes (disk) | no | PVCs | PVCs | no |
+| Kubernetes-native API | CRDs | SaaS API | SaaS API | SaaS/OSS | SaaS API | SaaS API | agent-native CLI | CRDs | CRDs | no |
+| Self-hostable | yes, any KVM cluster | partial OSS | no | OSS core | no | no | no | yes | yes | yes |
+| Hosted option | planned (same engine) | yes | yes | yes | yes | yes | yes (only) | no | no | no |
+| Your data stays on your infra | yes (self-hosted) | no | no | partial | no | no | no | yes | yes | yes |
+| Open source | Apache 2.0 | partial | no | partial | no | no | no | Apache 2.0 | Apache 2.0 | Apache 2.0 |
 
-Positioning, in one sentence per rival class: SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability; Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds; Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we are building a conformance facade to be its fastest backend ([#19](https://github.com/paperclipinc/sandbox/issues/19)) rather than fighting it; Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
+Positioning, in one sentence per rival class: SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability; Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds; Box (box.ascii.dev) is a hosted-only disk-fork sandbox SaaS with an agent-native CLI (`box prompt`, `box fork`) and a 60fps virtual desktop, which validates the agent-native direction we take with `agentrun` and MCP; our differentiators stay the memory-snapshot fork (a `fork(2)`-speed restore of running state, not a disk roundtrip), self-host-first delivery, and CoW-aware per-page metering, and a streamed desktop for computer-use agents is a tracked use-case for us, not a commitment (Box publishes no latency benchmark, so we make no comparison claim there); Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we are building a conformance facade to be its fastest backend ([#19](https://github.com/paperclipinc/sandbox/issues/19)) rather than fighting it; Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
 
 If an alternative beats us on an axis you care about and we have no roadmap line that closes it, that is a bug in our strategy: open an issue.
 

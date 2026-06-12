@@ -99,15 +99,49 @@ func main() {
 		if err := runTop(namespace, allNamespaces); err != nil {
 			fail(err)
 		}
-	case "logs", "exec":
-		fmt.Fprintf(os.Stderr, "kubectl sandbox %s: not yet implemented, see https://github.com/paperclipinc/sandbox/issues/29\n", sub)
-		os.Exit(2)
+	case "logs":
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "error: logs requires a sandbox name")
+			os.Exit(2)
+		}
+		if err := runLogs(namespace, fs.Arg(0)); err != nil {
+			fail(err)
+		}
+	case "exec":
+		// exec splits its args at "--": everything after is the command. Parse
+		// only the flags before "--" so a "-flag" in the command is not eaten.
+		flagArgs, cmd := splitDoubleDash(os.Args[2:])
+		_ = fs.Parse(flagArgs)
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "error: exec requires a sandbox name")
+			os.Exit(2)
+		}
+		if len(cmd) == 0 {
+			fmt.Fprintln(os.Stderr, "error: exec requires a command after --")
+			os.Exit(2)
+		}
+		if err := runExec(namespace, fs.Arg(0), cmd); err != nil {
+			fail(err)
+		}
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", sub, usage)
 		os.Exit(2)
 	}
+}
+
+// splitDoubleDash partitions args at the first "--": the elements before it are
+// flag args, the elements after are the command. With no "--" the command is
+// empty and all args are flag args.
+func splitDoubleDash(args []string) (flagArgs, cmd []string) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
 }
 
 // newClient builds a controller-runtime client from the standard kubeconfig
