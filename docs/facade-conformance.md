@@ -1,94 +1,211 @@
-# agents.x-k8s.io facade conformance approach
+# agents.x-k8s.io facade conformance
 
 This document records how the `agents.x-k8s.io` conformance facade (issue #19,
 `cmd/facade` + `internal/facade`) is held to the upstream SIG agent-sandbox API,
-what is proven today, and what is deferred. See ADR 0001
+what is PROVEN today, and what is deferred. See ADR 0001
 (docs/adr/0001-facade-and-naming.md) for the facade design and the toolchain
 decision.
 
 ## Principle: no silent divergence
 
 We implement the upstream API (`agents.x-k8s.io/v1alpha1 Sandbox`); we do not
-fork or shadow it. The drift guard is the upstream conformance suite, not our
-own assertions. Every behavioral difference between the facade and an upstream
-reference implementation is either (a) eliminated, or (b) written down here as a
-justified, documented exception. There is no third option: an undocumented
-divergence is a bug.
+fork or shadow it. Every upstream artifact, each `test/e2e/*_test.go` and each
+vendored example manifest, has a row in the matrix below with one of three
+statuses. There is no fourth status and no omission: an undocumented divergence
+is a bug.
 
-## The harness (a later slice)
+- PROVEN-OBJECT-LEVEL-ON-KIND: the facade-conformance CI job (or the facade
+  envtest) asserts the object-level fact on a kind cluster, with their manifest
+  applied UNCHANGED.
+- NEEDS-BARE-METAL: the upstream predicate requires a RUNNING sandbox (a booted
+  in-VM workload: PodReady / ChromeReady / the "Pod is Ready; Service Exists"
+  status). Our run path reaches Ready only when a dormant Firecracker VMM boots
+  inside the husk pod, which needs a KVM-capable kubelet. That is the #18
+  nested-VMM boundary; it is proven on the KVM runner in kvm-test.yaml, not on a
+  shared kind runner.
+- JUSTIFIED-EXCEPTION: a field or behavior the facade maps differently (or does
+  not yet map), with the reason. The behavior is recorded, not silently dropped.
 
-The conformance harness itself is deferred to a later #19 slice. The planned
-shape:
+## Pinned upstream version
 
-- Vendor the upstream `examples/` and `test/e2e` from `sigs.k8s.io/agent-sandbox`
-  into the repo (the foundation slice already vendors the CRDs and a couple of
-  example manifests under `third_party/agent-sandbox/`; the harness slice adds
-  the e2e suite).
-- Run those upstream manifests and e2e tests in CI against the facade,
-  UNCHANGED: the acceptance criterion is that their manifests apply and behave
-  identically to an upstream reference, with only the documented exceptions
-  below.
-- Pin the upstream version matrix to their latest two minor releases, so we
-  track the API as it moves and catch drift early. The foundation slice pins
-  v0.4.6 (the CRDs + examples vendored under `third_party/agent-sandbox/`).
+- Module: `sigs.k8s.io/agent-sandbox`, version `v0.4.6` (pinned). The CRDs,
+  examples, and `test/e2e` are vendored verbatim under `third_party/agent-sandbox/`.
+- Latest-two-minors policy: the conformance approach tracks the upstream API as
+  it moves by pinning their latest two minor releases. Today only v0.4.6 is
+  wired (vendored + applied unchanged). Wiring the second minor (a parallel
+  vendored tree + a CI matrix dimension) is a follow-up; this is stated honestly
+  rather than implied.
+
+## Apply-unchanged acceptance
+
+Their example `Sandbox` manifests apply UNCHANGED (only the `${IMAGE}`
+placeholder is substituted, on a copy; the vendored files are never edited) and
+the facade reconciles them object-level:
+
+- In envtest (`internal/facade/examples_test.go`): every core
+  `agents.x-k8s.io/v1alpha1` Sandbox example vendored under
+  `third_party/agent-sandbox/examples` (and `extensions/examples`) is applied and
+  the facade creates the bridged husk-backed `SandboxClaim` (default-pool
+  binding, owner reference, first-container env mirrored).
+- In CI (`facade-conformance` kind job): the upstream
+  `examples/hello-world-sandbox/hello-world.yaml` is applied UNCHANGED against a
+  live apiserver and the five object-level facts below are asserted.
+
+The RUNNING-sandbox behavior (the in-VM Ready tail) is the bare-metal path and is
+NOT asserted on kind; see the NEEDS-BARE-METAL rows.
+
+## The facade-conformance CI job (object level)
+
+The `facade-conformance` job in `.github/workflows/ci.yaml` mirrors
+`kind-e2e-husk`: it builds + loads the facade and controller images, creates a
+kind cluster, installs the vendored upstream `agents.x-k8s.io` Sandbox CRD plus
+our CRDs, deploys our controller + the facade (PKI on, `--default-pool=default`)
+and a `default` SandboxPool, applies their hello-world Sandbox UNCHANGED, and
+asserts, each gated with a SETUP-vs-CONFORMANCE distinction and a diagnostics
+trap:
+
+- (a) the Sandbox is ADMITTED by the upstream CRD (verbatim);
+- (b) the facade creates the bridged husk-backed `SandboxClaim` (owner reference
+  back to the Sandbox + the `agentrun.dev/pool` bridge annotation set to the
+  default pool);
+- (c) the facade UPDATES the Sandbox status with a Ready condition reflecting the
+  run-path state achievable on kind (Ready=False while the husk claim is Pending,
+  since no VMM boots here);
+- (d) deleting the Sandbox GCs the bridged claim (the live apiserver runs the
+  owner-reference garbage collector);
+- (e) a replicas-0 Sandbox terminates the run-path object.
+
+The job echoes that the in-VM Ready tail (PodReady / ChromeReady) needs a
+KVM-capable kubelet (the #18 boundary) and is not asserted there.
+
+## Did we run their Go e2e suite? (honest answer: no, by design)
+
+Their `test/e2e` Go suite is vendored as the conformance REFERENCE and is NOT
+run against our facade. This is not laziness; it is a structural mismatch we
+verified by reading the vendored sources:
+
+- `test/e2e/framework/context.go` imports `sigs.k8s.io/agent-sandbox/controllers`
+  (their in-tree controller package). The framework wires THEIR controller's
+  scheme and dumps THEIR controller's pod logs (`app=agent-sandbox-controller`
+  in `agent-sandbox-system`). It expects their controller running.
+- Every conformance test asserts upstream-controller-created objects that our
+  facade does not produce: a `Pod` named after the Sandbox, a headless
+  `Service`, and a Sandbox status whose Ready condition is literally
+  `Message: "Pod is Ready; Service Exists"`, `Reason: DependenciesReady` (see
+  `basic_test.go`). Those predicates require a RUNNING pod that becomes Ready.
+
+Our facade bridges a Sandbox to a husk-backed `SandboxClaim` on the fork engine;
+it does not create a Pod/Service, and Ready requires the in-VM boot. So their Go
+suite is bare-metal-gated (it needs both their controller and a running
+sandbox). Half-running it and claiming a pass it did not achieve would violate
+the no-unverified-claims rule. The matrix records each of their tests as
+NEEDS-BARE-METAL accordingly.
+
+## Conformance matrix
+
+### Upstream `test/e2e/*_test.go` (the Go conformance reference)
+
+| Upstream test | What it asserts upstream | Status | Notes |
+| --- | --- | --- | --- |
+| `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot (#18). Object-level Sandbox admission + the bridged claim ARE proven on kind (facade-conformance (a),(b)). |
+| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The replicas-0 contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 terminates the bridged claim. The upstream Pod/Service deletion needs their controller + a running sandbox. |
+| `test/e2e/shutdown_test.go` :: `TestSandboxShutdownTime`, `TestSandboxRetainedExpiryPreservesFinishedCondition` | shutdown tears down Pod/Service in bounded time; Finished condition retained | NEEDS-BARE-METAL | Requires a running Pod that succeeds and the upstream Finished-condition controller. The deletion/GC object contract is proven object-level (facade-conformance (d)). |
+| `test/e2e/parallelism_test.go` :: `TestParallelSandboxes`, `TestParallelSandboxClaimsWith{Sufficient,Insufficient}WarmPool` | many Sandboxes/Claims reach Ready in parallel via a warm pool | NEEDS-BARE-METAL | Waits `ReadyConditionIsTrue` on running sandboxes drawn from a warm pool; needs the in-VM boot and the warm-pool/claim extension mappings (a later slice). |
+| `test/e2e/volumeclaimtemplate_test.go` :: `TestSandboxVolumeClaimTemplates` | `volumeClaimTemplates` produce PVCs bound to the Pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The facade does not yet map `volumeClaimTemplates` (storage contract, exception 4 below); upstream also needs a running Pod. The manifest still applies unchanged and the claim bridges (proven object-level). |
+| `test/e2e/chromesandbox_test.go` :: `TestRunChromeSandbox`, `BenchmarkChromeSandboxStartup` | Chrome serves CDP inside the sandbox; measures PodReady + ChromeReady | NEEDS-BARE-METAL | The canonical running-sandbox predicate (ChromeReady on the CDP port). Pure in-VM boot; the #18 boundary. |
+| `test/e2e/chromesandbox_claim_test.go` :: `BenchmarkChromeSandboxClaimStartup` | Chrome via a `SandboxClaim` drawn from a warm pool | NEEDS-BARE-METAL | Running sandbox + the warm-pool/claim extension mapping (later slice). |
+| `test/e2e/extensions/pythonruntime_test.go` :: `TestRunPythonRuntimeSandbox`, `...Claim`, `...Warmpool` | a python runtime sandbox/claim/warmpool serves requests | NEEDS-BARE-METAL | Running sandbox + the extension mappings (later slice). |
+| `test/e2e/extensions/shutdown_policy_test.go` :: `TestSandboxClaim{DeleteForeground,TTL...,ExpiryUsesEarlier...,FinishedWithoutTTLIsRetained,TTLZeroRetain...}` | SandboxClaim TTL / shutdown-policy / finished-condition retention | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | Exercises the upstream `SandboxClaim` extension (not yet mapped, exception 3) and needs a running claim that finishes. |
+| `test/e2e/extensions/warmpool_rollout_test.go` :: `TestWarmPoolRollout`, `...MultiTemplateIsolation`, `...SwitchTemplate`, `...MetadataUpdate` | SandboxWarmPool rollout/template-switch semantics | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | Exercises the upstream `SandboxWarmPool` extension (not yet mapped, exception 3) and needs running pool pods. |
+| `test/e2e/extensions/warmpool_sandbox_watcher_test.go` :: `TestWarmPoolSandboxWatcher`, `TestWarmPoolPodNameAnnotationBeforeReady` | warm-pool watcher annotates the bound pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | `SandboxWarmPool` extension (exception 3) + a running pod. |
+| `test/e2e/extensions/sandboxclaim_metric_test.go` :: `TestSandboxClaimObservabilityAnnotation` | a SandboxClaim observability annotation is set | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | Upstream `SandboxClaim` extension (exception 3) + the upstream controller. |
+| `test/e2e/framework/watchset_test.go` :: `TestWatchSet...` | the framework's own watch-set unit test | JUSTIFIED-EXCEPTION (not a facade conformance test) | Tests the upstream test framework internals, not the Sandbox API surface; nothing for the facade to satisfy. Vendored for completeness of the reference. |
+
+### Vendored example manifests (apply-unchanged)
+
+Core `agents.x-k8s.io/v1alpha1` Sandbox examples: each applies UNCHANGED and the
+facade bridges a husk-backed claim object-level (`internal/facade/examples_test.go`
+asserts all of these; `facade-conformance` asserts hello-world end to end against
+a live apiserver). The fields beyond identity + the first container's env are
+JUSTIFIED-EXCEPTIONs (see the exceptions section); the manifest still applies and
+reconciles.
+
+| Example manifest | Extra podTemplate fields (exceptions) | Status |
+| --- | --- | --- |
+| `examples/hello-world-sandbox/hello-world.yaml` | restartPolicy | PROVEN-OBJECT-LEVEL-ON-KIND (envtest + facade-conformance job) |
+| `examples/sandbox-ksa/sandbox.yaml` | serviceAccountName, volumeClaimTemplates, volumeMounts, command | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/hermes-agent/sandbox.yaml` | env.valueFrom (secret refs, mirrored through), ports, volumeMounts, volumes, volumeClaimTemplates, args | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/python-runtime-sandbox/sandbox-python-kind.yaml` | ports, imagePullPolicy, podTemplate labels/annotations | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/aio-sandbox/aio-sandbox.yaml` | ports, resources | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/kata-gke-sandbox/sandbox-kata-gke.yaml` | runtimeClassName, resources | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/openclaw-sandbox/openclaw-sandbox.yaml` | ports, env, volumes | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/jupyterlab/jupyterlab.yaml` | ports, resources | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/jupyterlab/jupyterlab-full.yaml` | multiple containers, env.valueFrom, volumeClaimTemplates | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/analytics-tool/jupyterlab.yaml` | ports, resources | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/analytics-tool/analytics-tool/sandbox-python.yaml` | ports | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/langchain/deployment.yaml` (the Sandbox doc) | env, resources (the Deployment docs are not Sandboxes) | PROVEN-OBJECT-LEVEL-ON-KIND (envtest, Sandbox doc only) |
+| `examples/vscode-sandbox/base/vscode-sandbox.yaml` | env, ports, volumeClaimTemplates | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/vscode-sandbox/overlays/kata-mshv/patch-kata.yaml` | runtimeClassName (full manifest with containers) | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/policy/kyverno/.chainsaw-tests/setup-sandbox.yaml` | minimal Sandbox fixture | PROVEN-OBJECT-LEVEL-ON-KIND (envtest) |
+| `examples/vscode-sandbox/overlays/{kata,gvisor}/patch-kata.yaml`, `patch-gvisor.yaml` | strategic-merge patch fragments (no containers) | JUSTIFIED-EXCEPTION | not standalone applyable Sandboxes; layered onto the base via kustomize upstream. Recorded under the vscode-sandbox base row. |
+
+Extension example manifests (`extensions.agents.x-k8s.io` kinds): the facade maps
+only the core `Sandbox` today; the extension kinds are a later-slice mapping
+(exception 3). Each is vendored and recorded.
+
+| Extension example manifest | Kind | Status |
+| --- | --- | --- |
+| `extensions/examples/sandboxwarmpool.yaml` | SandboxWarmPool | JUSTIFIED-EXCEPTION (extension mapping is a later slice; exception 3) |
+| `extensions/examples/sandboxtemplate.yaml`, `secure-sandboxtemplate.yaml`, `llm.yaml` | SandboxTemplate | JUSTIFIED-EXCEPTION (extension mapping is a later slice; exception 3) |
+| `extensions/examples/sandboxclaim.yaml`, `sandbox-claim.yaml` | SandboxClaim (upstream extension) | JUSTIFIED-EXCEPTION (extension mapping is a later slice; exception 3) |
 
 ## Documented exceptions (justified, not silent)
 
-These are the known, intentional differences. Each is a target for the harness
-slice to either close or keep as a recorded exception.
-
 1. podTemplate fidelity. The facade reconciles the upstream
-   `spec.podTemplate.spec.containers[*].env` onto our run path. Other
-   podTemplate fields (image, resources, volumes, security context, init
-   containers, multiple containers) are NOT yet honored per-Sandbox: the husk
-   pool pins image and resources at pool-build time, and a Sandbox binds to a
-   pool via the `agentrun.dev/pool` bridge annotation. Closing this requires the
-   pool/template extension mappings (a later slice).
+   `spec.podTemplate.spec.containers[0].env` onto our run path (env.valueFrom
+   refs copy through unchanged). Other podTemplate fields (image, resources,
+   ports, command/args, volumes/volumeMounts, serviceAccountName, security
+   context, multiple containers) are NOT yet honored per-Sandbox: the husk pool
+   pins image and resources at pool-build time, and a Sandbox binds to a pool via
+   the `agentrun.dev/pool` bridge annotation. The manifests still apply unchanged
+   and the facade bridges the claim. Closing this requires the pool/template
+   extension mappings (a later slice).
 
 2. pause/resume semantics. Upstream hibernation is a disk roundtrip (the pod is
-   torn down and its state persisted to a volume, then rebuilt). Ours is a
-   memory snapshot/restore on the fork engine: the VM state is captured and
-   restored from a snapshot, which is a different mechanism and is expected to
-   be substantially faster (memory restore vs disk rebuild). This is a
-   behavioral difference, NOT a behavioral regression: the observable lifecycle
-   (paused -> resumed, state preserved) is equivalent. The speed claim is a
-   TARGET, not asserted here: it will be measured in `bench/facade/` in a later
-   slice against an upstream reference. No public number is stated until that
-   benchmark exists (the no-unverified-claims rule).
+   torn down and its state persisted to a volume, then rebuilt). Ours is a memory
+   snapshot/restore on the fork engine. This is a behavioral difference, NOT a
+   regression: the observable lifecycle (paused -> resumed, state preserved) is
+   equivalent. The speed claim is a TARGET, not asserted here; it will be measured
+   in `bench/facade/` in a later slice against an upstream reference. No public
+   number is stated until that benchmark exists (the no-unverified-claims rule).
 
-3. extension kinds. `SandboxWarmPool` -> our pool and `SandboxClaim`
-   (the upstream extension) -> our fork-from-snapshot are NOT yet mapped. The
-   facade today maps only the core `Sandbox`. The extension mappings are a later
-   slice.
+3. extension kinds. `SandboxWarmPool` -> our pool, `SandboxTemplate` -> our
+   template, and the upstream `SandboxClaim` -> our fork-from-snapshot are NOT yet
+   mapped. The facade today maps only the core `Sandbox`. The extension mappings
+   are a later slice.
 
 4. stable identity / storage contract. Stable hostname/identity and the full
    storage (`volumeClaimTemplates`) contract fidelity are a later slice.
 
 ## What is PROVEN now
 
-In `internal/facade` (envtest, installs the vendored upstream Sandbox CRD plus
-our agentrun.dev CRDs):
+- envtest (`internal/facade`): the facade creates the bridged husk-backed claim
+  for a Sandbox, mirrors its readiness into the Sandbox status, terminates the
+  claim on replicas 0, and leaves it owner-referenced for GC on delete. Every
+  vendored core Sandbox example applies unchanged and bridges a claim.
+- CI (`facade-conformance` kind job): their hello-world Sandbox applies UNCHANGED
+  against a live apiserver and the five object-level facts (a)-(e) above hold.
 
-- An upstream `Sandbox` (replicas 1, the default) drives the facade to create
-  our husk-backed `SandboxClaim`, bound to the pool named by the
-  `agentrun.dev/pool` bridge annotation, or the configured `--default-pool` when
-  unset.
-- The claim is owner-referenced to the Sandbox (GC + the watch back-link), and
-  the Sandbox podTemplate container env is mirrored onto the claim env.
-- Driving our claim to phase `Ready` mirrors a Ready `True` condition,
-  `status.replicas` 1, and a derived `status.serviceFQDN` into the upstream
-  Sandbox status.
-- `replicas` 0 terminates our claim and reports Ready `False`, replicas 0.
-- Deleting the Sandbox leaves our claim owner-referenced for the apiserver
-  garbage collector to reap.
+## What is OPEN (later #19 slices)
 
-## What is OPEN
-
-- The full upstream conformance e2e harness vendored and run in CI against the
-  facade (their manifests unchanged, identical behavior), with the latest-two-
-  minors version matrix.
-- pause/resume as a memory snapshot/restore, and the milliseconds-vs-
-  hibernation comparison in `bench/facade/`.
-- The `SandboxWarmPool` -> our pool and `SandboxClaim` -> our fork-from-snapshot
-  extension mappings.
+- The in-VM conformance (PodReady / ChromeReady, the "Pod is Ready; Service
+  Exists" status) on a KVM-capable kubelet / bare-metal reference node (the #18
+  nested-VMM boundary).
+- Running the full upstream Go e2e suite green end to end (needs their controller
+  + the running-sandbox tail).
+- The latest-two-minors CI matrix (only v0.4.6 is wired now; the second minor is
+  a follow-up).
+- pause/resume as a memory snapshot/restore + `bench/facade/`.
+- The `SandboxWarmPool` -> our pool and upstream `SandboxClaim` -> our
+  fork-from-snapshot extension mappings.
 - Full podTemplate fidelity, stable hostname/identity, and the storage contract.

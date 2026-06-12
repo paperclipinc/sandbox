@@ -1,0 +1,15 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: "sandbox-automount-token-binding"
+spec:
+  policyName: "sandbox-automount-token-policy"
+  validationActions: [Deny]
+  matchResources:
+    # Adjust below to limit the scope of the policy
+    namespaceSelector:
+      matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: NotIn
+        values:
+        - kube-system

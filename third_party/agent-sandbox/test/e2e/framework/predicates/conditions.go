@@ -1,0 +1,189 @@
+// Copyright 2025 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package predicates
+
+import (
+	"fmt"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// objectWithStatus is a simplified struct to parse the status of a resource.
+type objectWithStatus struct {
+	Status struct {
+		Conditions         []metav1.Condition `json:"conditions,omitempty"`
+		ReadyReplicas      int                `json:"readyReplicas,omitempty"`
+		ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	} `json:"status"`
+	Spec struct {
+		Replicas int `json:"replicas,omitempty"`
+	} `json:"spec"`
+}
+
+// ReadyConditionIsTrue checks if the given object has a Ready condition set to True.
+var ReadyConditionIsTrue = &StatusPredicate{
+	MatchType:   "Ready",
+	MatchStatus: metav1.ConditionTrue,
+}
+
+// ConditionReasonEquals checks if the given object has a condition with the
+// specified type and reason.
+func ConditionReasonEquals(conditionType, reason string) ObjectPredicate {
+	return &ConditionReasonPredicate{
+		ConditionType: conditionType,
+		Reason:        reason,
+	}
+}
+
+type StatusPredicate struct {
+	MatchType   string
+	MatchStatus metav1.ConditionStatus
+}
+
+type ConditionReasonPredicate struct {
+	ConditionType string
+	Reason        string
+}
+
+func (s *StatusPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+
+	for _, cond := range status.Status.Conditions {
+		if cond.Type == s.MatchType && cond.Status == s.MatchStatus {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *StatusPredicate) String() string {
+	return fmt.Sprintf("StatusPredicate(Type=%s,Status=%s)", s.MatchType, s.MatchStatus)
+}
+
+func (c *ConditionReasonPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+
+	for _, cond := range status.Status.Conditions {
+		if cond.Type == c.ConditionType && cond.Reason == c.Reason {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *ConditionReasonPredicate) String() string {
+	return fmt.Sprintf("ConditionReasonPredicate(Type=%s,Reason=%s)", c.ConditionType, c.Reason)
+}
+
+// asUnstructured converts a client.Object to an *unstructured.Unstructured.
+func asUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		return u, nil
+	}
+
+	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, fmt.Errorf("converting object of type %T to unstructured: %w", obj, err)
+	}
+	return &unstructured.Unstructured{Object: m}, nil
+}
+
+// asTyped attempts to convert a client.Object to a specific type T.
+func asTyped[T any](obj client.Object) (T, error) {
+	if t, ok := obj.(T); ok {
+		return t, nil
+	}
+
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		var typedObj T
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &typedObj); err != nil {
+			var zero T
+			return zero, fmt.Errorf("converting unstructured to type %T: %w", typedObj, err)
+		}
+		return typedObj, nil
+	}
+
+	var zero T
+	return zero, fmt.Errorf("got %T, want %T", obj, zero)
+}
+
+// ReadyReplicasConditionIsTrue checks if the given object has more than 0 replicas.
+var ReadyReplicasConditionIsTrue = &ReadyReplicasPredicate{}
+
+type ReadyReplicasPredicate struct{}
+
+func (s *ReadyReplicasPredicate) String() string {
+	return "ReadyReplicasPredicate(Has all replicas ready)"
+}
+
+func (s *ReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+	if status.Status.ReadyReplicas == status.Spec.Replicas {
+		return true, nil
+	}
+	return false, nil
+}
+
+// ObservedGenerationMatchesGeneration checks if the given object's ObservedGeneration matches its Generation.
+var ObservedGenerationMatchesGeneration = &ObservedGenerationMatchesGenerationPredicate{}
+
+type ObservedGenerationMatchesGenerationPredicate struct{}
+
+func (s *ObservedGenerationMatchesGenerationPredicate) String() string {
+	return "ObservedGenerationMatchesGenerationPredicate(ObservedGeneration == Generation)"
+}
+
+func (s *ObservedGenerationMatchesGenerationPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+	if status.Status.ObservedGeneration == obj.GetGeneration() {
+		return true, nil
+	}
+	return false, nil
+}

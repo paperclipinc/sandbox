@@ -1,0 +1,11 @@
+name: paperclip-codeql-config
+
+# Exclude vendored upstream code from our security scanning. third_party/
+# holds the agent-sandbox conformance artifacts (their examples and e2e
+# tests) vendored verbatim for the facade conformance harness (issue #19).
+# Their example apps are not our code; scanning them surfaces alerts in
+# upstream that we neither own nor ship as a product. The Go subtree is
+# already isolated by its own nested go.mod; this excludes the Python and
+# any other vendored sources from CodeQL.
+paths-ignore:
+  - third_party

@@ -1348,3 +1348,281 @@ jobs:
           kubectl -n default delete sandboxpool husk-e2e --ignore-not-found=true || true
           kubectl -n default delete sandboxtemplate husk-e2e --ignore-not-found=true || true
           kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+
+  facade-conformance:
+    # The agents.x-k8s.io conformance harness (issue #19): apply the UPSTREAM
+    # example Sandbox manifest UNCHANGED against our facade and assert
+    # OBJECT-LEVEL conformance on kind. This mirrors kind-e2e-husk (image
+    # build/load, kind cluster, CRD install, deploy, apply, assert, diagnostics
+    # trap, SETUP-vs-conformance distinction).
+    #
+    # SCOPE SPLIT, stated honestly:
+    #   - PROVEN here (object level, no running sandbox needed): the upstream
+    #     agents.x-k8s.io Sandbox CRD ADMITS their manifest verbatim; our facade
+    #     CREATES the bridged husk-backed SandboxClaim (owner reference +
+    #     agentrun.dev/pool bridge annotation); our facade UPDATES the Sandbox
+    #     status with a Ready condition reflecting the run-path state achievable
+    #     on kind (Ready=False while the husk claim is Pending, since no VMM
+    #     boots here); deleting the Sandbox leaves the claim owner-referenced for
+    #     GC and a replicas-0 Sandbox terminates the run-path object.
+    #   - NOT asserted here (the #18 nested-VMM boundary): the in-VM Ready tail.
+    #     Upstream conformance predicates (PodReady / ChromeReady, the
+    #     "Pod is Ready; Service Exists" status) require a RUNNING sandbox. Our
+    #     run path reaches Ready only when a dormant Firecracker VMM boots inside
+    #     the husk pod, which needs a KVM-capable kubelet (proven in
+    #     kvm-test.yaml, not on this shared runner). Their Go e2e suite also
+    #     imports their in-tree controller and asserts upstream-controller pods /
+    #     services, so it is bare-metal-gated and is NOT run here; see the matrix
+    #     in docs/facade-conformance.md.
+    #
+    # Every failure distinguishes a SETUP issue (image load, CRD install, stack
+    # rollout) from a real CONFORMANCE failure, and dumps facade + our-claim +
+    # sandbox describe/logs on any failure (trap).
+    runs-on: ubuntu-latest
+    needs: [go-test, docker-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: agent-run-facade
+          config: hack/kind-config.yaml
+      - name: Build and load the facade + controller images
+        # The facade reconciles the upstream Sandbox; the controller owns the
+        # SandboxPool/SandboxClaim object lifecycle the facade bridges onto. The
+        # device plugin and forkd (the in-VM engine) are NOT needed for the
+        # object-level assertions and are deliberately omitted (their VMM tail is
+        # the bare-metal boundary documented above).
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.facade -t agent-run-facade:ci .
+          docker build -f Dockerfile.controller -t agent-run-controller:ci .
+          for img in agent-run-facade agent-run-controller; do
+            kind load docker-image "$img:ci" --name agent-run-facade
+          done
+      - name: Install the upstream agents.x-k8s.io CRDs (vendored, unchanged)
+        # Install the upstream Sandbox CRD from the vendored third_party tree, so
+        # the apiserver ADMITS their Sandbox manifest verbatim. A failure here is
+        # a SETUP issue (the vendored CRD did not apply), not a conformance gap.
+        run: |
+          set -euo pipefail
+          kubectl apply -f third_party/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/sandboxes.agents.x-k8s.io
+      - name: Deploy our CRDs, controller, and the facade (default-pool=default)
+        # Apply our production base (CRDs + controller + RBAC + namespace), then
+        # the opt-in facade. Retarget both images to the locally-loaded :ci tags
+        # with IfNotPresent (kind serves the local image, no registry pull). The
+        # facade default pool is "default" (set below), matching the SandboxPool
+        # we create; the upstream manifest carries no agentrun.dev/pool
+        # annotation, so the facade binds it to that default pool.
+        run: |
+          set -euo pipefail
+          kubectl apply -k deploy/
+          kubectl apply -f deploy/facade/facade.yaml
+
+          kubectl -n agent-run set image deployment/agent-run-controller \
+            controller=agent-run-controller:ci
+          kubectl -n agent-run set image deployment/agent-run-facade \
+            facade=agent-run-facade:ci
+          for d in deployment/agent-run-controller deployment/agent-run-facade; do
+            kubectl -n agent-run patch "$d" --type=json \
+              -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
+          done
+          kubectl -n agent-run scale deployment/agent-run-controller --replicas=1
+      - name: Stack rolls out (controller + facade Ready, PKI Secrets exist)
+        # Gate: the controller and facade roll out Ready and the controller's
+        # EnsurePKI minted the CA + forkd + controller TLS Secrets. A missing
+        # rollout or Secret is a SETUP failure, distinct from a conformance gap.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== facade-conformance setup diagnostics ==="
+            kubectl -n agent-run get pods -o wide || true
+            kubectl -n agent-run get secrets || true
+            kubectl -n agent-run describe deployment/agent-run-facade || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=80 || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=80 || true
+          }
+          trap dump ERR
+          kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
+          kubectl -n agent-run rollout status deployment/agent-run-facade --timeout=180s
+          for s in agent-run-ca agent-run-forkd-tls agent-run-controller-tls; do
+            kubectl -n agent-run get secret "$s" >/dev/null || {
+              echo "FACADE-SETUP: PKI Secret $s missing (EnsurePKI did not complete)"
+              exit 1
+            }
+            echo "PKI Secret present: $s"
+          done
+      - name: Create the default SandboxPool the facade binds to
+        # The facade binds an annotation-less Sandbox to its --default-pool
+        # ("default"). Create the SandboxTemplate + SandboxPool so the bridged
+        # claim references a real pool object. The pool need not reach Ready for
+        # the object-level assertions (a running pool needs the VMM tail); the
+        # SandboxClaim CRD admitting the claim is what matters here.
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: agentrun.dev/v1alpha1
+          kind: SandboxTemplate
+          metadata:
+            name: default
+            namespace: default
+          spec:
+            image: busybox:stable
+            resources:
+              cpu: "1"
+              memory: 512Mi
+          ---
+          apiVersion: agentrun.dev/v1alpha1
+          kind: SandboxPool
+          metadata:
+            name: default
+            namespace: default
+          spec:
+            templateRef:
+              name: default
+            replicas: 0
+          YAML
+          kubectl -n default get sandboxtemplate default
+          kubectl -n default get sandboxpool default
+      - name: Apply the upstream example Sandbox manifest UNCHANGED
+        # The conformance acceptance: their example manifest applies verbatim.
+        # We substitute ONLY the ${IMAGE} placeholder on a COPY (the vendored
+        # file is not edited; apply-unchanged is the point), then kubectl apply.
+        # A rejection here is a CONFORMANCE failure (their manifest is not
+        # admitted by the upstream CRD we installed).
+        run: |
+          set -euo pipefail
+          src=third_party/agent-sandbox/examples/hello-world-sandbox/hello-world.yaml
+          cp "$src" /tmp/hello-world.yaml
+          sed -i 's#${IMAGE}#busybox:stable#g' /tmp/hello-world.yaml
+          echo "=== applied manifest (image placeholder substituted on a copy) ==="
+          cat /tmp/hello-world.yaml
+          kubectl -n default apply -f /tmp/hello-world.yaml
+      - name: Conformance assertions (object level)
+        # The five object-level conformance facts. Each is gated; a failure is a
+        # CONFORMANCE failure (the setup gates above already passed). The trap
+        # dumps the sandbox + our claim + facade logs on any failure.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== facade-conformance diagnostics ==="
+            kubectl -n default get sandbox.agents.x-k8s.io -o wide || true
+            kubectl -n default describe sandbox.agents.x-k8s.io hello-world || true
+            kubectl -n default get sandboxclaim -o wide || true
+            kubectl -n default describe sandboxclaim hello-world || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=120 || true
+          }
+          trap dump ERR
+
+          # (a) the Sandbox is ADMITTED by the upstream CRD.
+          kubectl -n default get sandbox.agents.x-k8s.io hello-world >/dev/null
+          echo "PASS (a): upstream Sandbox admitted verbatim"
+
+          # (b) our facade creates the bridged husk-backed SandboxClaim, with the
+          # owner reference back to the Sandbox AND the agentrun.dev/pool bridge
+          # annotation.
+          claimed=0
+          for i in $(seq 1 30); do
+            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+              claimed=1
+              break
+            fi
+            echo "  [${i}/30] waiting for the bridged SandboxClaim"
+            sleep 2
+          done
+          if [ "$claimed" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: facade did not create the bridged SandboxClaim"
+            exit 1
+          fi
+          owner=$(kubectl -n default get sandboxclaim hello-world \
+            -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
+          pool=$(kubectl -n default get sandboxclaim hello-world \
+            -o jsonpath='{.metadata.annotations.agentrun\.dev/pool}')
+          if [ "$owner" != "Sandbox/hello-world" ]; then
+            echo "FACADE-CONFORMANCE: claim owner = '$owner', want Sandbox/hello-world"
+            exit 1
+          fi
+          if [ "$pool" != "default" ]; then
+            echo "FACADE-CONFORMANCE: claim agentrun.dev/pool = '$pool', want default"
+            exit 1
+          fi
+          echo "PASS (b): facade bridged a husk-backed SandboxClaim (owner=$owner pool=$pool)"
+
+          # (c) our facade UPDATES the Sandbox status with a Ready condition. On
+          # kind no VMM boots, so the run-path state is Ready=False while the
+          # husk claim is Pending; assert the condition EXISTS and is being
+          # mirrored by the facade (the run-path state reflected here).
+          got_cond=0
+          for i in $(seq 1 30); do
+            status=$(kubectl -n default get sandbox.agents.x-k8s.io hello-world \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            if [ -n "$status" ]; then
+              got_cond=1
+              echo "  Ready condition status mirrored by the facade: $status"
+              break
+            fi
+            echo "  [${i}/30] waiting for the facade to mirror the Sandbox status"
+            sleep 2
+          done
+          if [ "$got_cond" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: facade did not mirror a Ready condition into the Sandbox status"
+            exit 1
+          fi
+          echo "PASS (c): facade mirrors the run-path state into the Sandbox status (in-VM Ready tail is the #18 bare-metal boundary, not asserted here)"
+
+          # (d) deleting the Sandbox GCs our claim (owner-reference cascade; a
+          # live apiserver runs the garbage collector, unlike envtest).
+          kubectl -n default delete sandbox.agents.x-k8s.io hello-world
+          gone=0
+          for i in $(seq 1 30); do
+            if ! kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+              gone=1
+              break
+            fi
+            echo "  [${i}/30] waiting for the owner-reference GC to reap the claim"
+            sleep 2
+          done
+          if [ "$gone" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: deleting the Sandbox did not GC the bridged claim"
+            exit 1
+          fi
+          echo "PASS (d): deleting the Sandbox GCs the bridged claim"
+
+          # (e) a replicas-0 Sandbox terminates the run-path object: re-create the
+          # Sandbox, wait for the claim, then scale to replicas 0 and assert the
+          # facade deletes the claim.
+          sed 's#^spec:#spec:\n  replicas: 1#' /tmp/hello-world.yaml | kubectl -n default apply -f -
+          for i in $(seq 1 30); do
+            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n default patch sandbox.agents.x-k8s.io hello-world --type=merge \
+            -p '{"spec":{"replicas":0}}'
+          term=0
+          for i in $(seq 1 30); do
+            if ! kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+              term=1
+              break
+            fi
+            echo "  [${i}/30] waiting for replicas-0 to terminate the run-path object"
+            sleep 2
+          done
+          if [ "$term" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: replicas-0 Sandbox did not terminate the bridged claim"
+            exit 1
+          fi
+          echo "PASS (e): replicas-0 Sandbox terminates the run-path object"
+          echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is the #18 bare-metal boundary"
+      - name: Facade conformance diagnostics and cleanup
+        if: always()
+        run: |
+          kubectl -n default delete sandbox.agents.x-k8s.io hello-world --ignore-not-found=true || true
+          kubectl -n default delete sandboxpool default --ignore-not-found=true || true
+          kubectl -n default delete sandboxtemplate default --ignore-not-found=true || true
+          kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=60 || true
