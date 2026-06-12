@@ -171,13 +171,9 @@ func TestFacadeWarmPoolReplicasFollowUpstream(t *testing.T) {
 
 	// Simulate an HPA scaling their warm pool to 5.
 	var cur extv1alpha1.SandboxWarmPool
-	if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "ext-warmpool-hpa", Namespace: "default"}, &cur); err != nil {
-		t.Fatalf("get ext warm pool: %v", err)
-	}
-	cur.Spec.Replicas = 5
-	if err := k8sClient.Update(testCtx, &cur); err != nil {
-		t.Fatalf("scale ext warm pool to 5: %v", err)
-	}
+	updateWithRetry(t, types.NamespacedName{Name: "ext-warmpool-hpa", Namespace: "default"}, &cur, func() {
+		cur.Spec.Replicas = 5
+	})
 
 	eventually(t, "our pool follows the upstream replica change to 5", func() bool {
 		p, ok := getOurPool(t, "ext-warmpool-hpa")
@@ -314,11 +310,10 @@ func TestFacadeClaimMirrorsStatusAndGCs(t *testing.T) {
 	})
 
 	// Drive our claim Ready (the test seam the real husk activation path sets).
-	claim.Status.Phase = runv1alpha1.SandboxReady
-	claim.Status.Endpoint = "10.0.0.9:9091"
-	if err := k8sClient.Status().Update(testCtx, claim); err != nil {
-		t.Fatalf("drive our claim ready: %v", err)
-	}
+	statusUpdateWithRetry(t, types.NamespacedName{Name: "ext-claim-status", Namespace: "default"}, claim, func() {
+		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Endpoint = "10.0.0.9:9091"
+	})
 
 	eventually(t, "upstream claim status mirrors Bound/Ready + sandbox name", func() bool {
 		var got extv1alpha1.SandboxClaim

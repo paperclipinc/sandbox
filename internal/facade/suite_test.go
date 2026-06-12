@@ -11,8 +11,10 @@ import (
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -136,4 +138,36 @@ func eventually(t *testing.T, msg string, cond func() bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for: %s", msg)
+}
+
+// updateWithRetry re-Gets obj and re-applies mutate before each Update attempt,
+// so a test spec change does not flake on an optimistic-lock conflict with the
+// reconciler's concurrent status writes.
+func updateWithRetry(t *testing.T, key types.NamespacedName, obj client.Object, mutate func()) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(testCtx, key, obj); err != nil {
+			return err
+		}
+		mutate()
+		return k8sClient.Update(testCtx, obj)
+	}); err != nil {
+		t.Fatalf("update %s: %v", key.Name, err)
+	}
+}
+
+// statusUpdateWithRetry re-Gets obj and re-applies mutate before each
+// Status().Update attempt, so a test status write does not flake on an
+// optimistic-lock conflict with the reconciler's concurrent writes.
+func statusUpdateWithRetry(t *testing.T, key types.NamespacedName, obj client.Object, mutate func()) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(testCtx, key, obj); err != nil {
+			return err
+		}
+		mutate()
+		return k8sClient.Status().Update(testCtx, obj)
+	}); err != nil {
+		t.Fatalf("status update %s: %v", key.Name, err)
+	}
 }
