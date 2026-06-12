@@ -199,11 +199,26 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   - OPEN (later slices): the in-VM conformance (their PodReady/ChromeReady
     predicates = a running sandbox) on a KVM-capable kubelet / bare-metal node
     (the #18 nested-VMM boundary); the full upstream Go e2e suite run green end
-    to end; the latest-two-minors CI matrix (only v0.4.6 is wired now);
-    pause/resume as a memory snapshot/restore plus the milliseconds-vs-
-    hibernation bench in `bench/facade/`; the SandboxWarmPool -> our pool and
-    SandboxClaim -> our fork-from-snapshot extension mappings; full podTemplate
-    fidelity; executing the deferred rename with API v2.
+    to end; the latest-two-minors CI matrix (only v0.4.6 is wired now); the
+    state-PRESERVING pause (a memory snapshot across the pause via the Checkpoint
+    primitive, so resume restores the exact in-VM state) and the in-VM resume
+    head-to-head number (a bare-metal-reference-node target, #16); the
+    SandboxWarmPool -> our pool and SandboxClaim -> our fork-from-snapshot
+    extension mappings; full podTemplate fidelity; executing the deferred rename
+    with API v2.
+  - ✅ DONE (slice 3, this slice): pause/resume mapping + the `bench/facade/`
+    harness. The facade maps the upstream Sandbox `spec.replicas` 0<->1
+    pause/resume contract onto the husk warm pool: replicas 0 (pause) RELEASES
+    the bridged claim so the husk pod returns dormant to the warm pool; replicas
+    1 after a 0 (resume) RE-ACTIVATES a dormant warm husk pod via the same fast
+    path as create (the ~42ms husk activation, #66), idempotent + stable under a
+    1->0->1->0 toggle, with the conformant `Status.Replicas` + endpoint
+    observable preserved (envtest `internal/facade` + the `facade-conformance`
+    job's replicas 1->0->1 object-level resume assertion). `bench/facade/` is the
+    reproducible pause/resume latency harness + methodology; the order-of-
+    magnitude in-VM resume number stays a bare-metal-reference-node target (#16),
+    since the husk VMM does not boot on kind (the #18 boundary), so only the
+    object-level resume is measured there.
 - **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge

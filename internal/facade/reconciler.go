@@ -21,6 +21,7 @@ package facade
 import (
 	"context"
 	"fmt"
+	"net"
 
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 
@@ -87,12 +88,25 @@ func (r *SandboxReconciler) poolFor(sb *agentsv1alpha1.Sandbox) string {
 	return r.DefaultPool
 }
 
-// Reconcile drives the Sandbox -> husk run-path lifecycle:
-//   - replicas >= 1 (default 1) and not deleting: ensure our SandboxClaim, then
-//     mirror its readiness into the Sandbox status.
-//   - replicas 0: terminate our SandboxClaim (delete it).
+// Reconcile drives the Sandbox -> husk run-path lifecycle. The upstream
+// pause/resume contract is the spec.replicas 0<->1 toggle (upstream v0.4.6 has
+// no stateful hibernate field; their controller deletes the pod on 0 and
+// cold-creates it on 1). We map it onto the husk warm pool:
+//
+//   - replicas >= 1 (default 1) and not deleting (create OR resume): ensure our
+//     SandboxClaim. On resume this re-activates a dormant warm husk pod via the
+//     same fast path as the initial create. Mirror the claim readiness, and on
+//     Ready set the serving observables (serviceFQDN, podIPs).
+//   - replicas 0 (pause): RELEASE the run path to the warm pool by deleting our
+//     SandboxClaim, so the bound husk pod returns dormant to the pool. Clear the
+//     serving observables (Status.Replicas 0, Ready False, serviceFQDN + podIPs
+//     cleared, no serving endpoint).
 //   - deletion: the owner reference garbage-collects our SandboxClaim; we just
 //     observe and return.
+//
+// The mapping is idempotent and stable under 1->0->1->0 toggling: pause is a
+// no-op when the claim is already released, resume re-creates the same named
+// claim, and the status writes are conditional (no write when nothing changed).
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -113,35 +127,51 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// No pool to bind to and no default configured: surface a not-ready
 		// condition with actionable remediation rather than creating an
 		// unbindable claim.
-		return ctrl.Result{}, r.setReady(ctx, &sb, metav1.ConditionFalse, "NoPool",
-			fmt.Sprintf("no %s annotation and no --default-pool configured; set the bridge annotation or the facade default pool", PoolAnnotation), 0)
+		return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
+			status:  metav1.ConditionFalse,
+			reason:  "NoPool",
+			message: fmt.Sprintf("no %s annotation and no --default-pool configured; set the bridge annotation or the facade default pool", PoolAnnotation),
+		})
 	}
 
-	// replicas 0: scaled to zero. Terminate our run-path object and report the
-	// Sandbox not ready with zero replicas.
+	// replicas 0 (pause): release the run path to the warm pool. Delete our
+	// SandboxClaim so the bound husk pod returns dormant to the pool, and clear
+	// the serving observables (serviceFQDN + podIPs).
 	if desiredReplicas(&sb) == 0 {
 		if err := r.deleteClaim(ctx, &sb); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.setReady(ctx, &sb, metav1.ConditionFalse, "ScaledToZero",
-			"replicas is 0; the husk run-path object is terminated", 0)
+		return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
+			status:  metav1.ConditionFalse,
+			reason:  "Paused",
+			message: "replicas is 0 (paused); the husk run-path object is released to the warm pool",
+		})
 	}
 
-	// replicas >= 1: ensure our SandboxClaim exists and mirror its readiness.
+	// replicas >= 1 (create or resume): ensure our SandboxClaim exists. On a
+	// resume after a pause this re-activates a dormant warm husk pod via the same
+	// fast path as create. Mirror the claim readiness.
 	claim, err := r.ensureClaim(ctx, &sb, pool)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	ready := claim.Status.Phase == runv1alpha1.SandboxReady
-	if ready {
+	if claim.Status.Phase == runv1alpha1.SandboxReady {
 		logger.V(1).Info("sandbox ready", "sandbox", req.NamespacedName, "claim", claim.Name, "endpoint", claim.Status.Endpoint)
-		return ctrl.Result{}, r.setReady(ctx, &sb, metav1.ConditionTrue, "ClaimReady",
-			fmt.Sprintf("husk run-path object %q is Ready", claim.Name), 1)
+		return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
+			status:   metav1.ConditionTrue,
+			reason:   "ClaimReady",
+			message:  fmt.Sprintf("husk run-path object %q is Ready", claim.Name),
+			replicas: 1,
+			endpoint: claim.Status.Endpoint,
+		})
 	}
 
-	return ctrl.Result{}, r.setReady(ctx, &sb, metav1.ConditionFalse, "Claim"+string(claim.Status.Phase),
-		fmt.Sprintf("husk run-path object %q is in phase %q", claim.Name, claim.Status.Phase), 0)
+	return ctrl.Result{}, r.mirror(ctx, &sb, statusUpdate{
+		status:  metav1.ConditionFalse,
+		reason:  "Claim" + string(claim.Status.Phase),
+		message: fmt.Sprintf("husk run-path object %q is in phase %q", claim.Name, claim.Status.Phase),
+	})
 }
 
 // ensureClaim creates or returns our SandboxClaim for a Sandbox. The claim is
@@ -203,32 +233,85 @@ func (r *SandboxReconciler) deleteClaim(ctx context.Context, sb *agentsv1alpha1.
 	return nil
 }
 
-// setReady mirrors readiness into the upstream Sandbox status: the Ready
-// condition, the actual replica count, and the derived serviceFQDN. It patches
-// the status subresource and is idempotent (no write when nothing changed).
-func (r *SandboxReconciler) setReady(ctx context.Context, sb *agentsv1alpha1.Sandbox, status metav1.ConditionStatus, reason, message string, replicas int32) error {
+// statusUpdate is the set of upstream Sandbox status facts the facade mirrors in
+// one reconcile: the Ready condition, the actual replica count, and (when
+// running with a serving endpoint) the serviceFQDN + podIPs. The serving
+// observables are populated only when status is True with an endpoint; on every
+// other path (pause, pending, error) they are CLEARED so a paused or not-ready
+// Sandbox never advertises a stale endpoint.
+type statusUpdate struct {
+	status   metav1.ConditionStatus
+	reason   string
+	message  string
+	replicas int32
+	// endpoint is the husk run-path endpoint (host:port) when Ready, used to
+	// derive podIPs. Empty on every not-serving path.
+	endpoint string
+}
+
+// mirror writes one statusUpdate onto the upstream Sandbox status subresource.
+// It is idempotent (no write when nothing changed) and is the single place the
+// serving observables (serviceFQDN, podIPs) are set or cleared, so pause always
+// clears them and resume always re-populates them.
+func (r *SandboxReconciler) mirror(ctx context.Context, sb *agentsv1alpha1.Sandbox, u statusUpdate) error {
 	cond := metav1.Condition{
 		Type:               SandboxConditionType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
+		Status:             u.status,
+		Reason:             u.reason,
+		Message:            u.message,
 		ObservedGeneration: sb.Generation,
 	}
 
 	before := sb.DeepCopy()
 	changed := apimeta.SetStatusCondition(&sb.Status.Conditions, cond)
-	sb.Status.Replicas = replicas
-	if fqdn := r.serviceFQDN(sb); fqdn != "" {
-		sb.Status.ServiceFQDN = fqdn
+	sb.Status.Replicas = u.replicas
+
+	// Serving observables: set on Ready-with-endpoint, cleared otherwise.
+	if u.status == metav1.ConditionTrue && u.endpoint != "" {
+		sb.Status.ServiceFQDN = r.serviceFQDN(sb)
+		sb.Status.PodIPs = podIPsFromEndpoint(u.endpoint)
+	} else {
+		sb.Status.ServiceFQDN = ""
+		sb.Status.PodIPs = nil
 	}
 
-	if !changed && before.Status.Replicas == sb.Status.Replicas && before.Status.ServiceFQDN == sb.Status.ServiceFQDN {
+	if !changed &&
+		before.Status.Replicas == sb.Status.Replicas &&
+		before.Status.ServiceFQDN == sb.Status.ServiceFQDN &&
+		equalStrings(before.Status.PodIPs, sb.Status.PodIPs) {
 		return nil
 	}
 	if err := r.Status().Update(ctx, sb); err != nil {
 		return fmt.Errorf("mirror status into sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
 	return nil
+}
+
+// podIPsFromEndpoint derives the upstream status.podIPs from the husk run-path
+// endpoint (host:port). The host portion is the serving pod IP; a bare host
+// without a port is taken as-is. Returns nil when no IP can be parsed.
+func podIPsFromEndpoint(endpoint string) []string {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		host = endpoint
+	}
+	if host == "" {
+		return nil
+	}
+	return []string{host}
+}
+
+// equalStrings reports whether two string slices are element-wise equal.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // serviceFQDN derives the upstream status.serviceFQDN for a Sandbox using the

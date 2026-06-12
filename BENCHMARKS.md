@@ -242,6 +242,49 @@ not yet exist as a pinned CI runner. This target remains OPEN and will be measur
 when the pinned reference node is provisioned. Until then, the bare-metal
 activation latency is not stated.
 
+## Facade vs upstream reference: resume latency
+
+This section frames the resume-latency comparison between our `agents.x-k8s.io`
+facade (issue #19) and the upstream reference controller, for the upstream
+pause/resume contract (the Sandbox `spec.replicas` 0<->1 toggle; upstream v0.4.6
+has no stateful hibernate field, so pause/resume IS that toggle). The harness is
+`bench/facade/` (see [`bench/facade/README.md`](bench/facade/README.md)).
+
+### The two resume paths
+
+| system | resume = replicas 0 -> 1 does | dominant cost |
+| --- | --- | --- |
+| our facade | RE-ACTIVATES a dormant warm husk pod: re-create the bridged `SandboxClaim`, the warm pool hands back a pre-prepared husk (snapshot load + resume + guest-ready) | the husk activation: ~42ms P50 SHARED-CI (#66; the "Husk-stub activation latency datapoint" section above), NOT a fresh pod |
+| upstream reference (v0.4.6) | COLD-CREATES a pod: delete the pod on 0, create a fresh one on 1 | pod schedule + admission + image + container start + app boot, on the order of seconds |
+
+The facade resume re-activates a warm dormant VM; the upstream resume cold-creates
+a pod. The **order-of-magnitude resume advantage is the DESIGN claim**: a
+warm-pool re-activation (the ~42ms husk activation datapoint, #66) is
+fundamentally cheaper than a cold pod create (seconds). We do not paste a single
+head-to-head number here.
+
+### What the harness measures, and what is a target
+
+- On a **shared-CI / kind** cluster the husk VMM does not boot (the #18
+  boundary), so the **in-VM resume tail is NOT measurable** and a naive
+  head-to-head would falsely flatter the upstream side (its container does boot
+  on kind, ours cannot). `bench/facade/` therefore measures only the
+  OBJECT-LEVEL resume latency on kind (the facade re-creating the bridged claim),
+  and the `facade-conformance` kind job asserts the object-level resume
+  (replicas 1->0->1 releases then re-creates the claim).
+- The **same-cluster in-VM head-to-head number** (our warm husk re-activation vs
+  the upstream cold pod create, both timed to a serving endpoint) is a
+  **bare-metal-reference-node TARGET (#16)**. It cannot be measured on kind; it
+  is reproducible from `bench/facade/` on a KVM-capable kubelet with the upstream
+  controller deployed alongside, exactly as the README documents.
+
+Every number is sourced from a datapoint (the ~42ms husk activation, #66, from
+the husk-stub CI phase) or the `bench/facade/` harness, or is marked a target
+(#16). The representative upstream cold-start figure ("on the order of seconds"
+for pod schedule + image + container start + app boot) is the documented,
+clearly-labeled cold-start range, not an invented measurement; the precise
+same-hardware figure is what the bare-metal harness run produces.
+
 ## Open (not yet measured)
 
 These are explicitly out of scope for the current harness and tracked in
@@ -260,6 +303,12 @@ These are explicitly out of scope for the current harness and tracked in
   before p99 degrades, unique-vs-shared memory at density).
 - **Pool-rebuild propagation**: time from a new template snapshot landing to it
   being claimable across the pool.
+- **Facade vs upstream in-VM resume head-to-head** on a KVM-capable kubelet (the
+  #16 reference node): our warm husk re-activation vs the upstream reference
+  controller's cold pod create, both timed to a serving endpoint on identical
+  hardware. The `bench/facade/` harness measures the object-level resume on kind
+  today; the in-VM tail is the bare-metal target (#16), as described in the
+  "Facade vs upstream reference: resume latency" section above.
 - **Head-to-head competitor comparison** against E2B (self-hosted), Daytona
   (OSS), and Agent Sandbox + Kata, on identical hardware, regenerated from
   in-repo scripts so anyone can reproduce or refute it.

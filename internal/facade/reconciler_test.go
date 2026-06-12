@@ -189,6 +189,181 @@ func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
 	})
 }
 
+// driveClaimReady drives our claim to phase Ready with an endpoint via the
+// status subresource (the test seam the real husk activation path sets), then
+// waits for the facade to mirror Ready=True + the endpoint observables onto the
+// Sandbox status.
+func driveClaimReady(t *testing.T, name string) {
+	t.Helper()
+	claim, ok := getClaim(t, name)
+	if !ok {
+		t.Fatalf("claim %s not found to drive ready", name)
+	}
+	claim.Status.Phase = runv1alpha1.SandboxReady
+	claim.Status.Endpoint = "10.0.0.5:9091"
+	if err := k8sClient.Status().Update(testCtx, claim); err != nil {
+		t.Fatalf("drive claim %s ready: %v", name, err)
+	}
+	eventually(t, "facade mirrors Ready + endpoint for "+name, func() bool {
+		got := getSandbox(t, name)
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+		return cond != nil && cond.Status == metav1.ConditionTrue &&
+			got.Status.Replicas == 1 && got.Status.ServiceFQDN != "" && len(got.Status.PodIPs) == 1
+	})
+}
+
+// TestFacadePauseReleasesEndpointObservables: scaling a Sandbox to replicas 0
+// (pause) RELEASES the run path to the warm pool (deletes the bridged claim so
+// the husk pod returns dormant) and clears the conformant serving observables:
+// Status.Replicas 0, Ready False, serviceFQDN cleared, podIPs cleared.
+func TestFacadePauseReleasesEndpointObservables(t *testing.T) {
+	sb := newSandbox("facade-pause", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	if err := k8sClient.Create(testCtx, sb); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
+
+	eventually(t, "facade creates the SandboxClaim", func() bool {
+		_, ok := getClaim(t, "facade-pause")
+		return ok
+	})
+	// Activate: the run path is Ready with a serving endpoint (serviceFQDN +
+	// podIPs populated).
+	driveClaimReady(t, "facade-pause")
+
+	// Pause: replicas 0.
+	cur := getSandbox(t, "facade-pause")
+	zero := int32(0)
+	cur.Spec.Replicas = &zero
+	if err := k8sClient.Update(testCtx, cur); err != nil {
+		t.Fatalf("pause to zero: %v", err)
+	}
+
+	eventually(t, "claim released to the warm pool on pause", func() bool {
+		_, ok := getClaim(t, "facade-pause")
+		return !ok
+	})
+	eventually(t, "paused sandbox clears the serving observables", func() bool {
+		got := getSandbox(t, "facade-pause")
+		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+		return cond != nil && cond.Status == metav1.ConditionFalse &&
+			got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
+	})
+}
+
+// TestFacadeResumeReactivates: resuming a paused Sandbox (replicas 1 after a 0)
+// RE-ACTIVATES via the warm-pool fast path: the facade re-creates the bridged
+// husk-backed claim (the same activation as create), and once the run path is
+// Ready it re-populates the serving observables.
+func TestFacadeResumeReactivates(t *testing.T) {
+	sb := newSandbox("facade-resume", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	if err := k8sClient.Create(testCtx, sb); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
+
+	eventually(t, "facade creates the SandboxClaim", func() bool {
+		_, ok := getClaim(t, "facade-resume")
+		return ok
+	})
+	driveClaimReady(t, "facade-resume")
+
+	// Pause.
+	cur := getSandbox(t, "facade-resume")
+	zero := int32(0)
+	cur.Spec.Replicas = &zero
+	if err := k8sClient.Update(testCtx, cur); err != nil {
+		t.Fatalf("pause to zero: %v", err)
+	}
+	eventually(t, "claim released on pause", func() bool {
+		_, ok := getClaim(t, "facade-resume")
+		return !ok
+	})
+
+	// Resume: replicas 1.
+	cur = getSandbox(t, "facade-resume")
+	one := int32(1)
+	cur.Spec.Replicas = &one
+	if err := k8sClient.Update(testCtx, cur); err != nil {
+		t.Fatalf("resume to one: %v", err)
+	}
+	eventually(t, "claim re-activated on resume", func() bool {
+		_, ok := getClaim(t, "facade-resume")
+		return ok
+	})
+	// The re-activated claim reaches Ready and re-populates the observables.
+	driveClaimReady(t, "facade-resume")
+}
+
+// TestFacadePauseResumeToggleStable: a 1->0->1->0 toggle is stable and
+// idempotent: each pause releases the claim + clears the observables, each
+// resume re-activates the claim, and a re-applied identical state is a no-op.
+func TestFacadePauseResumeToggleStable(t *testing.T) {
+	sb := newSandbox("facade-toggle", map[string]string{facade.PoolAnnotation: "p"}, nil)
+	if err := k8sClient.Create(testCtx, sb); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
+
+	setReplicas := func(n int32) {
+		cur := getSandbox(t, "facade-toggle")
+		cur.Spec.Replicas = &n
+		if err := k8sClient.Update(testCtx, cur); err != nil {
+			t.Fatalf("set replicas %d: %v", n, err)
+		}
+	}
+	claimPresent := func() bool {
+		_, ok := getClaim(t, "facade-toggle")
+		return ok
+	}
+	claimAbsent := func() bool {
+		_, ok := getClaim(t, "facade-toggle")
+		return !ok
+	}
+
+	// 1 (create) -> claim present + Ready.
+	eventually(t, "initial activation creates the claim", claimPresent)
+	driveClaimReady(t, "facade-toggle")
+
+	// -> 0 (pause): released + observables cleared.
+	setReplicas(0)
+	eventually(t, "first pause releases the claim", claimAbsent)
+	eventually(t, "first pause clears the observables", func() bool {
+		got := getSandbox(t, "facade-toggle")
+		return got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
+	})
+
+	// -> 1 (resume): re-activated.
+	setReplicas(1)
+	eventually(t, "resume re-activates the claim", claimPresent)
+	driveClaimReady(t, "facade-toggle")
+
+	// -> 0 (pause again): released again, stable.
+	setReplicas(0)
+	eventually(t, "second pause releases the claim", claimAbsent)
+	eventually(t, "second pause clears the observables", func() bool {
+		got := getSandbox(t, "facade-toggle")
+		return got.Status.Replicas == 0 && got.Status.ServiceFQDN == "" && len(got.Status.PodIPs) == 0
+	})
+
+	// Idempotent: re-applying replicas 0 (no spec change but a forced reconcile
+	// via an annotation bump) keeps the released state; the claim stays absent.
+	cur := getSandbox(t, "facade-toggle")
+	if cur.Annotations == nil {
+		cur.Annotations = map[string]string{}
+	}
+	cur.Annotations["test.agentrun.dev/nudge"] = "1"
+	if err := k8sClient.Update(testCtx, cur); err != nil {
+		t.Fatalf("nudge a reconcile: %v", err)
+	}
+	// Give the reconcile a moment, then assert the claim is still absent.
+	eventually(t, "idempotent re-reconcile keeps the claim released", claimAbsent)
+	got := getSandbox(t, "facade-toggle")
+	if got.Status.Replicas != 0 {
+		t.Fatalf("idempotent pause: Status.Replicas = %d, want 0", got.Status.Replicas)
+	}
+}
+
 // TestFacadeDeleteTerminatesClaim: deleting a Sandbox garbage-collects our
 // SandboxClaim via the owner reference.
 func TestFacadeDeleteTerminatesClaim(t *testing.T) {

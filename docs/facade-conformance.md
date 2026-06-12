@@ -73,7 +73,13 @@ trap:
   since no VMM boots here);
 - (d) deleting the Sandbox GCs the bridged claim (the live apiserver runs the
   owner-reference garbage collector);
-- (e) a replicas-0 Sandbox terminates the run-path object.
+- (e) a replicas-0 Sandbox terminates the run-path object (pause = warm-pool
+  release);
+- (f) a replicas 1->0->1 toggle is an OBJECT-LEVEL resume: after the
+  pause releases the claim, scaling back to replicas 1 RE-ACTIVATES it (the
+  facade re-creates the bridged claim). This is the object-level half of the
+  pause/resume mapping; the in-VM resume tail (snapshot load + resume +
+  guest-ready) is the #18 bare-metal boundary, not asserted here.
 
 The job echoes that the in-VM Ready tail (PodReady / ChromeReady) needs a
 KVM-capable kubelet (the #18 boundary) and is not asserted there.
@@ -108,7 +114,7 @@ NEEDS-BARE-METAL accordingly.
 | Upstream test | What it asserts upstream | Status | Notes |
 | --- | --- | --- | --- |
 | `test/e2e/basic_test.go` :: `TestSimpleSandbox` | Sandbox -> Pod Ready + Service, status `"Pod is Ready; Service Exists"` | NEEDS-BARE-METAL | Asserts a running Pod/Service the facade does not create; Ready needs the in-VM boot (#18). Object-level Sandbox admission + the bridged claim ARE proven on kind (facade-conformance (a),(b)). |
-| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The replicas-0 contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 terminates the bridged claim. The upstream Pod/Service deletion needs their controller + a running sandbox. |
+| `test/e2e/replicas_test.go` :: `TestSandboxReplicas` | replicas 0 deletes the Pod, keeps the Service | PROVEN-OBJECT-LEVEL-ON-KIND (run-path object) / NEEDS-BARE-METAL (Pod/Service) | The pause/resume contract is proven against our run-path object: facade-conformance (e) asserts replicas 0 RELEASES the bridged claim (warm-pool release) and (f) asserts a replicas 1->0->1 toggle RE-ACTIVATES it (object-level resume). The upstream Pod/Service deletion + the in-VM resume tail need their controller + a running sandbox (#18). |
 | `test/e2e/shutdown_test.go` :: `TestSandboxShutdownTime`, `TestSandboxRetainedExpiryPreservesFinishedCondition` | shutdown tears down Pod/Service in bounded time; Finished condition retained | NEEDS-BARE-METAL | Requires a running Pod that succeeds and the upstream Finished-condition controller. The deletion/GC object contract is proven object-level (facade-conformance (d)). |
 | `test/e2e/parallelism_test.go` :: `TestParallelSandboxes`, `TestParallelSandboxClaimsWith{Sufficient,Insufficient}WarmPool` | many Sandboxes/Claims reach Ready in parallel via a warm pool | NEEDS-BARE-METAL | Waits `ReadyConditionIsTrue` on running sandboxes drawn from a warm pool; needs the in-VM boot and the warm-pool/claim extension mappings (a later slice). |
 | `test/e2e/volumeclaimtemplate_test.go` :: `TestSandboxVolumeClaimTemplates` | `volumeClaimTemplates` produce PVCs bound to the Pod | NEEDS-BARE-METAL + JUSTIFIED-EXCEPTION | The facade does not yet map `volumeClaimTemplates` (storage contract, exception 4 below); upstream also needs a running Pod. The manifest still applies unchanged and the claim bridges (proven object-level). |
@@ -172,12 +178,28 @@ only the core `Sandbox` today; the extension kinds are a later-slice mapping
    extension mappings (a later slice).
 
 2. pause/resume semantics. Upstream hibernation is a disk roundtrip (the pod is
-   torn down and its state persisted to a volume, then rebuilt). Ours is a memory
-   snapshot/restore on the fork engine. This is a behavioral difference, NOT a
-   regression: the observable lifecycle (paused -> resumed, state preserved) is
-   equivalent. The speed claim is a TARGET, not asserted here; it will be measured
-   in `bench/facade/` in a later slice against an upstream reference. No public
-   number is stated until that benchmark exists (the no-unverified-claims rule).
+   torn down and its state persisted to a volume, then rebuilt). The upstream
+   pause/resume contract is the `spec.replicas` 0<->1 toggle (upstream v0.4.6 has
+   NO stateful hibernate field; their controller deletes the pod on 0 and
+   cold-creates a fresh one on 1). The facade maps it onto the husk warm pool:
+   replicas 0 (pause) RELEASES the bridged claim so the bound husk pod returns
+   dormant to the warm pool; replicas 1 after a 0 (resume) RE-ACTIVATES a dormant
+   warm husk pod via the same fast path as create (the ~42ms husk activation,
+   #66). The conformant observable is preserved: `Status.Replicas` reflects 0/1,
+   the Ready condition reflects Paused/Ready honestly, and pause clears
+   `serviceFQDN` + `podIPs` while resume re-populates them. This OBJECT-LEVEL
+   behavior is proven on kind (envtest `internal/facade` + the `facade-conformance`
+   job's replicas 1->0->1 resume assertion). The resume-latency advantage (warm
+   re-activation vs a cold pod create) is the DESIGN claim; the in-VM
+   head-to-head number is a bare-metal-reference-node TARGET (#16), measured by
+   `bench/facade/` (see [`../bench/facade/README.md`](../bench/facade/README.md)
+   and the "Facade vs upstream reference: resume latency" section of
+   `BENCHMARKS.md`). Note our resume is STATE-FRESH (a warm dormant pod, not the
+   exact pre-pause in-VM state); a state-PRESERVING pause (a memory snapshot taken
+   across the pause via the Checkpoint primitive, so resume restores the exact
+   in-VM state) is a documented FUTURE (slice 4), not implemented here. No public
+   latency number is stated until the bare-metal harness produces it (the
+   no-unverified-claims rule).
 
 3. extension kinds. `SandboxWarmPool` -> our pool, `SandboxTemplate` -> our
    template, and the upstream `SandboxClaim` -> our fork-from-snapshot are NOT yet
@@ -190,11 +212,17 @@ only the core `Sandbox` today; the extension kinds are a later-slice mapping
 ## What is PROVEN now
 
 - envtest (`internal/facade`): the facade creates the bridged husk-backed claim
-  for a Sandbox, mirrors its readiness into the Sandbox status, terminates the
-  claim on replicas 0, and leaves it owner-referenced for GC on delete. Every
-  vendored core Sandbox example applies unchanged and bridges a claim.
+  for a Sandbox, mirrors its readiness into the Sandbox status, RELEASES the
+  claim + clears the serving observables on replicas 0 (pause), RE-ACTIVATES the
+  claim on replicas 1 after a 0 (resume), is stable + idempotent under a
+  1->0->1->0 toggle, and leaves the claim owner-referenced for GC on delete.
+  Every vendored core Sandbox example applies unchanged and bridges a claim.
 - CI (`facade-conformance` kind job): their hello-world Sandbox applies UNCHANGED
-  against a live apiserver and the five object-level facts (a)-(e) above hold.
+  against a live apiserver and the object-level facts (a)-(f) above hold,
+  including the replicas 1->0->1 OBJECT-LEVEL resume (the facade releases then
+  re-creates the bridged claim).
+- `bench/facade/`: the reproducible pause/resume latency harness + methodology
+  (object-level resume on kind; the in-VM head-to-head a bare-metal target, #16).
 
 ## What is OPEN (later #19 slices)
 
@@ -205,7 +233,11 @@ only the core `Sandbox` today; the extension kinds are a later-slice mapping
   + the running-sandbox tail).
 - The latest-two-minors CI matrix (only v0.4.6 is wired now; the second minor is
   a follow-up).
-- pause/resume as a memory snapshot/restore + `bench/facade/`.
+- State-PRESERVING pause: a memory snapshot taken across the pause (the
+  Checkpoint primitive) so resume restores the exact pre-pause in-VM state, not a
+  fresh warm pod. The object-level pause/resume mapping (warm-pool release + fast
+  re-activation) and the `bench/facade/` methodology are DONE; the in-VM
+  head-to-head resume number stays a bare-metal target (#16).
 - The `SandboxWarmPool` -> our pool and upstream `SandboxClaim` -> our
   fork-from-snapshot extension mappings.
 - Full podTemplate fidelity, stable hostname/identity, and the storage contract.

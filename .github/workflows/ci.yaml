@@ -1617,7 +1617,36 @@ jobs:
             echo "FACADE-CONFORMANCE: replicas-0 Sandbox did not terminate the bridged claim"
             exit 1
           fi
-          echo "PASS (e): replicas-0 Sandbox terminates the run-path object"
+          echo "PASS (e): replicas-0 Sandbox releases the run-path object (pause = warm-pool release)"
+
+          # (f) replicas 1->0->1 is an OBJECT-LEVEL resume: the Sandbox is now at
+          # replicas 0 with the claim released (from (e)). Scaling back to
+          # replicas 1 RE-ACTIVATES it: the facade re-creates the bridged claim
+          # via the same warm-pool fast path as create. The in-VM resume tail
+          # (snapshot load + resume + guest-ready) is the #18 bare-metal boundary
+          # and is NOT asserted here.
+          kubectl -n default patch sandbox.agents.x-k8s.io hello-world --type=merge \
+            -p '{"spec":{"replicas":1}}'
+          resumed=0
+          for i in $(seq 1 30); do
+            if kubectl -n default get sandboxclaim hello-world >/dev/null 2>&1; then
+              resumed=1
+              break
+            fi
+            echo "  [${i}/30] waiting for the replicas-1 resume to re-activate the bridged claim"
+            sleep 2
+          done
+          if [ "$resumed" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: replicas 1->0->1 did not re-activate the bridged claim"
+            exit 1
+          fi
+          owner=$(kubectl -n default get sandboxclaim hello-world \
+            -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
+          if [ "$owner" != "Sandbox/hello-world" ]; then
+            echo "FACADE-CONFORMANCE: re-activated claim owner = '$owner', want Sandbox/hello-world"
+            exit 1
+          fi
+          echo "PASS (f): replicas 1->0->1 re-activates the run-path object (object-level resume; in-VM tail is the #18 bare-metal boundary)"
           echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is the #18 bare-metal boundary"
       - name: Facade conformance diagnostics and cleanup
         if: always()
