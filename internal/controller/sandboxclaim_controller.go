@@ -57,6 +57,12 @@ type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
 
+	// Feed is the workspace/sandbox change feed: the always-on Kubernetes Event
+	// channel plus the opt-in CloudEvents sink. The claim reconciler emits a
+	// sandbox.phase.changed event on every persisted phase transition. A zero Feed
+	// (a bare reconciler in a unit test) records to a no-op recorder and NopSink.
+	Feed emitFeed
+
 	// MaxPendingDuration bounds the capacity-pending wait; zero falls back to
 	// DefaultMaxPendingDuration. Set from the --max-pending-duration flag.
 	MaxPendingDuration time.Duration
@@ -164,6 +170,9 @@ func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
 // crypto-shred a template's at-rest encryption key Secret on teardown
 // (DeleteEncKey).
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// The change feed mirrors each event as a Kubernetes Event on the source object
+// (the always-on channel); the EventRecorder needs create;patch on events.
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -181,6 +190,23 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	span.SetAttributes(attribute.String("pool", claim.Spec.PoolRef.Name))
+
+	// Emit a sandbox.phase.changed feed event for the NET phase transition this
+	// reconcile persisted. The phase observed at entry is compared against the
+	// phase persisted in the API after the reconcile, so the event fires only when
+	// the change actually landed (not on a mutation that failed to write). This is
+	// honest: a redelivered reconcile re-reads the same persisted phase and emits
+	// nothing. The time is stamped from the feed clock at the emit site.
+	entryPhase := claim.Status.Phase
+	defer func() {
+		var fresh v1alpha1.SandboxClaim
+		if err := r.Get(ctx, req.NamespacedName, &fresh); err != nil {
+			return
+		}
+		if fresh.Status.Phase != "" && fresh.Status.Phase != entryPhase {
+			r.Feed.emitPhaseChanged(ctx, &fresh, entryPhase, fresh.Status.Phase)
+		}
+	}()
 
 	// A claim under deletion: reap its backing VM via the finalizer before the
 	// API object is allowed to disappear.

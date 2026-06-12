@@ -104,6 +104,18 @@ rules:
       - list
       - update
       - watch
+  # The workspace revision change feed (W4) mirrors every feed event as a
+  # Kubernetes Event on the source object (the always-on channel, on top of the
+  # opt-in CloudEvents webhook). The EventRecorder needs create;patch on events
+  # to record and aggregate them. Event messages carry names, content digests,
+  # lineage, and phases only; never secret values.
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
   # The husk warm pool is bounded against voluntary disruption (node drain,
   # eviction) by a PodDisruptionBudget the pool reconciler creates-or-updates
   # per pool (issue #18, slice 4b), so a drain disrupts at most a bounded number

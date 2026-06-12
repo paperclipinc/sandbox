@@ -15,17 +15,56 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/eventfeed"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+)
+
+// recordingSink is the suite's fake CloudEvents sink: it records every emitted
+// event so a test can assert the feed envelope and dedupe id without a real
+// webhook. Concurrency-safe (the manager emits from reconcile goroutines).
+type recordingSink struct {
+	mu     sync.Mutex
+	events []eventfeed.Event
+}
+
+func (s *recordingSink) Emit(_ context.Context, e eventfeed.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+	return nil
+}
+
+// byType returns the recorded events of the given CloudEvent type.
+func (s *recordingSink) byType(t string) []eventfeed.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []eventfeed.Event
+	for _, e := range s.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+var (
+	// testSink records the feed CloudEvents the suite's raw claim reconciler
+	// emits, so the binding/feed tests can assert the envelope and dedupe id.
+	testSink = &recordingSink{}
+	// testEventRecorder is the suite's Kubernetes Event recorder; a buffered
+	// FakeRecorder so a test can assert the always-on Event mirror.
+	testEventRecorder = record.NewFakeRecorder(128)
 )
 
 var (
@@ -250,6 +289,10 @@ func TestMain(m *testing.M) {
 	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
 	// fight the husk reconciler over the same object.
 	rawClaim.SkipLabel(controller.HuskTestClaimLabel)
+	// Wire the change feed: the buffered FakeRecorder for the always-on Event
+	// mirror and the recording sink for the CloudEvents egress. A nil clock uses
+	// the wall clock; the feed tests assert the envelope, not an exact time.
+	rawClaim.SetFeedForTest(testEventRecorder, testSink, nil)
 	// Route the workspace hydrate/dehydrate seams through the per-test swappable
 	// fakes so the binding lifecycle is driven without a VM. A test that does not
 	// install fakes but uses a workspaceRef gets a fail-closed default.

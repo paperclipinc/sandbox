@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/eventfeed"
 	"github.com/paperclipinc/sandbox/internal/observability"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -50,6 +51,7 @@ func main() {
 	var huskStubImage string
 	var huskControlPort int
 	var huskDataDir string
+	var eventSinkURL string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -62,6 +64,7 @@ func main() {
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/agent-run", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
+	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -104,6 +107,16 @@ func main() {
 
 	nodeRegistry := controller.NewNodeRegistry()
 
+	// The revision change feed sink. Empty --event-sink-url builds a NopSink, so
+	// only Kubernetes Events are recorded (always-on). A non-empty URL POSTs each
+	// feed CloudEvent to the operator webhook, at-least-once with a dedupe id.
+	eventSink := eventfeed.NewWebhookSink(eventSinkURL)
+	if eventSinkURL == "" {
+		logger.Info("revision change feed: webhook disabled (Kubernetes Events only); set --event-sink-url to enable the CloudEvents egress")
+	} else {
+		logger.Info("revision change feed: posting CloudEvents to the operator webhook", "sink", eventSinkURL)
+	}
+
 	// The peer token forkd accepts on its token-gated CAS surface. The controller
 	// passes it in every PullTemplate so a deficit node can pull a template from a
 	// holder; it must match forkd's --peer-token. Sourced from the environment
@@ -137,6 +150,11 @@ func main() {
 		MaxPendingDuration: maxPendingDuration,
 		EnableHuskPods:     enableHuskPods,
 		HuskControlPort:    huskControlPort,
+		Feed: controller.NewEmitFeed(
+			mgr.GetEventRecorderFor("agentrun-controller"),
+			eventSink,
+			nil,
+		),
 	}
 	if err := claimReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxClaim")

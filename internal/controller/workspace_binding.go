@@ -415,6 +415,14 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	logger.Info("dehydrated sandbox workspace into a new revision", "claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "revision", rev.Name)
 
+	// Announce the new revision on the change feed: a Kubernetes Event on the
+	// revision plus, when configured, a revision.created CloudEvent to the
+	// operator webhook. The payload carries the workspace and revision NAMES, the
+	// contentManifest DIGEST, lineage, and the memorySnapshotRef pointer only; no
+	// secret values. This is how an external indexer learns of the new revision
+	// without polling.
+	r.Feed.emitRevisionCreated(ctx, rev)
+
 	// Push the workspace repo paths to any git rendezvous remote, recording the
 	// pushes for the revision status.
 	gitPushes, gitErr := r.rendezvousOnTerminate(ctx, claim, digest)
