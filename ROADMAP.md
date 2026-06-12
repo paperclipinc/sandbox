@@ -181,8 +181,25 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     The conformance approach (vendor their examples + e2e, run in CI, no silent
     divergence, pause/resume as a memory snapshot documented) is in
     `docs/facade-conformance.md`.
-  - OPEN (later slices): the full upstream conformance e2e harness run in CI
-    (their manifests unchanged, identical behavior, latest-two-minors matrix);
+  - ✅ CONFORMANCE HARNESS FOUNDATION (slice 2, this slice): the upstream
+    artifacts are vendored verbatim under `third_party/agent-sandbox/` (the full
+    `examples/` + `extensions/examples/` + `test/e2e/` reference + the CRDs,
+    pinned to v0.4.6) and applied UNCHANGED against the facade. envtest
+    (`internal/facade/examples_test.go`) applies every core Sandbox example and
+    asserts the bridged claim; the `facade-conformance` kind job applies their
+    hello-world Sandbox unchanged against a live apiserver and asserts the five
+    object-level facts (admitted, bridged claim with owner + bridge annotation,
+    status mirrored, deletion GCs the claim, replicas 0 terminates). The
+    conformance MATRIX in `docs/facade-conformance.md` has a row per upstream
+    `test/e2e/*_test.go` and per vendored example with a
+    PROVEN-OBJECT-LEVEL-ON-KIND / NEEDS-BARE-METAL / JUSTIFIED-EXCEPTION status,
+    no silent divergence. Their Go e2e suite is documented as bare-metal-gated
+    (its predicates assert upstream-controller pods/services and a running
+    sandbox), honestly NOT run here.
+  - OPEN (later slices): the in-VM conformance (their PodReady/ChromeReady
+    predicates = a running sandbox) on a KVM-capable kubelet / bare-metal node
+    (the #18 nested-VMM boundary); the full upstream Go e2e suite run green end
+    to end; the latest-two-minors CI matrix (only v0.4.6 is wired now);
     pause/resume as a memory snapshot/restore plus the milliseconds-vs-
     hibernation bench in `bench/facade/`; the SandboxWarmPool -> our pool and
     SandboxClaim -> our fork-from-snapshot extension mappings; full podTemplate
