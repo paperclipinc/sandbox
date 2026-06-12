@@ -232,6 +232,11 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
+	if in.WorkspaceRef != nil {
+		in, out := &in.WorkspaceRef, &out.WorkspaceRef
+		*out = new(LocalObjectReference)
+		**out = **in
+	}
 	if in.TTLSecondsAfterFinished != nil {
 		in, out := &in.TTLSecondsAfterFinished, &out.TTLSecondsAfterFinished
 		*out = new(int32)

@@ -3,7 +3,7 @@
 // store (internal/cas). Dehydrate captures the guest workspace into a CAS
 // manifest (a committed WorkspaceRevision's content); Hydrate restores a CAS
 // manifest into a guest workspace. Both speak the bulk tar transfer
-// (vsock.Client.TarDir / UntarDir) over a small vsockClient seam so the
+// (vsock.Client.TarDir / UntarDir) over a small VsockTransport seam so the
 // controller and tests can drive them without a real VM.
 //
 // The transfer never captures guest secrets: secret values live only in the
@@ -30,10 +30,10 @@ import (
 // restores. It mirrors the guest agent's workspace allowlist root.
 const WorkspacePath = "/workspace"
 
-// vsockClient is the slice of the guest agent transport the transfer helpers
+// VsockTransport is the slice of the guest agent transport the transfer helpers
 // need: the bulk tar ops. The production implementation is *vsock.Client; tests
-// supply a fake backed by an in-memory directory.
-type vsockClient interface {
+// and callers that wire their own path supply any value with these two methods.
+type VsockTransport interface {
 	TarDir(path string) ([]byte, error)
 	UntarDir(path string, tar []byte) error
 }
@@ -45,7 +45,7 @@ type vsockClient interface {
 // store.PutSnapshot. The returned digest is the content identifier a committed
 // WorkspaceRevision records. An unchanged tree dehydrates to the same digest
 // (PutSnapshot is content-addressed and deterministic in the file set).
-func Dehydrate(ctx context.Context, agent vsockClient, store *cas.Store, excludePaths []string) (cas.Digest, error) {
+func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excludePaths []string) (cas.Digest, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -77,7 +77,7 @@ func Dehydrate(ctx context.Context, agent vsockClient, store *cas.Store, exclude
 // over vsock (UntarDir), which sanitizes every member against traversal before
 // writing. The manifest's flat logical file names are the workspace-relative
 // paths Dehydrate captured, so the round trip is byte-identical.
-func Hydrate(ctx context.Context, agent vsockClient, store *cas.Store, manifest cas.Digest) error {
+func Hydrate(ctx context.Context, agent VsockTransport, store *cas.Store, manifest cas.Digest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/daemon"
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/husk"
@@ -65,6 +66,18 @@ func (r *SandboxClaimReconciler) SetActivateForTest(fn func(ctx context.Context,
 // returns the scripted captured/error. nil restores the default.
 func (r *SandboxClaimReconciler) SetCheckpointForTest(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)) {
 	r.Checkpoint = fn
+}
+
+// SetWorkspaceTransferForTest injects the workspace hydrate/dehydrate seams so
+// envtest can drive the binding lifecycle without a VM. hydrate records the
+// manifest it was asked to restore; dehydrate returns a scripted digest and
+// records the exclude list it was passed.
+func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error),
+) {
+	r.HydrateWorkspace = hydrate
+	r.DehydrateWorkspace = dehydrate
 }
 
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test

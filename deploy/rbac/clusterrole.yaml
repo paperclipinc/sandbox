@@ -16,7 +16,10 @@ rules:
   # disappear without forkd reaping its VM. The Workspace reconciler (W4)
   # reconciles workspaces and their owner-referenced workspacerevisions: it
   # prunes revisions past the retention policy (delete) and stamps the workspace
-  # label / owner ref on revisions it adopts (patch).
+  # label / owner ref on revisions it adopts (patch). The claim reconciler (W4
+  # slice 2) also reads workspaces (get, to resolve a bound workspace's head for
+  # hydrate) and creates workspacerevisions (create, to commit a dehydrated
+  # revision on terminate); both verbs are already in the combined rule below.
   - apiGroups:
       - agentrun.dev
     resources:

@@ -70,6 +70,11 @@ kind: ClusterRole
 metadata:
   name: agent-run-controller
 rules:
+  # workspaces + workspacerevisions: the Workspace reconciler owns the revision
+  # DAG, and the claim reconciler (W4 slice 2) reads a bound workspace's head for
+  # hydrate (get) and creates a dehydrated revision on terminate (create). A
+  # missing list/watch here silently stalls the manager (the slice-1 lesson), so
+  # the dev mock overlay carries the same grants as the base ClusterRole.
   - apiGroups: ["agentrun.dev"]
     resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

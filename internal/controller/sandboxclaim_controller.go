@@ -95,6 +95,15 @@ type SandboxClaimReconciler struct {
 	// when EnableHuskPods is true.
 	Checkpoint huskCheckpointer
 
+	// HydrateWorkspace and DehydrateWorkspace are the workspace-binding transfer
+	// seams (W4 slice 2). A claim with spec.workspaceRef hydrates its workspace
+	// head into the sandbox on activate and dehydrates the sandbox /workspace into
+	// a new committed WorkspaceRevision on terminate. Nil defaults to the real
+	// node-side transport path; envtest injects fakes that record the manifest /
+	// return a scripted digest without a VM.
+	HydrateWorkspace   hydrateFunc
+	DehydrateWorkspace dehydrateFunc
+
 	// eventFilter optionally restricts which claims this reconciler watches. Nil
 	// watches all claims (the production default: a deployment runs exactly one
 	// claim reconciler, husk or raw). It exists so a test harness can run a raw
@@ -188,6 +197,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return r.rependOnHuskPodLost(ctx, &claim, &pool, lostPod)
 			}
 		}
+		// A Ready claim bound to a workspace hydrates its head into the sandbox
+		// exactly once (idempotent via the hydrated annotation). A transient
+		// transfer error requeues without failing the Ready claim; the sandbox
+		// stays usable (an unpopulated workspace) until the next attempt succeeds.
+		if err := r.hydrateOnActivate(ctx, &claim); err != nil {
+			logger.Error(err, "hydrate workspace into sandbox; will retry", "claim", claim.Name)
+			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		}
 		return r.reconcileLifetime(ctx, &claim)
 	}
 
@@ -213,6 +230,33 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Name:      pool.Spec.TemplateRef.Name,
 	}, &template); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Single-writer-per-workspace: a claim bound to a workspace that is already
+	// bound to another active claim must not acquire a VM. It pends with a clear
+	// WorkspaceBusy reason and retries, so the second writer waits for the first
+	// to release rather than two sandboxes racing to dehydrate the same workspace.
+	if claim.Spec.WorkspaceRef != nil {
+		busy, err := r.workspaceBusyClaim(ctx, &claim)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if busy != "" {
+			claim.Status.Phase = v1alpha1.SandboxPending
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(r.now()),
+				Reason:             "WorkspaceBusy",
+				Message: fmt.Sprintf(
+					"workspace %q is already bound to active claim %q; this claim will bind once that claim releases the workspace (single-writer-per-workspace)",
+					claim.Spec.WorkspaceRef.Name, busy,
+				),
+			})
+			// Best-effort status write; the return requeues regardless.
+			_ = r.Status().Update(ctx, &claim)
+			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		}
 	}
 
 	// Add the terminate finalizer before the claim acquires a backing VM, so
@@ -677,6 +721,16 @@ func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1a
 		return ctrl.Result{}, nil
 	}
 
+	// Dehydrate the sandbox /workspace into a new committed revision BEFORE
+	// reaping the VM on delete (the guest must still be alive to tar its
+	// workspace). A claim already dehydrated by a lifetime-expiry terminate is a
+	// no-op (the dehydrated annotation). A dehydrate error requeues the delete so
+	// the finalizer is not removed until the work is captured.
+	if err := r.dehydrateOnTerminate(ctx, claim); err != nil {
+		logger.Error(err, "dehydrate workspace on delete; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+
 	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
 		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
 			logger.Error(err, "terminate backing sandbox on delete", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
@@ -765,6 +819,15 @@ func (r *SandboxClaimReconciler) reconcileLifetime(ctx context.Context, claim *v
 // safe.
 func (r *SandboxClaimReconciler) terminateLifetime(ctx context.Context, claim *v1alpha1.SandboxClaim, reason, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Dehydrate the sandbox /workspace into a new committed revision BEFORE
+	// reaping the VM (the guest must still be alive to tar its workspace). A
+	// dehydrate error requeues without terminating, so the work is not lost; the
+	// operation is idempotent via the dehydrated annotation.
+	if err := r.dehydrateOnTerminate(ctx, claim); err != nil {
+		logger.Error(err, "dehydrate workspace on lifetime expiry; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
 
 	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
 		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {

@@ -274,11 +274,22 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   observedGeneration), the Pending -> Committed transition with
   immutability of a committed revision, `fromWorkspaceRevision` lineage
   validation, retention pruning that protects the head's ancestry, and
-  owner-ref GC of revisions. No data moves yet. OPEN: hydrate/dehydrate over
-  the content-addressed transfer layer; the sandbox<->workspace binding; git
-  rendezvous; outputs extraction; the CloudEvents revision change feed; the
-  memory-snapshot pairing producing a resumable head from a real checkpoint;
-  the per-node toolchain cache via Share; the S3 object-store backend.
+  owner-ref GC of revisions.
+  DONE (slice 2, the hydrate/dehydrate data path): a bulk workspace tar
+  transfer on the guest agent (vsock `TarDir`/`UntarDir`, a workspace
+  allowlist + traversal sanitize), the host `internal/workspace`
+  Hydrate/Dehydrate helpers over the node content-addressed store, and the
+  sandbox<->workspace binding (`SandboxClaim.spec.workspaceRef`): the head
+  hydrates into `/workspace` on start, a new committed `WorkspaceRevision`
+  with `fromClaim` lineage dehydrates on terminate (the head advances),
+  single-writer-per-workspace, and secrets excluded from revisions. PROVEN on
+  KVM (the in-VM tar round trip byte-identical) and in envtest (the binding +
+  revision lifecycle behind a transfer seam); see docs/workspaces.md. OPEN:
+  outputs extraction + git rendezvous for fork-and-merge (slice 3); the
+  CloudEvents revision change feed and the memory-snapshot pairing producing a
+  resumable head from a real checkpoint (slice 4); the per-workspace
+  encryption key (#31); the per-node toolchain cache via Share; the S3
+  object-store backend (this slice uses the node CAS).
 
 **Compliance & observability addendum (amends W1/W4):** permitted claim
 language is limited to what a CI job proves (CNCF-conformant clusters, PSA

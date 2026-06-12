@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	corev1 "k8s.io/api/core/v1"
@@ -48,7 +50,38 @@ var (
 	// suite's husk reconciler routes a Checkpoint drain policy through.
 	huskTestCheckpointerMu sync.Mutex
 	huskTestCheckpointer   func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)
+
+	// wsTransferMu guards the swappable workspace hydrate/dehydrate fakes the
+	// suite's raw claim reconciler drives. Tests set them via setWSTransfer.
+	wsTransferMu sync.Mutex
+	wsHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
+	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error)
 )
+
+// setWSTransfer installs the workspace hydrate/dehydrate fakes; nil restores a
+// default that fails closed so a test that forgot to set them does not silently
+// pass.
+func setWSTransfer(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error),
+) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsHydrate = hydrate
+	wsDehydrate = dehydrate
+}
+
+func currentWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsHydrate
+}
+
+func currentWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsDehydrate
+}
 
 // setHuskTestCheckpointer installs the checkpointer the suite reconciler uses
 // for the Checkpoint drain policy; nil falls back to the default.
@@ -170,6 +203,23 @@ func TestMain(m *testing.M) {
 	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
 	// fight the husk reconciler over the same object.
 	rawClaim.SkipLabel(controller.HuskTestClaimLabel)
+	// Route the workspace hydrate/dehydrate seams through the per-test swappable
+	// fakes so the binding lifecycle is driven without a VM. A test that does not
+	// install fakes but uses a workspaceRef gets a fail-closed default.
+	rawClaim.SetWorkspaceTransferForTest(
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+			if fn := currentWSHydrate(); fn != nil {
+				return fn(ctx, claim, manifest)
+			}
+			return fmt.Errorf("no workspace hydrate fake installed")
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+			if fn := currentWSDehydrate(); fn != nil {
+				return fn(ctx, claim, excludePaths)
+			}
+			return "", fmt.Errorf("no workspace dehydrate fake installed")
+		},
+	)
 	if err := rawClaim.SetupWithManager(mgr); err != nil {
 		panic(err)
 	}

@@ -247,6 +247,16 @@ type SandboxClaimSpec struct {
 	// Node preference. Empty means any node with capacity.
 	NodeName string `json:"nodeName,omitempty"`
 
+	// WorkspaceRef binds this sandbox to a durable Workspace. On activation the
+	// workspace's head revision is hydrated into the sandbox /workspace; on
+	// terminate the /workspace is dehydrated into a new committed
+	// WorkspaceRevision with fromClaim lineage, and the workspace head advances.
+	// A Workspace is single-writer: a claim referencing a workspace already bound
+	// to another active claim pends with reason WorkspaceBusy. Empty leaves the
+	// claim's /workspace ephemeral (no hydrate/dehydrate), exactly as before.
+	// +optional
+	WorkspaceRef *LocalObjectReference `json:"workspaceRef,omitempty"`
+
 	// TTLSecondsAfterFinished bounds how long a finished claim (terminal
 	// Terminated or Failed phase) lingers in the API after FinishedAt before the
 	// garbage collector deletes it, freeing etcd. Unset uses the controller's
