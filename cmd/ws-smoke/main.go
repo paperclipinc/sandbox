@@ -71,7 +71,7 @@ func main() {
 
 	ctx := context.Background()
 	excludes := []string{"/workspace/.netrc"}
-	digest, err := workspace.Dehydrate(ctx, src, store, excludes)
+	digest, err := workspace.Dehydrate(ctx, src, store, excludes, nil)
 	if err != nil {
 		fail("dehydrate source workspace: %v", err)
 	}

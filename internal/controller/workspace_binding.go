@@ -23,9 +23,25 @@ type hydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifes
 // dehydrateFunc is the seam the claim reconciler captures a claim's sandbox
 // /workspace into a content-addressed revision through. The production value
 // dials the guest agent and calls workspace.Dehydrate with the secret exclude
-// list; envtest injects a fake that returns a scripted digest and records the
-// excludes. The returned digest is the new revision's ContentManifest.
-type dehydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error)
+// list and the outputs capture paths; envtest injects a fake that returns a
+// scripted digest and records the excludes and captures. capturePaths is the
+// union of the claim's spec.outputs Path subtrees (nil captures the whole
+// workspace). The returned digest is the new revision's ContentManifest.
+type dehydrateFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+
+// diffFunc is the seam the claim reconciler computes a revision's content-hash
+// diff against the workspace head before it through. The production value reads
+// both manifests from the CAS store and calls workspace.DiffManifests; envtest
+// injects a fake that returns a scripted diff. A diff against an empty parent
+// (the first revision) is the whole child as additions.
+type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
+
+// rendezvousFunc is the seam the claim reconciler pushes the workspace repo
+// paths to a git rendezvous remote through. The production value resolves the
+// repo-paths content from the dehydrated set and calls workspace.Rendezvous;
+// envtest and unit tests inject a fake. repoFiles is the resolved
+// name -> content map of the workspace spec.git.paths.
+type rendezvousFunc func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
 
 // workspaceHydratedAnnotation marks a claim whose workspace head was already
 // hydrated into its sandbox, so a requeue of a Ready claim does not hydrate
@@ -68,6 +84,14 @@ func (r *SandboxClaimReconciler) dehydrate() dehydrateFunc {
 	return r.defaultDehydrate
 }
 
+// diff returns the configured diff seam or the default real path.
+func (r *SandboxClaimReconciler) diff() diffFunc {
+	if r.DiffWorkspace != nil {
+		return r.DiffWorkspace
+	}
+	return r.defaultDiff
+}
+
 // defaultHydrate is the production hydrate path. It requires the node-side
 // transport that reaches the claim's guest agent (the same path that delivers
 // exec/file traffic). That transport is wired by the node integration; until it
@@ -85,12 +109,35 @@ func (r *SandboxClaimReconciler) defaultHydrate(ctx context.Context, claim *v1al
 
 // defaultDehydrate is the production dehydrate path; see defaultHydrate for the
 // transport requirement.
-func (r *SandboxClaimReconciler) defaultDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+func (r *SandboxClaimReconciler) defaultDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
 	agent, store, err := r.workspaceTransport(claim)
 	if err != nil {
 		return "", err
 	}
-	return workspace.Dehydrate(ctx, agent, store, excludePaths)
+	return workspace.Dehydrate(ctx, agent, store, excludePaths, capturePaths)
+}
+
+// defaultDiff is the production diff path. It reads both manifests from the CAS
+// store and computes the content-hash diff. An empty parent digest (the first
+// revision in a workspace) diffs against an empty manifest, so the whole child
+// is recorded as additions. See defaultHydrate for the transport requirement.
+func (r *SandboxClaimReconciler) defaultDiff(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+	_, store, err := r.workspaceTransport(claim)
+	if err != nil {
+		return workspace.Diff{}, err
+	}
+	var parentManifest cas.Manifest
+	if parent.Validate() == nil {
+		parentManifest, err = store.GetManifest(parent)
+		if err != nil {
+			return workspace.Diff{}, fmt.Errorf("read parent manifest %s: %w", parent, err)
+		}
+	}
+	childManifest, err := store.GetManifest(child)
+	if err != nil {
+		return workspace.Diff{}, fmt.Errorf("read child manifest %s: %w", child, err)
+	}
+	return workspace.DiffManifests(parentManifest, childManifest), nil
 }
 
 // workspaceTransport resolves the guest agent transport and CAS store the real
@@ -213,12 +260,42 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	logger := log.FromContext(ctx)
 
-	digest, err := r.dehydrate()(ctx, claim, WorkspaceSecretExcludePaths)
+	// Resolve the workspace head BEFORE this revision: it is the diff parent and
+	// the lineage tip the new revision descends from.
+	parentManifest, parentRev, _, err := r.resolveWorkspaceHead(ctx, claim)
+	if err != nil {
+		return err
+	}
+
+	// Outputs narrow the capture to the listed /workspace subtrees; no Path output
+	// captures the whole workspace (the slice-2 default).
+	capturePaths := workspace.CapturePaths(claim.Spec.Outputs)
+
+	digest, err := r.dehydrate()(ctx, claim, WorkspaceSecretExcludePaths, capturePaths)
 	if err != nil {
 		return fmt.Errorf("dehydrate claim %s workspace %s: %w", claim.Name, claim.Spec.WorkspaceRef.Name, err)
 	}
 	if err := digest.Validate(); err != nil {
 		return fmt.Errorf("dehydrate claim %s produced an invalid content digest: %w", claim.Name, err)
+	}
+
+	// A {diff: true} output records the content-hash diff of this revision against
+	// the parent head, so an indexer or a human can see what changed.
+	var diffSummary *v1alpha1.RevisionDiffSummary
+	if outputsWantDiff(claim.Spec.Outputs) {
+		d, derr := r.diff()(ctx, claim, parentManifest, digest)
+		if derr != nil {
+			return fmt.Errorf("diff claim %s revision against parent %s: %w", claim.Name, parentRev, derr)
+		}
+		diffSummary = &v1alpha1.RevisionDiffSummary{
+			ParentRevision: parentRev,
+			Added:          d.Added,
+			Removed:        d.Removed,
+			Modified:       d.Modified,
+			AddedCount:     int32(len(d.Added)),
+			RemovedCount:   int32(len(d.Removed)),
+			ModifiedCount:  int32(len(d.Modified)),
+		}
 	}
 
 	rev := &v1alpha1.WorkspaceRevision{
@@ -239,9 +316,46 @@ func (r *SandboxClaimReconciler) dehydrateOnTerminate(ctx context.Context, claim
 	}
 	logger.Info("dehydrated sandbox workspace into a new revision", "claim", claim.Name, "workspace", claim.Spec.WorkspaceRef.Name, "revision", rev.Name)
 
+	// Push the workspace repo paths to any git rendezvous remote, recording the
+	// pushes for the revision status.
+	gitPushes, gitErr := r.rendezvousOnTerminate(ctx, claim, rev.Name)
+
+	// Record the diff summary and git pushes on the revision status subresource,
+	// if either was produced.
+	if diffSummary != nil || len(gitPushes) > 0 {
+		rev.Status.DiffSummary = diffSummary
+		rev.Status.GitPushes = gitPushes
+		if err := r.Status().Update(ctx, rev); err != nil {
+			return fmt.Errorf("record revision %s diff/git status: %w", rev.Name, err)
+		}
+	}
+
 	if claim.Annotations == nil {
 		claim.Annotations = map[string]string{}
 	}
 	claim.Annotations[workspaceDehydratedAnnotation] = rev.Name
-	return r.Update(ctx, claim)
+	if err := r.Update(ctx, claim); err != nil {
+		return err
+	}
+	// A git push failure is surfaced (not swallowed) only after the revision and
+	// dehydrated annotation are durable, so the work is never lost and the
+	// terminate retries the push.
+	return gitErr
+}
+
+// rendezvousOnTerminate pushes the workspace repo paths to each {git} output's
+// rendezvous remote on a per-attempt branch. The git rendezvous itself is wired
+// in Task 2; this slice records no pushes so the diff wiring lands first.
+func (r *SandboxClaimReconciler) rendezvousOnTerminate(_ context.Context, _ *v1alpha1.SandboxClaim, _ string) ([]v1alpha1.GitPushRecord, error) {
+	return nil, nil
+}
+
+// outputsWantDiff reports whether any output requested a content-hash diff.
+func outputsWantDiff(outputs []v1alpha1.OutputSpec) bool {
+	for _, o := range outputs {
+		if o.Diff {
+			return true
+		}
+	}
+	return false
 }

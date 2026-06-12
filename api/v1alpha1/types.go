@@ -262,6 +262,52 @@ type SandboxClaimSpec struct {
 	// garbage collector deletes it, freeing etcd. Unset uses the controller's
 	// default. Job-like semantics.
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
+	// Outputs declares what the terminate-with-outputs step captures from the
+	// sandbox /workspace into the new WorkspaceRevision. With no Path entry the
+	// whole workspace is captured (the default). Each Path entry narrows the
+	// capture to that subtree; a Diff entry records the content-hash diff of the
+	// new revision against the workspace head before it; a Git entry pushes the
+	// workspace repo paths to a rendezvous remote on a per-attempt branch (git is
+	// the merge layer, the engine never merges working trees). Requires
+	// WorkspaceRef; ignored otherwise.
+	// +optional
+	Outputs []OutputSpec `json:"outputs,omitempty"`
+}
+
+// OutputSpec is one terminate-with-outputs directive. At most one of Path, Diff,
+// or Git is meaningful per entry, mirroring the v2 spec onTerminate.outputs
+// shape (docs/api/v2-spec.md).
+type OutputSpec struct {
+	// Path narrows the captured revision to this /workspace subtree (a prefix).
+	// When any output sets Path, only the union of those subtrees is captured;
+	// with no Path output the whole workspace is captured.
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Diff requests that the new revision record the content-hash diff (added,
+	// removed, modified paths) against the workspace head revision before it.
+	// +optional
+	Diff bool `json:"diff,omitempty"`
+
+	// Git pushes the workspace spec.git.paths content to a rendezvous remote on a
+	// per-attempt branch. Git is the merge layer: the engine pushes branches, a
+	// human or CI merges them, the engine never merges working trees.
+	// +optional
+	Git *GitOutput `json:"git,omitempty"`
+}
+
+// GitOutput declares a git rendezvous push target for a terminate output.
+type GitOutput struct {
+	// Remote is the rendezvous git remote the workspace repo paths are pushed to.
+	// Operator-declared (an external egress; see docs/threat-model.md).
+	// +optional
+	Remote string `json:"remote,omitempty"`
+
+	// Branch is the per-attempt branch the push lands on. It is a text/template
+	// rendered with the claim name as {{.name}}, for example "attempt/{{.name}}".
+	// +optional
+	Branch string `json:"branch,omitempty"`
 }
 
 type SecretMount struct {

@@ -156,6 +156,64 @@ spec:
                   - type
                   type: object
                 type: array
+              diffSummary:
+                description: |-
+                  DiffSummary records the content-hash diff of this revision against the
+                  workspace head revision before it, when a terminate {diff: true} output
+                  requested it. It is a path-level summary (added, removed, modified file
+                  names plus counts); the file contents stay in the content store, never in
+                  the status. Unset when no diff was requested or the revision is a root.
+                properties:
+                  added:
+                    items:
+                      type: string
+                    type: array
+                  addedCount:
+                    description: |-
+                      AddedCount, RemovedCount, and ModifiedCount summarize the lists for a quick
+                      human read and for indexers that do not want the full path lists.
+                    format: int32
+                    type: integer
+                  modified:
+                    items:
+                      type: string
+                    type: array
+                  modifiedCount:
+                    format: int32
+                    type: integer
+                  parentRevision:
+                    description: |-
+                      ParentRevision is the head revision the diff was computed against. Empty
+                      when this revision is the first in the workspace (a root: everything added).
+                    type: string
+                  removed:
+                    items:
+                      type: string
+                    type: array
+                  removedCount:
+                    format: int32
+                    type: integer
+                type: object
+              gitPushes:
+                description: |-
+                  GitPushes records the git rendezvous pushes this revision's terminate
+                  performed (the per-attempt branch and the remote), so the fork-and-merge
+                  rendezvous is auditable. The push content is the workspace repo paths; git
+                  is the merge layer and the engine never merges working trees.
+                items:
+                  description: GitPushRecord is one git rendezvous push performed
+                    on terminate.
+                  properties:
+                    branch:
+                      description: Branch is the per-attempt branch the push landed
+                        on.
+                      type: string
+                    remote:
+                      description: Remote is the rendezvous remote the workspace repo
+                        paths were pushed to.
+                      type: string
+                  type: object
+                type: array
               observedGeneration:
                 format: int64
                 type: integer

@@ -104,6 +104,17 @@ type SandboxClaimReconciler struct {
 	HydrateWorkspace   hydrateFunc
 	DehydrateWorkspace dehydrateFunc
 
+	// DiffWorkspace computes a new revision's content-hash diff against the
+	// workspace head before it, for a terminate {diff: true} output. Nil defaults
+	// to the real store-backed path; envtest injects a fake.
+	DiffWorkspace diffFunc
+
+	// RendezvousGit pushes the workspace repo paths to a git rendezvous remote on
+	// a per-attempt branch, for a terminate {git} output. Nil defaults to the real
+	// path (workspace.Rendezvous via the git CLI); envtest and unit tests inject a
+	// fake.
+	RendezvousGit rendezvousFunc
+
 	// eventFilter optionally restricts which claims this reconciler watches. Nil
 	// watches all claims (the production default: a deployment runs exactly one
 	// claim reconciler, husk or raw). It exists so a test harness can run a raw

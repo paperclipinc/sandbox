@@ -21,6 +21,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,6 +35,7 @@ type wsRecorder struct {
 	hydrateCalls    int
 	dehydrateCalls  int
 	excludesPassed  []string
+	capturesPassed  []string
 	dehydrateDigest cas.Digest
 }
 
@@ -47,11 +49,12 @@ func (r *wsRecorder) install(t *testing.T, dehydrateDigest cas.Digest) {
 			r.hydratedDigest = manifest
 			return nil
 		},
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.dehydrateCalls++
 			r.excludesPassed = append([]string(nil), excludePaths...)
+			r.capturesPassed = append([]string(nil), capturePaths...)
 			return r.dehydrateDigest, nil
 		},
 	)
@@ -62,6 +65,12 @@ func (r *wsRecorder) snapshot() (hydrateCalls int, hydrated cas.Digest, dehydrat
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.hydrateCalls, r.hydratedDigest, r.dehydrateCalls, append([]string(nil), r.excludesPassed...)
+}
+
+func (r *wsRecorder) captures() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.capturesPassed...)
 }
 
 // makeBoundClaim creates a template, pool, and claim bound to wsName.
@@ -272,6 +281,95 @@ func TestClaimWithoutWorkspaceRefUnaffected(t *testing.T) {
 	if hcalls != 0 || dcalls != 0 {
 		t.Fatalf("unbound claim invoked the transfer seams: hydrate=%d dehydrate=%d", hcalls, dcalls)
 	}
+}
+
+// TestClaimWorkspaceOutputsCapturePaths asserts that a claim whose
+// spec.outputs lists a {path} narrows the dehydrate capture to that subtree:
+// the dehydrate seam is invoked with the normalized capture path.
+func TestClaimWorkspaceOutputsCapturePaths(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x21)))
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-out-node", "wso-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, "ws-outputs", v1alpha1.WorkspaceRetention{})
+
+	makeBoundClaim(t, "wso", "ws-outputs", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-out-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Path: "/workspace/dist"}},
+	})
+	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxTerminated)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _, dcalls, _ := rec.snapshot()
+		if dcalls >= 1 {
+			captures := rec.captures()
+			if len(captures) != 1 || captures[0] != "dist" {
+				t.Fatalf("dehydrate capture paths = %v, want [dist]", captures)
+			}
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("dehydrate seam was not invoked for the outputs claim within 10s")
+}
+
+// TestClaimWorkspaceOutputsDiffRecorded asserts that a {diff: true} output makes
+// the new revision record a content-hash diff summary against the parent head.
+func TestClaimWorkspaceOutputsDiffRecorded(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x33)))
+
+	// Scripted diff: the diff seam reports one added and one modified path.
+	setWSDiff(func(_ context.Context, _ *v1alpha1.SandboxClaim, _, _ cas.Digest) (workspace.Diff, error) {
+		return workspace.Diff{Added: []string{"new.txt"}, Modified: []string{"main.go"}}, nil
+	})
+	t.Cleanup(func() { setWSDiff(nil) })
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-diff-node", "wsdf-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, "ws-diff", v1alpha1.WorkspaceRetention{})
+
+	makeBoundClaim(t, "wsdf", "ws-diff", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-diff-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Diff: true}},
+	})
+	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxTerminated)
+
+	ws := waitWorkspace(t, "ws-diff", func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head != ""
+	}, "head advanced after dehydrate")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var head v1alpha1.WorkspaceRevision
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
+			if head.Status.DiffSummary != nil {
+				ds := head.Status.DiffSummary
+				if len(ds.Added) == 1 && ds.Added[0] == "new.txt" &&
+					len(ds.Modified) == 1 && ds.Modified[0] == "main.go" &&
+					ds.AddedCount == 1 && ds.ModifiedCount == 1 {
+					return
+				}
+				t.Fatalf("revision diff summary = %+v, want added [new.txt] modified [main.go]", ds)
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("revision did not record a diff summary within 10s")
 }
 
 func containsExclude(list []string, want string) bool {

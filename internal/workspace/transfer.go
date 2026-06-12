@@ -41,11 +41,13 @@ type VsockTransport interface {
 // Dehydrate captures the guest's /workspace into a CAS manifest and returns its
 // digest. It tars the workspace over vsock, strips any excludePaths member
 // (defense in depth against a secret or token file that should never enter a
-// revision), unpacks the surviving members to a temp dir, and stores them via
-// store.PutSnapshot. The returned digest is the content identifier a committed
-// WorkspaceRevision records. An unchanged tree dehydrates to the same digest
-// (PutSnapshot is content-addressed and deterministic in the file set).
-func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excludePaths []string) (cas.Digest, error) {
+// revision), filters the surviving members down to the capturePaths subtrees (a
+// nil capturePaths captures the whole workspace, the slice-2 default), unpacks
+// them to a temp dir, and stores them via store.PutSnapshot. The returned digest
+// is the content identifier a committed WorkspaceRevision records. An unchanged
+// tree dehydrates to the same digest (PutSnapshot is content-addressed and
+// deterministic in the file set).
+func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excludePaths, capturePaths []string) (cas.Digest, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -64,6 +66,7 @@ func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excl
 	if err != nil {
 		return "", fmt.Errorf("unpack workspace tar: %w", err)
 	}
+	files = FilterFiles(files, capturePaths)
 
 	m, err := store.PutSnapshot(files, cas.Metadata{})
 	if err != nil {
