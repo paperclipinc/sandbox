@@ -184,9 +184,11 @@ func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alph
 
 // ensureClaim creates or updates our SandboxClaim for an upstream claim. Our
 // claim is named after the upstream claim, lives in the same namespace, is
-// owner-referenced to it, and binds to the resolved pool. The upstream lifecycle
-// (shutdownTime/ttl) maps onto our claim's Timeout/TTL; additionalPodMetadata
-// annotations are propagated where our claim supports them.
+// owner-referenced to it, and binds to the resolved pool. From the upstream
+// lifecycle, ttlSecondsAfterFinished maps onto our claim's TTL; shutdownTime is
+// recorded via the agentrun.dev/shutdown-time annotation (not mapped to a claim
+// Timeout). additionalPodMetadata annotations are propagated where our claim
+// supports them.
 func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alpha1.SandboxClaim, pool string, policy extv1alpha1.WarmPoolPolicy) (*runv1alpha1.SandboxClaim, error) {
 	claim := &runv1alpha1.SandboxClaim{
 		ObjectMeta: metaName(src.Name, src.Namespace),

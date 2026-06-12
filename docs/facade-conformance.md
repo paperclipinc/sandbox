@@ -236,10 +236,14 @@ maps.
    each mapping the facade maps a faithful subset and lists the rest as
    unmapped (recorded, not silently dropped):
    - SandboxTemplate: the first podTemplate container's `image`, `command`, and
-     `env` map onto our template. UNMAPPED: `volumeClaimTemplates`,
-     `networkPolicy` / `networkPolicyManagement`, `envVarsInjectionPolicy`,
-     `service`, the pod `securityContext`, container `ports` / `volumeMounts`,
-     `runtimeClassName`, and multiple containers. Our husk pool pins resources at
+     `env` map onto our template. UNMAPPED (enumerated, not silently dropped):
+     `podTemplate.metadata.labels` and `podTemplate.metadata.annotations` (the
+     upstream PodTemplate ObjectMeta; our template carries no per-pod metadata
+     field); `volumeClaimTemplates`; `networkPolicy` / `networkPolicyManagement`;
+     `envVarsInjectionPolicy`; `service`; the pod `securityContext` and the
+     container `securityContext`; container `ports` / `volumeMounts`;
+     `resources`; `args`; `initContainers`; `serviceAccountName`;
+     `runtimeClassName`; and multiple containers. Our husk pool pins resources at
      build time and our engine is fork-from-snapshot, not pod-native, so these
      pod-shaped fields have no our-engine equivalent yet.
    - SandboxWarmPool: `spec.replicas` (re-read every reconcile, so an HPA scaling

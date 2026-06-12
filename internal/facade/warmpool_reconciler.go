@@ -89,6 +89,16 @@ func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1al
 	return pool, nil
 }
 
+// huskPoolLabel and huskLabel are the labels our controller stamps on every
+// husk pod of a pool (controller.buildHuskPod): agentrun.dev/pool=<pool-name>
+// plus agentrun.dev/husk=true. The mirrored scale selector below is built from
+// exactly these so it matches the real husk pods; the values MUST track
+// internal/controller/huskpod.go.
+const (
+	huskPoolLabel = "agentrun.dev/pool"
+	huskLabel     = "agentrun.dev/husk"
+)
+
 // mirrorStatus writes our pool's warm-slot counts back into the upstream warm
 // pool status (replicas + readyReplicas + the scale selector), idempotently (no
 // write when nothing changed). Our pool reports ReadySnapshots/TotalSnapshots;
@@ -97,7 +107,12 @@ func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1al
 func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1alpha1.SandboxWarmPool, pool *runv1alpha1.SandboxPool) error {
 	wantReplicas := pool.Spec.Replicas
 	wantReady := pool.Status.ReadySnapshots
-	wantSelector := fmt.Sprintf("%s=%s", WarmPoolAnnotation, src.Name)
+	// The scale-subresource selector must match the pool's husk pods, NOT a
+	// agentrun.dev/warmpool label (no pod carries one). buildHuskPod labels each
+	// husk pod agentrun.dev/pool=<pool-name>,agentrun.dev/husk=true, and our pool
+	// shares the warm pool's name, so build the selector from those exact keys.
+	// A wrong key matches zero pods and breaks HPA pod-resource-metric reads.
+	wantSelector := fmt.Sprintf("%s=%s,%s=true", huskPoolLabel, pool.Name, huskLabel)
 
 	if src.Status.Replicas == wantReplicas &&
 		src.Status.ReadyReplicas == wantReady &&

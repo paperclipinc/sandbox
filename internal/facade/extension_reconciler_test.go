@@ -139,6 +139,19 @@ func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	if len(pool.OwnerReferences) != 1 || pool.OwnerReferences[0].Kind != "SandboxWarmPool" || pool.OwnerReferences[0].Name != "ext-warmpool" {
 		t.Fatalf("our pool owner refs = %+v, want a single SandboxWarmPool owner", pool.OwnerReferences)
 	}
+
+	// The mirrored scale-subresource selector must match the husk pods of the
+	// mapped pool (agentrun.dev/pool=<pool>,agentrun.dev/husk=true, the exact
+	// keys/values buildHuskPod stamps), so an HPA reading pod-resource metrics
+	// finds the real husk pods. The pool and warm pool share the same name.
+	wantSelector := "agentrun.dev/pool=ext-warmpool,agentrun.dev/husk=true"
+	eventually(t, "the facade mirrors a husk-pod-matching status.selector", func() bool {
+		var cur extv1alpha1.SandboxWarmPool
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "ext-warmpool", Namespace: "default"}, &cur); err != nil {
+			return false
+		}
+		return cur.Status.Selector == wantSelector
+	})
 }
 
 // TestFacadeWarmPoolReplicasFollowUpstream: changing the upstream warm pool's
