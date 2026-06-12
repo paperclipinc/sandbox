@@ -102,6 +102,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&facade.SandboxClaimReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		ClusterDomain: clusterDomain,
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to set up facade SandboxClaim reconciler")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up health check")
 		os.Exit(1)

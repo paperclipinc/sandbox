@@ -202,10 +202,11 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     to end; the latest-two-minors CI matrix (only v0.4.6 is wired now); the
     state-PRESERVING pause (a memory snapshot across the pause via the Checkpoint
     primitive, so resume restores the exact in-VM state) and the in-VM resume
-    head-to-head number (a bare-metal-reference-node target, #16); the
-    SandboxWarmPool -> our pool and SandboxClaim -> our fork-from-snapshot
-    extension mappings; full podTemplate fidelity; executing the deferred rename
-    with API v2.
+    head-to-head number (a bare-metal-reference-node target, #16); full
+    podTemplate fidelity (image/resources/volumeClaimTemplates honored
+    per-Sandbox); executing the deferred rename with API v2. The extension-kind
+    mappings (SandboxTemplate/SandboxWarmPool/SandboxClaim) are DONE object-level
+    in slice 4 below.
   - ✅ DONE (slice 3, this slice): pause/resume mapping + the `bench/facade/`
     harness. The facade maps the upstream Sandbox `spec.replicas` 0<->1
     pause/resume contract onto the husk warm pool: replicas 0 (pause) RELEASES
@@ -219,6 +220,32 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     magnitude in-VM resume number stays a bare-metal-reference-node target (#16),
     since the husk VMM does not boot on kind (the #18 boundary), so only the
     object-level resume is measured there.
+  - ✅ DONE (slice 4, this slice, FINAL #19 facade slice): the extension-kind
+    mappings + behavioral fidelity. The facade now maps the core `Sandbox` AND
+    all three upstream `extensions.agents.x-k8s.io` kinds onto our engine:
+    their `SandboxTemplate` to our template (the first podTemplate container's
+    image/command/env, bridge annotation `agentrun.dev/template`); their
+    `SandboxWarmPool` to our `SandboxPool` at the requested `spec.replicas`
+    (re-read every reconcile so an HPA-controlled scale is honored, bridge
+    annotation `agentrun.dev/warmpool`); their `SandboxClaim` to our
+    fork-from-snapshot claim honoring the warmpool policy
+    (none/default/<name>), with status conditions (Bound/Ready), the bound
+    sandbox identity, and deletion (their object deleted => ours GC'd) mirrored.
+    Three new reconcilers in `internal/facade` (`SandboxTemplateReconciler`,
+    `SandboxWarmPoolReconciler`, `SandboxClaimReconciler`), registered opt-in in
+    `cmd/facade`. envtest covers each mapping + each warmpool policy + the
+    replica follow + status mirror + deletion; the `facade-conformance` kind job
+    applies their `extensions/examples` manifests UNCHANGED and asserts the
+    object-level facts (g)-(j) (their template creates ours, their warm pool
+    creates our pool at the replicas, their claim binds our claim from the
+    template-matching pool, deletion GCs ours). The fidelity points + the
+    warmpool-policy mapping + the justified exceptions (the `none` policy maps to
+    a fork from the template snapshot since our engine has no pool-less path;
+    volumeClaimTemplates/networkPolicy/securityContext/updateStrategy unmapped)
+    are recorded in `docs/facade-conformance.md` with no silent divergence. The
+    in-VM running-sandbox conformance + the measured bare-metal resume latency
+    stay bare-metal targets (#16/#18); the our-API `Fork*` rename stays deferred
+    to API v2 (the ADR).
 - **W3: Paperclip/OpenClaw/Hermes integration.** `@paperclipinc/plugin-sandbox`
   implementing the upstream sandbox-provider contract against our claims
   (adapter installs baked at pool build; lease → claim TTL; callback-bridge

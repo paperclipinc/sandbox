@@ -1409,8 +1409,15 @@ jobs:
         run: |
           set -euo pipefail
           kubectl apply -f third_party/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml
+          kubectl apply -f third_party/agent-sandbox/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml
           kubectl wait --for=condition=Established --timeout=60s \
             crd/sandboxes.agents.x-k8s.io
+          for c in sandboxtemplates sandboxwarmpools sandboxclaims; do
+            kubectl wait --for=condition=Established --timeout=60s \
+              "crd/${c}.extensions.agents.x-k8s.io"
+          done
       - name: Deploy our CRDs, controller, and the facade (default-pool=default)
         # Apply our production base (CRDs + controller + RBAC + namespace), then
         # the opt-in facade. Retarget both images to the locally-loaded :ci tags
@@ -1648,10 +1655,132 @@ jobs:
           fi
           echo "PASS (f): replicas 1->0->1 re-activates the run-path object (object-level resume; in-VM tail is the #18 bare-metal boundary)"
           echo "FACADE-CONFORMANCE OK: object-level conformance proven on kind; the in-VM Ready tail is the #18 bare-metal boundary"
+      - name: Apply the upstream extension example manifests UNCHANGED
+        # Apply their extension examples verbatim: a SandboxTemplate, a
+        # SandboxWarmPool (replicas 1, referencing that template), and a
+        # SandboxClaim (default warmpool policy, referencing that template). A
+        # rejection here is a CONFORMANCE failure (their manifest is not admitted
+        # by the upstream extension CRDs we installed).
+        run: |
+          set -euo pipefail
+          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxtemplate.yaml
+          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxwarmpool.yaml
+          kubectl -n default apply -f third_party/agent-sandbox/extensions/examples/sandboxclaim.yaml
+          echo "extension examples applied unchanged"
+      - name: Extension conformance assertions (object level)
+        # Object-level facts for the extension mappings: their SandboxTemplate
+        # creates our template, their SandboxWarmPool creates our pool at the
+        # requested replicas, their SandboxClaim binds our claim from the
+        # template-matching pool (default policy), and deletion GCs ours.
+        run: |
+          set -euo pipefail
+          dump() {
+            echo "=== facade extension-conformance diagnostics ==="
+            kubectl -n default get sandboxtemplate.extensions.agents.x-k8s.io -o wide || true
+            kubectl -n default get sandboxwarmpool.extensions.agents.x-k8s.io -o wide || true
+            kubectl -n default get sandboxclaim.extensions.agents.x-k8s.io -o wide || true
+            kubectl -n default get sandboxtemplate.agentrun.dev -o wide || true
+            kubectl -n default get sandboxpool.agentrun.dev -o wide || true
+            kubectl -n default get sandboxclaim.agentrun.dev -o wide || true
+            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=120 || true
+          }
+          trap dump ERR
+
+          # (g) their SandboxTemplate creates our template (same name).
+          got_tmpl=0
+          for i in $(seq 1 30); do
+            if kubectl -n default get sandboxtemplate.agentrun.dev secure-datascience-template >/dev/null 2>&1; then
+              got_tmpl=1
+              break
+            fi
+            echo "  [${i}/30] waiting for our mirrored SandboxTemplate"
+            sleep 2
+          done
+          if [ "$got_tmpl" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: their SandboxTemplate did not create our template"
+            exit 1
+          fi
+          echo "PASS (g): their SandboxTemplate maps to our template"
+
+          # (h) their SandboxWarmPool creates our pool at the requested replicas
+          # (1), pointing at the resolved template.
+          got_pool=0
+          for i in $(seq 1 30); do
+            replicas=$(kubectl -n default get sandboxpool.agentrun.dev sandboxwarmpool-example \
+              -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+            if [ "$replicas" = "1" ]; then
+              got_pool=1
+              break
+            fi
+            echo "  [${i}/30] waiting for our mirrored SandboxPool at replicas 1"
+            sleep 2
+          done
+          if [ "$got_pool" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: their SandboxWarmPool did not create our pool at replicas 1"
+            exit 1
+          fi
+          tref=$(kubectl -n default get sandboxpool.agentrun.dev sandboxwarmpool-example \
+            -o jsonpath='{.spec.templateRef.name}')
+          if [ "$tref" != "secure-datascience-template" ]; then
+            echo "FACADE-CONFORMANCE: our pool templateRef = '$tref', want secure-datascience-template"
+            exit 1
+          fi
+          echo "PASS (h): their SandboxWarmPool maps to our pool at replicas 1 (template $tref)"
+
+          # (i) their SandboxClaim binds our claim from the template-matching pool
+          # (default warmpool policy), with the owner reference + the bridge
+          # annotations.
+          got_claim=0
+          for i in $(seq 1 30); do
+            if kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox >/dev/null 2>&1; then
+              got_claim=1
+              break
+            fi
+            echo "  [${i}/30] waiting for our bridged SandboxClaim"
+            sleep 2
+          done
+          if [ "$got_claim" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: their SandboxClaim did not create our claim"
+            exit 1
+          fi
+          bound_pool=$(kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox \
+            -o jsonpath='{.spec.poolRef.name}')
+          policy=$(kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox \
+            -o jsonpath='{.metadata.annotations.agentrun\.dev/warmpool-policy}')
+          if [ "$bound_pool" != "sandboxwarmpool-example" ]; then
+            echo "FACADE-CONFORMANCE: our claim poolRef = '$bound_pool', want sandboxwarmpool-example"
+            exit 1
+          fi
+          if [ "$policy" != "default" ]; then
+            echo "FACADE-CONFORMANCE: our claim warmpool-policy = '$policy', want default"
+            exit 1
+          fi
+          echo "PASS (i): their SandboxClaim binds our claim from the template-matching pool (policy=$policy pool=$bound_pool)"
+
+          # (j) deleting their SandboxClaim GCs our claim (owner-reference cascade).
+          kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox
+          gone=0
+          for i in $(seq 1 30); do
+            if ! kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox >/dev/null 2>&1; then
+              gone=1
+              break
+            fi
+            echo "  [${i}/30] waiting for the owner-reference GC to reap our claim"
+            sleep 2
+          done
+          if [ "$gone" -ne 1 ]; then
+            echo "FACADE-CONFORMANCE: deleting their SandboxClaim did not GC our claim"
+            exit 1
+          fi
+          echo "PASS (j): deleting their SandboxClaim GCs our claim"
+          echo "FACADE-EXTENSION-CONFORMANCE OK: their SandboxTemplate + SandboxWarmPool + SandboxClaim map to our template/pool/claim object-level on kind; the running-sandbox tail is the #18 bare-metal boundary"
       - name: Facade conformance diagnostics and cleanup
         if: always()
         run: |
           kubectl -n default delete sandbox.agents.x-k8s.io hello-world --ignore-not-found=true || true
-          kubectl -n default delete sandboxpool default --ignore-not-found=true || true
-          kubectl -n default delete sandboxtemplate default --ignore-not-found=true || true
+          kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox --ignore-not-found=true || true
+          kubectl -n default delete sandboxwarmpool.extensions.agents.x-k8s.io sandboxwarmpool-example --ignore-not-found=true || true
+          kubectl -n default delete sandboxtemplate.extensions.agents.x-k8s.io secure-datascience-template --ignore-not-found=true || true
+          kubectl -n default delete sandboxpool.agentrun.dev default --ignore-not-found=true || true
+          kubectl -n default delete sandboxtemplate.agentrun.dev default --ignore-not-found=true || true
           kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=60 || true

@@ -48,11 +48,37 @@ rules:
       - get
       - patch
       - update
-  # Our run-path object the facade creates, owns, and terminates.
+  # The upstream extension kinds the facade watches and whose status it mirrors:
+  # SandboxTemplate -> our template, SandboxWarmPool -> our pool, SandboxClaim ->
+  # our fork-from-snapshot claim.
+  - apiGroups:
+      - extensions.agents.x-k8s.io
+    resources:
+      - sandboxtemplates
+      - sandboxwarmpools
+      - sandboxclaims
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions.agents.x-k8s.io
+    resources:
+      - sandboxtemplates/status
+      - sandboxwarmpools/status
+      - sandboxclaims/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Our run-path objects the facade creates, owns, and terminates: the claim it
+  # bridges plus the template and pool the extension reconcilers map.
   - apiGroups:
       - agentrun.dev
     resources:
       - sandboxclaims
+      - sandboxtemplates
+      - sandboxpools
     verbs:
       - create
       - delete
@@ -61,6 +87,12 @@ rules:
       - patch
       - update
       - watch
+  - apiGroups:
+      - agentrun.dev
+    resources:
+      - sandboxpools/status
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

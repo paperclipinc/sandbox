@@ -102,6 +102,13 @@ func TestMain(m *testing.M) {
 	}).SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
+	if err := (&facade.SandboxClaimReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		ClusterDomain: "cluster.local",
+	}).SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
 
 	go func() {
 		if err := mgr.Start(testCtx); err != nil {
