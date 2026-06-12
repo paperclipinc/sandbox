@@ -57,6 +57,15 @@ type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
 
+	// APIReader is an uncached reader straight to the apiserver
+	// (mgr.GetAPIReader()). The deferred phase.changed emit reads the
+	// post-reconcile phase through it so it always observes the status this
+	// reconcile just persisted: the controller-runtime cache lags the apiserver
+	// write, so a cached re-Get can read the stale phase, see no change, and drop
+	// the event. A nil APIReader (a bare unit-test struct with no manager) falls
+	// back to the cached client so those tests do not nil-panic.
+	APIReader client.Reader
+
 	// Feed is the workspace/sandbox change feed: the always-on Kubernetes Event
 	// channel plus the opt-in CloudEvents sink. The claim reconciler emits a
 	// sandbox.phase.changed event on every persisted phase transition. A zero Feed
@@ -209,8 +218,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// nothing. The time is stamped from the feed clock at the emit site.
 	entryPhase := claim.Status.Phase
 	defer func() {
+		// Read the post-reconcile phase through the uncached APIReader: the
+		// controller-runtime cache lags the apiserver write this reconcile just
+		// made, so a cached re-Get can observe the OLD phase, see no change, and
+		// drop the event (the next reconcile then reads the new phase at entry and
+		// never emits either). The uncached reader always sees the just-persisted
+		// phase. A nil APIReader (a bare unit-test struct) falls back to the cached
+		// client so those tests do not nil-panic.
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
 		var fresh v1alpha1.SandboxClaim
-		if err := r.Get(ctx, req.NamespacedName, &fresh); err != nil {
+		if err := reader.Get(ctx, req.NamespacedName, &fresh); err != nil {
 			return
 		}
 		if fresh.Status.Phase != "" && fresh.Status.Phase != entryPhase {

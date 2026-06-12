@@ -24,6 +24,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -408,8 +409,17 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 	defer stop()
 
 	ws := makeWorkspace(t, "ws-git", v1alpha1.WorkspaceRetention{})
-	ws.Spec.Git = v1alpha1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
-	if err := k8sClient.Update(ctx, ws); err != nil {
+	// Re-Get inside RetryOnConflict so each attempt carries a fresh
+	// resourceVersion: the WorkspaceReconciler updates the workspace status
+	// concurrently, so a plain Update here loses an optimistic-lock race
+	// intermittently.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.Name, Namespace: ws.Namespace}, ws); err != nil {
+			return err
+		}
+		ws.Spec.Git = v1alpha1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
+		return k8sClient.Update(ctx, ws)
+	}); err != nil {
 		t.Fatalf("set workspace git paths: %v", err)
 	}
 
