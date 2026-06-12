@@ -137,11 +137,10 @@ func TestFacadeMirrorsReadyIntoSandboxStatus(t *testing.T) {
 
 	// Drive our claim Ready via the status subresource (the test seam: the real
 	// husk activation path sets this phase).
-	claim.Status.Phase = runv1alpha1.SandboxReady
-	claim.Status.Endpoint = "10.0.0.5:9091"
-	if err := k8sClient.Status().Update(testCtx, claim); err != nil {
-		t.Fatalf("drive claim ready: %v", err)
-	}
+	statusUpdateWithRetry(t, types.NamespacedName{Name: "facade-ready", Namespace: "default"}, claim, func() {
+		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Endpoint = "10.0.0.5:9091"
+	})
 
 	eventually(t, "sandbox status mirrors Ready=True", func() bool {
 		got := getSandbox(t, "facade-ready")
@@ -170,12 +169,11 @@ func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
 	})
 
 	// Scale to zero.
-	cur := getSandbox(t, "facade-scale")
+	var cur agentsv1alpha1.Sandbox
 	zero := int32(0)
-	cur.Spec.Replicas = &zero
-	if err := k8sClient.Update(testCtx, cur); err != nil {
-		t.Fatalf("scale to zero: %v", err)
-	}
+	updateWithRetry(t, types.NamespacedName{Name: "facade-scale", Namespace: "default"}, &cur, func() {
+		cur.Spec.Replicas = &zero
+	})
 
 	eventually(t, "claim terminated on replicas 0", func() bool {
 		_, ok := getClaim(t, "facade-scale")
@@ -195,15 +193,11 @@ func TestFacadeReplicasZeroTerminatesClaim(t *testing.T) {
 // Sandbox status.
 func driveClaimReady(t *testing.T, name string) {
 	t.Helper()
-	claim, ok := getClaim(t, name)
-	if !ok {
-		t.Fatalf("claim %s not found to drive ready", name)
-	}
-	claim.Status.Phase = runv1alpha1.SandboxReady
-	claim.Status.Endpoint = "10.0.0.5:9091"
-	if err := k8sClient.Status().Update(testCtx, claim); err != nil {
-		t.Fatalf("drive claim %s ready: %v", name, err)
-	}
+	var claim runv1alpha1.SandboxClaim
+	statusUpdateWithRetry(t, types.NamespacedName{Name: name, Namespace: "default"}, &claim, func() {
+		claim.Status.Phase = runv1alpha1.SandboxReady
+		claim.Status.Endpoint = "10.0.0.5:9091"
+	})
 	eventually(t, "facade mirrors Ready + endpoint for "+name, func() bool {
 		got := getSandbox(t, name)
 		cond := apimeta.FindStatusCondition(got.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
@@ -232,12 +226,11 @@ func TestFacadePauseReleasesEndpointObservables(t *testing.T) {
 	driveClaimReady(t, "facade-pause")
 
 	// Pause: replicas 0.
-	cur := getSandbox(t, "facade-pause")
+	var cur agentsv1alpha1.Sandbox
 	zero := int32(0)
-	cur.Spec.Replicas = &zero
-	if err := k8sClient.Update(testCtx, cur); err != nil {
-		t.Fatalf("pause to zero: %v", err)
-	}
+	updateWithRetry(t, types.NamespacedName{Name: "facade-pause", Namespace: "default"}, &cur, func() {
+		cur.Spec.Replicas = &zero
+	})
 
 	eventually(t, "claim released to the warm pool on pause", func() bool {
 		_, ok := getClaim(t, "facade-pause")
@@ -269,24 +262,21 @@ func TestFacadeResumeReactivates(t *testing.T) {
 	driveClaimReady(t, "facade-resume")
 
 	// Pause.
-	cur := getSandbox(t, "facade-resume")
+	var cur agentsv1alpha1.Sandbox
 	zero := int32(0)
-	cur.Spec.Replicas = &zero
-	if err := k8sClient.Update(testCtx, cur); err != nil {
-		t.Fatalf("pause to zero: %v", err)
-	}
+	updateWithRetry(t, types.NamespacedName{Name: "facade-resume", Namespace: "default"}, &cur, func() {
+		cur.Spec.Replicas = &zero
+	})
 	eventually(t, "claim released on pause", func() bool {
 		_, ok := getClaim(t, "facade-resume")
 		return !ok
 	})
 
 	// Resume: replicas 1.
-	cur = getSandbox(t, "facade-resume")
 	one := int32(1)
-	cur.Spec.Replicas = &one
-	if err := k8sClient.Update(testCtx, cur); err != nil {
-		t.Fatalf("resume to one: %v", err)
-	}
+	updateWithRetry(t, types.NamespacedName{Name: "facade-resume", Namespace: "default"}, &cur, func() {
+		cur.Spec.Replicas = &one
+	})
 	eventually(t, "claim re-activated on resume", func() bool {
 		_, ok := getClaim(t, "facade-resume")
 		return ok
@@ -306,11 +296,10 @@ func TestFacadePauseResumeToggleStable(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, sb) })
 
 	setReplicas := func(n int32) {
-		cur := getSandbox(t, "facade-toggle")
-		cur.Spec.Replicas = &n
-		if err := k8sClient.Update(testCtx, cur); err != nil {
-			t.Fatalf("set replicas %d: %v", n, err)
-		}
+		var cur agentsv1alpha1.Sandbox
+		updateWithRetry(t, types.NamespacedName{Name: "facade-toggle", Namespace: "default"}, &cur, func() {
+			cur.Spec.Replicas = &n
+		})
 	}
 	claimPresent := func() bool {
 		_, ok := getClaim(t, "facade-toggle")
@@ -348,14 +337,13 @@ func TestFacadePauseResumeToggleStable(t *testing.T) {
 
 	// Idempotent: re-applying replicas 0 (no spec change but a forced reconcile
 	// via an annotation bump) keeps the released state; the claim stays absent.
-	cur := getSandbox(t, "facade-toggle")
-	if cur.Annotations == nil {
-		cur.Annotations = map[string]string{}
-	}
-	cur.Annotations["test.agentrun.dev/nudge"] = "1"
-	if err := k8sClient.Update(testCtx, cur); err != nil {
-		t.Fatalf("nudge a reconcile: %v", err)
-	}
+	var nudge agentsv1alpha1.Sandbox
+	updateWithRetry(t, types.NamespacedName{Name: "facade-toggle", Namespace: "default"}, &nudge, func() {
+		if nudge.Annotations == nil {
+			nudge.Annotations = map[string]string{}
+		}
+		nudge.Annotations["test.agentrun.dev/nudge"] = "1"
+	})
 	// Give the reconcile a moment, then assert the claim is still absent.
 	eventually(t, "idempotent re-reconcile keeps the claim released", claimAbsent)
 	got := getSandbox(t, "facade-toggle")
