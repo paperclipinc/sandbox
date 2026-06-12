@@ -257,7 +257,8 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   endpoints across suspend/resume, balloon reclaim, multi-process guests,
   live-snapshot secrets.
 - **W4: Workspace & state.** A `Workspace` CRD: durable, versioned,
-  forkable agent state independent of any sandbox (PVC:Pod analogy);
+  forkable agent state independent of any sandbox (PVC:Pod analogy, NOT a
+  CSI volume; see docs/adr/0002-workspace-not-csi.md);
   hydrate/dehydrate via the SAME content-addressed transfer layer as
   snapshot distribution (§3: one pipeline, two artifact types); revision
   DAG lineage (`fromClaim:`/`fromWorkspaceRevision:`); outputs extraction +
@@ -267,6 +268,17 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   feed for external indexers (no embedded vector DB), per-node toolchain
   cache via Share policy, flagship reversible sleep-consolidation demo.
   Depends on §3; may land as alpha behind a flag with eager-fetch fallback.
+  DONE (the declarative foundation): the `Workspace` and `WorkspaceRevision`
+  CRDs in agentrun.dev/v1alpha1, and the Workspace controller that manages
+  the revision DAG (head/revisions/resumable status with typed conditions +
+  observedGeneration), the Pending -> Committed transition with
+  immutability of a committed revision, `fromWorkspaceRevision` lineage
+  validation, retention pruning that protects the head's ancestry, and
+  owner-ref GC of revisions. No data moves yet. OPEN: hydrate/dehydrate over
+  the content-addressed transfer layer; the sandbox<->workspace binding; git
+  rendezvous; outputs extraction; the CloudEvents revision change feed; the
+  memory-snapshot pairing producing a resumable head from a real checkpoint;
+  the per-node toolchain cache via Share; the S3 object-store backend.
 
 **Compliance & observability addendum (amends W1/W4):** permitted claim
 language is limited to what a CI job proves (CNCF-conformant clusters, PSA

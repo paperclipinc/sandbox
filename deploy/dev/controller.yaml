@@ -71,10 +71,10 @@ metadata:
   name: agent-run-controller
 rules:
   - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks"]
+    resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["agentrun.dev"]
-    resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status"]
+    resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status", "workspaces/status", "workspacerevisions/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["agentrun.dev"]
     resources: ["sandboxclaims/finalizers", "sandboxforks/finalizers"]

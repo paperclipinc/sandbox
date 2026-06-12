@@ -1,0 +1,207 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: workspaces.agentrun.dev
+spec:
+  group: agentrun.dev
+  names:
+    kind: Workspace
+    listKind: WorkspaceList
+    plural: workspaces
+    singular: workspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.head
+      name: Head
+      type: string
+    - jsonPath: .status.revisions
+      name: Revisions
+      type: integer
+    - jsonPath: .status.resumable
+      name: Resumable
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              git:
+                description: |-
+                  Git declares the repo paths that get history and the fork-and-merge
+                  rendezvous remote. Git is the merge layer; the engine never does
+                  filesystem merge. The rendezvous itself is a later W4 slice.
+                properties:
+                  paths:
+                    description: |-
+                      Paths are the repo paths inside the workspace that get version history and
+                      the rendezvous remote.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              grants:
+                description: |-
+                  Grants are the explicit, auditable workspace access grants. Workspace
+                  access is declarative Kubernetes RBAC over these grant objects, not a
+                  pod-scoped mechanism.
+                items:
+                  properties:
+                    access:
+                      description: Access is the level of access the grant confers.
+                      enum:
+                      - readonly
+                      - readwrite
+                      type: string
+                    serviceAccount:
+                      description: ServiceAccount is the principal the grant applies
+                        to.
+                      type: string
+                  required:
+                  - access
+                  - serviceAccount
+                  type: object
+                type: array
+              retention:
+                description: |-
+                  Retention bounds how many committed revisions are kept and how old a
+                  revision must be before it is eligible for pruning.
+                properties:
+                  minAge:
+                    description: |-
+                      MinAge is the minimum age a revision must reach before it is eligible for
+                      pruning. A revision younger than MinAge is never pruned even if the count
+                      is over Revisions. Unset treats every over-count revision as eligible.
+                    type: string
+                  revisions:
+                    description: |-
+                      Revisions is the maximum number of committed revisions to keep. Committed
+                      revisions beyond this count that are also older than MinAge are pruned
+                      oldest-first. The head and any ancestor on the head's lineage path are
+                      never pruned. Zero or unset disables count-based pruning.
+                    format: int32
+                    type: integer
+                type: object
+              store:
+                description: |-
+                  Store selects the content-addressed object store that backs the
+                  workspace's revision artifacts.
+                properties:
+                  objectStorageRef:
+                    description: |-
+                      ObjectStorageRef names the S3-compatible, content-addressed object store
+                      that holds the workspace's chunked revision artifacts. This slice resolves
+                      it against the existing content-addressed store; the S3 backend is a later
+                      W4 slice.
+                    type: string
+                type: object
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              head:
+                description: |-
+                  Head is the name of the latest committed revision in the workspace's
+                  lineage. Empty until the first revision commits. Ordering is by revision
+                  creationTimestamp, then by name as a deterministic tiebreaker.
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              resumable:
+                description: |-
+                  Resumable reports whether the head revision pairs with a memory snapshot
+                  (its memorySnapshotRef is set), so a sandbox bound to the workspace can
+                  resume from the captured VM state rather than a cold start.
+                type: boolean
+              revisions:
+                description: Revisions is the number of committed revisions.
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
