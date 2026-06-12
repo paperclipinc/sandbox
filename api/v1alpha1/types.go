@@ -300,8 +300,12 @@ type OutputSpec struct {
 // GitOutput declares a git rendezvous push target for a terminate output.
 type GitOutput struct {
 	// Remote is the rendezvous git remote the workspace repo paths are pushed to.
-	// Operator-declared (an external egress; see docs/threat-model.md).
+	// Operator-declared (an external egress; see docs/threat-model.md). The
+	// pattern restricts the remote to safe transports (https/http/ssh/git/file
+	// URLs and scp-like git@host:path), so admission rejects flag-shaped values
+	// (a leading "-") and the dangerous ext::/fd:: transports at the API edge.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^(https://|http://|ssh://|git://|file://|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:).+`
 	Remote string `json:"remote,omitempty"`
 
 	// Branch is the per-attempt branch the push lands on. It is a text/template

@@ -416,7 +416,7 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 	makeBoundClaim(t, "wsg", "ws-git", v1alpha1.SandboxClaimSpec{
 		NodeName: "ws-git-node",
 		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
-		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "rendezvous", Branch: "attempt/{{.name}}"}}},
+		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "file:///srv/git/rendezvous.git", Branch: "attempt/{{.name}}"}}},
 	})
 	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
 	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxTerminated)
@@ -427,8 +427,8 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 		called, remote, branch, files := pushCalled, gotRemote, gotBranch, gotFiles
 		gitMu.Unlock()
 		if called >= 1 {
-			if remote != "rendezvous" {
-				t.Fatalf("rendezvous remote = %q, want rendezvous", remote)
+			if remote != "file:///srv/git/rendezvous.git" {
+				t.Fatalf("rendezvous remote = %q, want file:///srv/git/rendezvous.git", remote)
 			}
 			if branch != "attempt/wsg-claim" {
 				t.Fatalf("rendezvous branch = %q, want attempt/wsg-claim", branch)
@@ -451,7 +451,7 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: wsHead.Status.Head}, &head); err == nil {
 			if len(head.Status.GitPushes) == 1 &&
 				head.Status.GitPushes[0].Branch == "attempt/wsg-claim" &&
-				head.Status.GitPushes[0].Remote == "rendezvous" {
+				head.Status.GitPushes[0].Remote == "file:///srv/git/rendezvous.git" {
 				return
 			}
 		}

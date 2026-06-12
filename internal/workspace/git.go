@@ -46,6 +46,12 @@ func RenderBranch(tmpl, name string) (string, error) {
 	if strings.ContainsAny(branch, " ~^:?*[\\") || strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") {
 		return "", fmt.Errorf("rendered branch %q is not a valid git ref name", branch)
 	}
+	// A leading "-" makes the branch parse as a git flag in any option position,
+	// so reject it even though the push uses a "--" separator (defense in depth):
+	// a custom branch template starting with "-" must never reach the git CLI.
+	if strings.HasPrefix(branch, "-") {
+		return "", fmt.Errorf("rendered branch %q must not begin with '-'", branch)
+	}
 	return branch, nil
 }
 
@@ -112,8 +118,20 @@ func Rendezvous(ctx context.Context, repoFiles map[string]string, remote, branch
 			"--author", fmt.Sprintf("%s <%s>", rendezvousAuthorName, rendezvousAuthorEmail),
 			"-m", rendezvousMessage,
 		},
-		{"push", remote, branch},
+		// The "--" separator forces remote and branch to be parsed as positional
+		// arguments, never as flags. This closes the confirmed arg-injection RCE
+		// where a remote of "--receive-pack=<cmd>" would otherwise be parsed as a
+		// flag and run an arbitrary command on the pushing host.
+		{"push", "--", remote, branch},
 	}
+	// An empty HOME and GIT_CONFIG_NOSYSTEM=1 isolate the push from ambient git
+	// config (a controller image ~/.gitconfig or /etc/gitconfig), so no on-host
+	// config can re-enable the ext::/fd:: transports or otherwise alter the push.
+	gitHome, err := os.MkdirTemp("", "ws-rendezvous-home-*")
+	if err != nil {
+		return fmt.Errorf("git rendezvous home dir: %w", err)
+	}
+	defer os.RemoveAll(gitHome) //nolint:errcheck // best-effort cleanup
 	env := append(os.Environ(),
 		"GIT_AUTHOR_NAME="+rendezvousAuthorName,
 		"GIT_AUTHOR_EMAIL="+rendezvousAuthorEmail,
@@ -122,6 +140,9 @@ func Rendezvous(ctx context.Context, repoFiles map[string]string, remote, branch
 		// Fixed dates keep the commit, and therefore the pushed object, stable.
 		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z",
 		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
+		// Defense in depth: ignore /etc/gitconfig and any user gitconfig.
+		"GIT_CONFIG_NOSYSTEM=1",
+		"HOME="+gitHome,
 	)
 	for _, args := range steps {
 		cmd := exec.CommandContext(ctx, "git", args...)
