@@ -34,9 +34,11 @@ func NewNftPinner(runner func(argv []string) error) *NftPinner {
 
 // Pin adds (ip . port) to the tap's dynamic set with a timeout equal to ttl,
 // rounded up to whole seconds (a sub-second timeout would expire immediately).
-// The element syntax matches the set type rendered by RenderSandboxChain:
+// An IPv4 address is pinned into the v4 set, an IPv6 address into the v6 set, so
+// the element type matches the set type rendered by RenderSandboxChain:
 //
-//	nft add element inet <table> sb_<tap>_dyn { <ip> . <port> timeout <N>s }
+//	nft add element inet <table> sb_<tap>_dyn  { <v4> . <port> timeout <N>s }
+//	nft add element inet <table> sb_<tap>_dyn6 { <v6> . <port> timeout <N>s }
 func (p *NftPinner) Pin(_ net.IP, tap string, ip net.IP, port int, ttl time.Duration) error {
 	secs := int(ttl / time.Second)
 	if ttl%time.Second != 0 {
@@ -45,10 +47,14 @@ func (p *NftPinner) Pin(_ net.IP, tap string, ip net.IP, port int, ttl time.Dura
 	if secs < 1 {
 		secs = 1
 	}
+	set := netconf.SandboxAllowSetName(tap)
+	if ip.To4() == nil {
+		set = netconf.SandboxAllowSet6Name(tap)
+	}
 	element := fmt.Sprintf("{ %s . %d timeout %ds }", ip.String(), port, secs)
 	argv := []string{
 		"nft", "add", "element", "inet",
-		netconf.SharedTableName(), netconf.SandboxAllowSetName(tap),
+		netconf.SharedTableName(), set,
 		element,
 	}
 	if err := p.runner(argv); err != nil {

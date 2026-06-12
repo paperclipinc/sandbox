@@ -553,13 +553,27 @@ or spoof.
   CI-proven: a resolved allowlisted name:port is reachable while an unlisted name
   (refused), the right name on a wrong port, and an un-resolved direct IP are
   blocked, against a stub upstream mapping the allowlisted and a denied name to
-  the same IP (allowlisting is by name, not IP). Open follow-ups: suffix/wildcard
-  names (`*.anthropic.com`) and AAAA/IPv6 (A-only in v1).
+  the same IP (allowlisting is by name, not IP).
+- ✅ Anchored suffix wildcard names and AAAA/IPv6 in the name allowlist. A
+  wildcard `*.D` matches a subdomain of `D` (a non-empty label before `.D`) and
+  ONLY a subdomain: never the apex, never a look-alike (`evilexample.com`), never
+  `D` as a non-suffix label (`example.com.evil.com`); a literal anchored suffix
+  check (no regex), exhaustively bypass-tested. A wildcard is validated at the
+  boundary (single leading `*.` plus a valid domain; `*`, `*.`, `*foo.com`,
+  `a.*.com`, `**.com` rejected). AAAA is resolved and pinned into a separate v6
+  nftables timeout set with the same TTL model as A, and each per-sandbox chain
+  carries a v6 default-deny so an unpinned v6 destination is dropped. Honest v6
+  scope: the guest has only a v4 `/30` source identity today, so the v6 accept is
+  not `ip saddr` anti-spoof-pinned (moot for a single-stack guest, and the v6
+  default-deny is the boundary); the v4 path is the KVM-CI-proven one and the v6
+  dataplane is covered by the chain-render and pinner unit tests.
 - ⬜ Snapshot-fork networking under per-VM netns (lands with husk pods #18):
   live-fork (`ForkRunning`) of a networked sandbox fails closed today because it
   would restore the source's baked NIC and collide on tap/MAC/IP.
 - ⬜ Per-fork conntrack flush and parent-connection-death semantics beyond
-  fresh-identity; bandwidth/rate limiting; IPv6.
+  fresh-identity; bandwidth/rate limiting; a full dual-stack guest source
+  identity (a v6 `/126` + v6 anti-spoof pinning) so guests can source v6 (the
+  AAAA pin path and v6 default-deny are already in place).
 
 ## 4. Benchmark program + honest comparison
 

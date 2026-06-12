@@ -57,6 +57,15 @@ func SandboxAllowSetName(tap string) string {
 	return "sb_" + tap + "_dyn"
 }
 
+// SandboxAllowSet6Name returns the per-sandbox dynamic IPv6 allow set name for a
+// tap. It mirrors SandboxAllowSetName but holds (ipv6_addr . inet_service)
+// elements: the DNS proxy pins resolved AAAA addresses here so a name's IPv6
+// address is reachable for its TTL, just as A addresses are pinned into the v4
+// set. It is named distinctly from the v4 set so the two coexist in one chain.
+func SandboxAllowSet6Name(tap string) string {
+	return "sb_" + tap + "_dyn6"
+}
+
 // ParseAllowEntry parses a single allowlist entry of the form host:port. When
 // host is a literal IPv4 address it returns the HostPort and isName=false.
 // When host is a DNS name it returns isName=true (these cannot be enforced in
@@ -325,6 +334,17 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr . inet_service ; flags timeout ; }\n", table, set)
 	fmt.Fprintf(&b, "add rule inet %s %s %s ip daddr . tcp dport @%s accept\n", table, chain, saddr, set)
 
+	// IPv6 dynamic allow set: the DNS proxy pins resolved AAAA addresses here
+	// with a timeout, mirroring the v4 set. Accept v6 traffic whose
+	// (ip6 daddr . tcp dport) is currently present. The accept is NOT saddr
+	// pinned: the guest is assigned only a v4 /30 source identity today, so there
+	// is no v6 source address to anti-spoof against; the v6 default-deny below is
+	// the boundary. The set is declared before its accept so the reference
+	// resolves.
+	set6 := SandboxAllowSet6Name(tap)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr . inet_service ; flags timeout ; }\n", table, set6)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s accept\n", table, chain, set6)
+
 	// Final verdict for this sandbox's packets: drop under EgressDeny, accept
 	// under EgressAllow. Terminal within this regular chain for this packet
 	// only, so it cannot affect other taps' chains.
@@ -333,6 +353,12 @@ func RenderSandboxChain(tap string, guestIP net.IP, policy v1alpha1.EgressPolicy
 		final = "accept"
 	}
 	fmt.Fprintf(&b, "add rule inet %s %s %s %s\n", table, chain, saddr, final)
+	// v6 final verdict, scoped to the v6 family so it cannot disturb the v4
+	// saddr-pinned verdict above. Under EgressDeny this is the v6 default-deny:
+	// any v6 destination not present in the v6 pin set is dropped, so v6 egress
+	// is enforced and not silently permitted by fall-through to the base chain's
+	// accept policy.
+	fmt.Fprintf(&b, "add rule inet %s %s meta nfproto ipv6 %s\n", table, chain, final)
 
 	// Dispatch element: route this tap into the chain. Delete is by key on
 	// teardown, so no rule handles are tracked.

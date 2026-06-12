@@ -52,10 +52,21 @@ func startUpstream(t *testing.T) (addr string, stop func()) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		q := r.Question[0]
-		if q.Qtype == dns.TypeA && canonicalName(q.Name) == "egress.test" {
+		switch {
+		case q.Qtype == dns.TypeA && canonicalName(q.Name) == "egress.test":
 			rr, _ := dns.NewRR("egress.test. " + itoa(upstreamTTL) + " IN A 198.51.100.2")
 			m.Answer = append(m.Answer, rr)
-		} else {
+		case q.Qtype == dns.TypeAAAA && canonicalName(q.Name) == "egress.test":
+			// dual.test has both A and AAAA; egress.test answers A only on AAAA
+			// to model an A-only name.
+			m.SetRcode(r, dns.RcodeSuccess)
+		case q.Qtype == dns.TypeA && canonicalName(q.Name) == "dual.test":
+			rr, _ := dns.NewRR("dual.test. " + itoa(upstreamTTL) + " IN A 198.51.100.7")
+			m.Answer = append(m.Answer, rr)
+		case q.Qtype == dns.TypeAAAA && canonicalName(q.Name) == "dual.test":
+			rr, _ := dns.NewRR("dual.test. " + itoa(upstreamTTL) + " IN AAAA 2001:db8::7")
+			m.Answer = append(m.Answer, rr)
+		default:
 			m.SetRcode(r, dns.RcodeNameError)
 		}
 		_ = w.WriteMsg(m)
@@ -131,6 +142,106 @@ func TestServeDNSAllowlistedResolvesAndPins(t *testing.T) {
 	}
 	if p.Tap != "sb10.200.0.2" {
 		t.Errorf("pin tap = %q, want sb10.200.0.2", p.Tap)
+	}
+}
+
+// TestServeDNSAAAAResolvesAndPinsV6 asserts an allowlisted name with an AAAA
+// answer is resolved and the v6 address is pinned (one pin per allowed port),
+// with the TTL floored just like the A path.
+func TestServeDNSAAAAResolvesAndPinsV6(t *testing.T) {
+	upstream, stop := startUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"dual.test": {443}})
+	pinner := NewFakePinner()
+	s := newProxy(t, reg, pinner, upstream)
+
+	rw := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rw, queryFor("dual.test", dns.TypeAAAA))
+
+	out := rw.written()
+	if out == nil || out.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR with answer, got %#v", out)
+	}
+	if len(out.Answer) != 1 {
+		t.Fatalf("expected 1 AAAA answer, got %d", len(out.Answer))
+	}
+	aaaa, ok := out.Answer[0].(*dns.AAAA)
+	if !ok || !aaaa.AAAA.Equal(net.ParseIP("2001:db8::7")) {
+		t.Fatalf("answer = %v, want 2001:db8::7", out.Answer[0])
+	}
+
+	pins := pinner.Pins()
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d: %+v", len(pins), pins)
+	}
+	p := pins[0]
+	if !p.IP.Equal(net.ParseIP("2001:db8::7")) || p.Port != 443 {
+		t.Errorf("pin = %v:%d, want 2001:db8::7:443", p.IP, p.Port)
+	}
+	if p.IP.To4() != nil {
+		t.Errorf("pinned address %v must be IPv6, not IPv4-mapped", p.IP)
+	}
+	if p.TTL < 60*time.Second {
+		t.Errorf("pin ttl %v below floor 60s", p.TTL)
+	}
+}
+
+// TestServeDNSAOnlyNamePinsOnlyV4 asserts a name with no AAAA answer pins only
+// its v4 address: an AAAA query for an A-only name resolves NOERROR-empty and
+// pins nothing, while the A query pins the v4 address.
+func TestServeDNSAOnlyNamePinsOnlyV4(t *testing.T) {
+	upstream, stop := startUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"egress.test": {8080}})
+	pinner := NewFakePinner()
+	s := newProxy(t, reg, pinner, upstream)
+
+	// AAAA for an A-only name: no AAAA record upstream, so nothing is pinned.
+	rwV6 := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rwV6, queryFor("egress.test", dns.TypeAAAA))
+	if got := len(pinner.Pins()); got != 0 {
+		t.Fatalf("AAAA for an A-only name must pin nothing, got %d", got)
+	}
+
+	// The A query pins the v4 address.
+	rwV4 := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rwV4, queryFor("egress.test", dns.TypeA))
+	pins := pinner.Pins()
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 v4 pin, got %d: %+v", len(pins), pins)
+	}
+	if pins[0].IP.To4() == nil {
+		t.Errorf("pin %v must be IPv4", pins[0].IP)
+	}
+}
+
+// TestServeDNSAAAADeniedNamePinsNeither asserts an AAAA query for a name not on
+// the allowlist is refused and pins nothing.
+func TestServeDNSAAAADeniedNamePinsNeither(t *testing.T) {
+	upstream, stop := startUpstream(t)
+	defer stop()
+
+	reg := NewRegistry()
+	guest := net.ParseIP("10.200.0.2")
+	reg.Register(guest, map[string][]int{"dual.test": {443}})
+	pinner := NewFakePinner()
+	s := newProxy(t, reg, pinner, upstream)
+
+	rw := &fakeRW{remote: &net.UDPAddr{IP: guest, Port: 5300}}
+	s.ServeDNS(rw, queryFor("blocked.test", dns.TypeAAAA))
+
+	out := rw.written()
+	if out == nil || out.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED for a denied AAAA, got %#v", out)
+	}
+	if got := len(pinner.Pins()); got != 0 {
+		t.Errorf("expected no pins for a denied AAAA, got %d", got)
 	}
 }
 

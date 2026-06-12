@@ -16,9 +16,9 @@ import (
 // the answer. Names that are not allowlisted are refused; upstream failures are
 // reported as SERVFAIL and pin nothing.
 //
-// v1 enforces A (IPv4) records only. AAAA queries are answered NOERROR with an
-// empty answer so a dual-stack resolver in the guest falls back to IPv4 rather
-// than hanging; IPv6 egress pinning is a documented follow-up.
+// Both A (IPv4) and AAAA (IPv6) are enforced: an allowed name's A records are
+// pinned into the sandbox's v4 set and its AAAA records into the v6 set, each
+// for the record's TTL. Any other query type is refused.
 type Server struct {
 	registry *Registry
 	pinner   Pinner
@@ -72,15 +72,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// AAAA is answered empty in v1 (A-only enforcement). The query is not
-	// forwarded and nothing is pinned.
-	if q.Qtype == dns.TypeAAAA {
-		m := new(dns.Msg)
-		m.SetReply(r)
-		_ = w.WriteMsg(m)
-		return
-	}
-	if q.Qtype != dns.TypeA {
+	// Only A and AAAA are forwarded and pinned. Every other qtype is refused so
+	// the resolver cannot be used as a covert tunnel.
+	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
 		s.refuse(w, r)
 		return
 	}
@@ -117,16 +111,23 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	for _, ans := range resp.Answer {
-		a, isA := ans.(*dns.A)
-		if !isA {
+		// Pin each A and AAAA answer. The pinner routes a v4 address into the v4
+		// set and a v6 address into the v6 set so the element type matches.
+		var addr net.IP
+		switch rr := ans.(type) {
+		case *dns.A:
+			addr = rr.A
+		case *dns.AAAA:
+			addr = rr.AAAA
+		default:
 			continue
 		}
-		ttl := time.Duration(a.Header().Ttl) * time.Second
+		ttl := time.Duration(ans.Header().Ttl) * time.Second
 		if ttl < s.ttlFloor {
 			ttl = s.ttlFloor
 		}
 		for _, port := range ports {
-			if perr := s.pinner.Pin(clientIP, tap, a.A, port, ttl); perr != nil {
+			if perr := s.pinner.Pin(clientIP, tap, addr, port, ttl); perr != nil {
 				s.logger.Warn("dns pin failed",
 					"guest", clientIP.String(), "name", q.Name, "port", port, "err", perr)
 			}

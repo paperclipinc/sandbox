@@ -113,26 +113,52 @@ matches on the resolved IP and never sees the name the guest looked up. The
   source guest IP (each sandbox has a unique /30 from the identity allocator) and
   consults THAT sandbox's name allowlist. A query whose source has no live tap
   mapping is REFUSED and pins nothing.
-- **Resolve-then-pin.** For an allowlisted name, the resolver forwards the query
-  to the configured upstream (`--dns-upstream`), and for each A record it pins
-  `(recordIP . allowedPort)` into that sandbox's per-sandbox nftables timeout set
-  (`ipv4_addr . inet_service`, `flags timeout`) with a timeout of
-  `max(recordTTL, 30s floor)`, then returns the SAME answer to the guest. Because
-  the guest connects to exactly the IP the resolver pinned, the guest and the
-  firewall always agree on the address with no resolve-and-pin race. A name NOT
-  on the allowlist gets REFUSED; nothing is pinned.
-- **Port-scoped, saddr-pinned.** Only the allowed ports are pinned, and the
-  dynamic-set accept rule (like every other accept) is `ip saddr <guestIP>`
+- **Allowlist names: exact OR anchored suffix wildcard.** A name entry matches a
+  query exactly (case-insensitive, trailing-dot tolerant) OR, when written `*.D`,
+  by the ANCHOR RULE: the query must end with `.D` AND have a non-empty label
+  before that `.D`. So `*.example.com` matches `a.example.com` and
+  `a.b.example.com` but NEVER the apex `example.com`, NEVER a look-alike
+  (`notexample.com`, `evilexample.com`, `xexample.com`), and NEVER a name that
+  carries `D` only as a non-suffix label (`example.com.evil.com`). The match is a
+  LITERAL anchored suffix check (no regex). Exact and wildcard entries coexist; a
+  name matching both gets the union of their ports. A wildcard is validated where
+  the template names build the allowlist (`netconf.ParseNameAllowList`): it must
+  be exactly a single leading `*.` plus a valid domain, so `*`, `*.`, `*foo.com`,
+  `a.*.com`, `**.com`, and multi-star names are REJECTED at the boundary, never
+  silently treated as a literal.
+- **Resolve-then-pin (A and AAAA).** For an allowlisted name, the resolver
+  forwards the query to the configured upstream (`--dns-upstream`), and for each
+  A record it pins `(recordIP . allowedPort)` into that sandbox's v4 timeout set
+  (`ipv4_addr . inet_service`, `flags timeout`) and for each AAAA record into a
+  SEPARATE v6 timeout set (`ipv6_addr . inet_service`, `flags timeout`), each
+  with a timeout of `max(recordTTL, 30s floor)`, then returns the SAME answer to
+  the guest. Because the guest connects to exactly the IP the resolver pinned,
+  the guest and the firewall always agree on the address with no resolve-and-pin
+  race. A name NOT on the allowlist gets REFUSED; nothing is pinned.
+- **Port-scoped, saddr-pinned (v4).** Only the allowed ports are pinned, and the
+  v4 dynamic-set accept rule (like every other v4 accept) is `ip saddr <guestIP>`
   pinned, so a spoofed-source query cannot land a pin the spoofing guest can use.
 - **TTL window.** A pinned `(ip . port)` stays reachable for the timeout above
   even after the name stops resolving to it; the set evicts the element when the
   timeout lapses. The 30s floor keeps a very short TTL from expiring a pin before
   the guest connects.
 
-v1 is exact-match FQDNs and A/IPv4 only (AAAA returns empty NOERROR so a
-dual-stack guest falls back to IPv4 rather than hanging). The residual risks
+AAAA/IPv6 is enforced by the same resolve-then-pin model: a resolved v6 address
+is pinned into the per-sandbox v6 set, and each per-sandbox chain carries a v6
+default-deny (`meta nfproto ipv6 drop` under `egress: deny`) so an unpinned v6
+destination is dropped rather than falling through to the base chain's accept.
+Honest scope: the guest is assigned only a v4 `/30` source identity today (no v6
+source address), so the v6 accept is not `ip saddr` anti-spoof-pinned like the
+v4 accepts; in single-stack guests this is moot (the guest cannot source v6) and
+the dataplane fails closed regardless via the v6 default-deny. The residual risks
 (upstream-resolver trust, the bounded TTL window, the shared-CDN-IP caveat) are
 documented per row in `docs/threat-model.md`.
+
+Per mode: in raw-forkd mode this dnsproxy + per-tap nftables IS the egress
+mechanism over the VM tap; in the husk default the VM tap lives in the husk
+pod's netns and a Kubernetes NetworkPolicy/Cilium over that pod is the governing
+egress layer (no bespoke nftables for husk pods). Exactly one layer governs a
+given sandbox, never both (threat model section 0, surface 5).
 
 ## Enforced vs open
 
@@ -149,13 +175,17 @@ documented per row in `docs/threat-model.md`.
   (the denied connect times out), driven from inside the guest over the guest
   agent. The destination lives in a separate netns reached over a veth, so the
   traffic is genuinely forwarded through the host's nftables forward hook.
-- **Name-based egress** (exact-match FQDNs, behind `--enable-dns-egress`). A
-  sandbox allowed the NAME `egress.test:8080` resolves it through the controlled
-  resolver and reaches the resolved IP on that port; the right name on a wrong
-  port, a name not on the allowlist (REFUSED), and a direct dial to the
-  destination IP without first resolving the name are all BLOCKED. Proven from
-  inside the guest in KVM CI against a stub upstream that maps the allowlisted
-  and a denied name to the SAME IP, so the proof is by NAME, not by IP.
+- **Name-based egress** (exact FQDNs and anchored suffix wildcards `*.D`, behind
+  `--enable-dns-egress`). A sandbox allowed the NAME `egress.test:8080` resolves
+  it through the controlled resolver and reaches the resolved IP on that port;
+  the right name on a wrong port, a name not on the allowlist (REFUSED), and a
+  direct dial to the destination IP without first resolving the name are all
+  BLOCKED. Proven from inside the guest in KVM CI against a stub upstream that
+  maps the allowlisted and a denied name to the SAME IP, so the proof is by
+  NAME, not by IP. The wildcard anchor matcher and the A/AAAA pin paths are unit
+  bypass-tested in `internal/dnsproxy` and `internal/netconf`; the v4 in-VM proof
+  is the CI-proven path, and the v6 dataplane is exercised by the chain-render
+  and pinner tests.
 
 **OPEN (not enforced; documented, not pretended):**
 

@@ -61,7 +61,8 @@ func main() {
 			}
 			m.Answer = append(m.Answer, rr)
 		case dns.TypeAAAA:
-			// A-only stub: empty NOERROR mirrors the controlled proxy's v1 behavior.
+			// This stub is A-only: an empty NOERROR models an A-only upstream name
+			// (the proxy now also forwards and pins AAAA when the upstream answers).
 		default:
 			m.SetRcode(r, dns.RcodeNameError)
 		}
