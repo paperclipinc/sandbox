@@ -182,6 +182,13 @@ type TemplateResult struct {
 // `pip install`) is never served. With no init commands the VM is snapshotted
 // as soon as it has booted. The VM is killed after snapshot.
 func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string) (*TemplateResult, error) {
+	// Re-assert the allowlist barrier locally: the id is validated at the forkd
+	// gRPC boundary (validateSandboxID), but a defense-in-depth check here keeps
+	// every path that joins the id provably free of separators and traversal,
+	// and is the CodeQL-recognized barrier for the go/path-injection flows below.
+	if err := validateVMID(id); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 
 	snapshotDir := filepath.Join(tm.dataDir, "templates", id, "snapshot")
@@ -333,6 +340,11 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 
 // DeleteTemplate removes a template and its snapshot files.
 func (tm *TemplateManager) DeleteTemplate(id string) error {
+	// Defense-in-depth allowlist barrier before joining the id into a path that
+	// is then recursively removed (see CreateTemplate).
+	if err := validateVMID(id); err != nil {
+		return err
+	}
 	dir := filepath.Join(tm.dataDir, "templates", id)
 	return os.RemoveAll(dir)
 }
@@ -362,6 +374,11 @@ func (tm *TemplateManager) ListTemplates() ([]string, error) {
 
 // HasTemplate checks if a template snapshot exists.
 func (tm *TemplateManager) HasTemplate(id string) bool {
+	// An id that fails the allowlist names no valid template; refuse before
+	// joining it into a path (defense-in-depth, see CreateTemplate).
+	if err := validateVMID(id); err != nil {
+		return false
+	}
 	memFile := filepath.Join(tm.dataDir, "templates", id, "snapshot", "mem")
 	_, err := os.Stat(memFile)
 	return err == nil
