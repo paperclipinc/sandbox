@@ -363,6 +363,7 @@ func TestMain(m *testing.M) {
 
 	rawClaim := &controller.SandboxClaimReconciler{
 		Client:       mgr.GetClient(),
+		APIReader:    mgr.GetAPIReader(),
 		NodeRegistry: nodeRegistry,
 	}
 	// The raw (forkd) claim reconciler ignores husk-test claims so it does not
@@ -438,6 +439,7 @@ func TestMain(m *testing.M) {
 	// activator is swappable per test via setHuskTestActivator.
 	huskClaim := &controller.SandboxClaimReconciler{
 		Client:         mgr.GetClient(),
+		APIReader:      mgr.GetAPIReader(),
 		NodeRegistry:   nodeRegistry,
 		EnableHuskPods: true,
 		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; the fake activator ignores it

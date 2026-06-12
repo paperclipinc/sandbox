@@ -146,6 +146,7 @@ func main() {
 	// bootstrap, exactly like nodeRegistry.TLS.
 	claimReconciler := &controller.SandboxClaimReconciler{
 		Client:             mgr.GetClient(),
+		APIReader:          mgr.GetAPIReader(),
 		NodeRegistry:       nodeRegistry,
 		MaxPendingDuration: maxPendingDuration,
 		EnableHuskPods:     enableHuskPods,
