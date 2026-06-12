@@ -1,0 +1,18 @@
+{
+	"name": "Go and Node.js Dev Container",
+	"image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+	"features": {
+		"ghcr.io/devcontainers/features/go:1": {
+			"version": "latest"
+		},
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "lts"
+		},
+        "ghcr.io/coder/devcontainer-features/code-server:1": {
+            "port": 13337,
+            "host": "0.0.0.0"
+        },
+	},
+	"postCreateCommand": "npm install -g @google/gemini-cli",
+    "appPort": ["13337:13337"]
+}

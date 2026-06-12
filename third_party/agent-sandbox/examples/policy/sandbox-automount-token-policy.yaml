@@ -1,0 +1,15 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: "sandbox-automount-token-policy"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   ["agents.x-k8s.io"]
+        apiVersions: ["v1alpha1"]
+        operations:  ["CREATE", "UPDATE"]
+        resources:   ["sandboxes"]
+  validations:
+    - expression: "object.spec.podTemplate.spec.automountServiceAccountToken == false"
+      message: "For security reasons, spec.podTemplate.spec.automountServiceAccountToken must be explicitly set to false for Sandbox resources."
