@@ -53,3 +53,20 @@ respective reconcilers in `internal/controller` for the precise emission points.
 | `SecretInheritanceDenied` | SandboxFork | A fork was rejected because the source claim holds secrets and inheritance was not explicitly opted into. |
 | `ExplicitOptIn` | SandboxFork | Secret inheritance was explicitly permitted on the fork. |
 | `Forked` / `ForksCreated` | SandboxFork | The requested forks were created. |
+| `WorkspaceBusy` | SandboxClaim | Another writer holds the single-writer-per-workspace lock for the claim's target workspace; this claim waits and retries until the first writer releases it. |
+
+### Operator actions per SandboxClaim reason
+
+The `Ready=False` SandboxClaim reasons above are not all the same severity. The
+catalogue is the normative reference the alerts and runbooks cite (see
+`deploy/monitoring/` and `docs/runbooks/`).
+
+| Reason | Status | Operator action |
+| --- | --- | --- |
+| `HuskActivated` | True | None; a dormant husk pod was activated in place. |
+| `ActivateFailed` | False | Transient; the claim re-pends. If sustained, check forkd and KVM health on the holder node (the ClaimErrorRateHigh `reason="fork"` runbook). |
+| `HuskPodRaced` | False | None; two claims raced for one husk pod, the loser retries. Benign under load. |
+| `NoHuskPod` | False | Warm pool is empty for this claim's pool; scale the SandboxPool warm count (the WarmPoolStarved runbook). |
+| `NoCapacity` / `CapacityExhausted` | False | No node had admission capacity before the pending deadline; add capacity or scale pools (the ClaimsPendingSustained runbook). |
+| `NodeLost` | False | The backing node was lost (drain, eviction, deletion); the claim re-places. Confirm the node and recover it if unexpected. |
+| `WorkspaceBusy` | False | None; the claim waits on the single-writer-per-workspace lock and retries. Investigate only if a writer never releases it. |

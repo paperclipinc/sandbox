@@ -723,9 +723,19 @@ verified. In rough order of leverage:
 - ✅ Metrics: orphan-sweep counts, pending-claim requeues, and per-pool claim
   error rates are exported (agentrun_orphan_sweeps_total,
   agentrun_claim_pending_total, agentrun_claim_errors_total{pool,reason},
-  agentrun_pool_ready_snapshots{pool}; increments asserted in CI). OPEN:
-  snapshot-distribution lag, plus Grafana dashboards and PrometheusRule alerts
-  with runbooks for 1.0.
+  agentrun_pool_ready_snapshots{pool}; increments asserted in CI).
+- ✅ Grafana dashboard + PrometheusRule alerts + runbooks + the
+  conditions/reason-code catalogue (the 1.0 maturity bar): the opt-in
+  deploy/monitoring kustomize layer ships a Grafana dashboard and five alerts
+  (ClaimErrorRateHigh, ClaimsPendingSustained, WarmPoolStarved, OrphanSweepSpike,
+  ForkLatencyHigh) over the exported metrics, each linking a docs/runbooks file;
+  the rules are promtool-validated in CI and reference only real metric names;
+  docs/conditions.md covers every condition reason the controllers emit. Alert
+  thresholds are environment-tunable and the <=10ms p99 fork stays a bare-metal
+  target, not an asserted SLO. OPEN: snapshot-distribution lag (needs the
+  multi-node distribution path, #3) and its alert; Helm-chart packaging of the
+  dashboard and alerts (the deploy/monitoring kustomize layer is the current
+  slice).
 - ✅ Toggleable structured audit log of every exec/file op (forkd --audit-log;
   records command/path and byte counts, never content or secrets;
   content-safety asserted in CI)
