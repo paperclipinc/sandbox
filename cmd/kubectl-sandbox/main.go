@@ -4,12 +4,17 @@
 //
 // Subcommands:
 //
-//	ls   list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
-//	ps   list SandboxForks, or one claim's forks if a name is given
+//	ls    list SandboxClaims (NAME, POOL, PHASE, NODE, ENDPOINT, AGE)
+//	ps    list SandboxForks, or one claim's forks if a name is given
+//	tree  render the fork/lineage DAG (claims -> forks -> forks)
+//	top   per-sandbox CoW-aware metering (unique + shared-once memory)
+//	logs  husk stub pod console for a claim, plus the guest console note
+//	exec  run a command in a sandbox over the token-scoped sandbox API
 //
 // Flags: -n <namespace>, -A (all namespaces). The plugin reads the cluster
 // connection from the standard kubeconfig resolution (KUBECONFIG, --kubeconfig,
-// or in-cluster). top/tree/exec/logs are documented follow-ups (issue #29).
+// or in-cluster). cp/port-forward remain the documented ergonomics longtail
+// (issue #29).
 package main
 
 import (
@@ -33,15 +38,20 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
-const usage = `kubectl sandbox: list agentrun.dev sandbox objects
+const usage = `kubectl sandbox: inspect and operate agentrun.dev sandbox objects
 
 Usage:
-  kubectl sandbox ls [-n namespace] [-A]        list SandboxClaims
-  kubectl sandbox ps [name] [-n namespace] [-A] list SandboxForks (or one claim's forks)
+  kubectl sandbox ls [-n namespace] [-A]         list SandboxClaims
+  kubectl sandbox ps [name] [-n namespace] [-A]  list SandboxForks (or one claim's forks)
+  kubectl sandbox tree [--pool name] [-n ns] [-A] render the fork/lineage DAG
+  kubectl sandbox top [-n namespace] [-A]        per-sandbox CoW-aware metering
+  kubectl sandbox logs <sandbox> [-n namespace]  husk stub pod console for a claim
+  kubectl sandbox exec <sandbox> [-n ns] -- cmd  run a command in a sandbox
 
 Flags:
-  -n string   namespace (default "default")
-  -A          all namespaces
+  -n string      namespace (default "default")
+  -A             all namespaces
+  --pool string  scope tree to one pool (tree only)
 `
 
 func main() {
@@ -54,15 +64,21 @@ func main() {
 	fs := flag.NewFlagSet(sub, flag.ExitOnError)
 	var namespace string
 	var allNamespaces bool
+	var pool string
 	fs.StringVar(&namespace, "n", "default", "namespace")
 	fs.BoolVar(&allNamespaces, "A", false, "all namespaces")
+	fs.StringVar(&pool, "pool", "", "scope to one pool (tree only)")
+
+	fail := func(err error) {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 
 	switch sub {
 	case "ls":
 		_ = fs.Parse(os.Args[2:])
 		if err := runLs(namespace, allNamespaces); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+			fail(err)
 		}
 	case "ps":
 		_ = fs.Parse(os.Args[2:])
@@ -71,18 +87,61 @@ func main() {
 			name = fs.Arg(0)
 		}
 		if err := runPs(namespace, allNamespaces, name); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+			fail(err)
 		}
-	case "top", "tree", "exec", "logs":
-		fmt.Fprintf(os.Stderr, "kubectl sandbox %s: not yet implemented, see https://github.com/paperclipinc/sandbox/issues/29\n", sub)
-		os.Exit(2)
+	case "tree":
+		_ = fs.Parse(os.Args[2:])
+		if err := runTree(namespace, allNamespaces, pool); err != nil {
+			fail(err)
+		}
+	case "top":
+		_ = fs.Parse(os.Args[2:])
+		if err := runTop(namespace, allNamespaces); err != nil {
+			fail(err)
+		}
+	case "logs":
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "error: logs requires a sandbox name")
+			os.Exit(2)
+		}
+		if err := runLogs(namespace, fs.Arg(0)); err != nil {
+			fail(err)
+		}
+	case "exec":
+		// exec splits its args at "--": everything after is the command. Parse
+		// only the flags before "--" so a "-flag" in the command is not eaten.
+		flagArgs, cmd := splitDoubleDash(os.Args[2:])
+		_ = fs.Parse(flagArgs)
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "error: exec requires a sandbox name")
+			os.Exit(2)
+		}
+		if len(cmd) == 0 {
+			fmt.Fprintln(os.Stderr, "error: exec requires a command after --")
+			os.Exit(2)
+		}
+		if err := runExec(namespace, fs.Arg(0), cmd); err != nil {
+			fail(err)
+		}
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", sub, usage)
 		os.Exit(2)
 	}
+}
+
+// splitDoubleDash partitions args at the first "--": the elements before it are
+// flag args, the elements after are the command. With no "--" the command is
+// empty and all args are flag args.
+func splitDoubleDash(args []string) (flagArgs, cmd []string) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
 }
 
 // newClient builds a controller-runtime client from the standard kubeconfig

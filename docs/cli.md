@@ -117,6 +117,79 @@ PROVEN in CI:
 The mock-engine exec limitation above is the one gap: real in-VM `exec` is proven
 by the KVM CI of the API, not by the kind dev smoke.
 
+## kubectl-sandbox operator plugin
+
+`kubectl-sandbox` is a separate kubectl plugin for the OPERATOR persona: a
+cluster admin who inspects and operates the sandbox objects already in the
+cluster. Installed as `kubectl-sandbox` on `PATH`, it is invoked as
+`kubectl sandbox <verb>` and reads the cluster connection from the standard
+kubeconfig resolution.
+
+```bash
+go build -o /usr/local/bin/kubectl-sandbox ./cmd/kubectl-sandbox/
+```
+
+```
+kubectl sandbox ls   [-n ns] [-A]            list SandboxClaims
+kubectl sandbox ps   [name] [-n ns] [-A]     list SandboxForks (or one claim's forks)
+kubectl sandbox tree [--pool P] [-n ns] [-A] render the fork/lineage DAG
+kubectl sandbox top  [-n ns] [-A]            per-sandbox CoW-aware metering
+kubectl sandbox logs <sandbox> [-n ns]       husk stub pod console for a claim
+kubectl sandbox exec <sandbox> [-n ns] -- cmd run a command in a sandbox
+```
+
+### tree
+
+`tree` walks the lineage DAG: each `SandboxClaim` is a root, and a `SandboxFork`
+nests under whatever object its `spec.sourceRef` names (a claim OR another fork,
+so a multi-level fork chain nests). Siblings sort by name; an orphan fork whose
+source is out of scope is surfaced as its own root rather than dropped.
+`--pool <name>` scopes to one pool via a transitive walk over the source refs.
+
+### top
+
+`top` shows per-sandbox CoW-aware metering pulled from each node's forkd
+`GET /v1/metering` endpoint (operational data on the same access class as
+`/metrics` and `/healthz`). The columns are HONEST about what they mean:
+
+- `UNIQUE-MEM` is the marginal unique (private-dirty) memory a fork actually
+  adds. It is NOT `memory.current`.
+- `SHARED-MEM` is the shared-once template attribution: the page set every fork
+  of a template maps copy-on-write, counted once per template at the node level
+  (see `internal/metering`).
+- `UNIQUE-DISK` is the backing storage the sandbox alone owns.
+
+A sandbox with no metering datum (no endpoint, an unreachable forkd, or no
+matching row) shows a dash in every metered cell, never a zero and never a
+fabricated value.
+
+### logs
+
+`logs <sandbox>` prints the husk stub pod console for the claim (the
+`agentrun.dev/husk` pod labeled `agentrun.dev/claim=<claim>`) via the Kubernetes
+pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
+plane (kind) there is no husk pod or no live guest, so the stub console is
+reported absent and the guest console states it needs a running sandbox: the
+guest serial/vsock console streams only from a live VMM (the
+[#18](https://github.com/paperclipinc/sandbox/issues/18) boundary), not from this
+read-only operator path.
+
+### exec
+
+`exec <sandbox> -- <cmd>` runs a command in the sandbox over the forkd HTTP
+sandbox API, authenticating with the per-sandbox bearer token read from the
+claim's `<claim>-sandbox-token` Secret: the SAME gate the SDK uses, never
+bypassing auth. The token value is held only for the request, never logged, and
+redacted from any error string. A claim that is not `Ready` (or has no endpoint,
+or no token Secret) yields a clear, actionable error rather than a hang. The
+in-sandbox command's exit code becomes the plugin's exit code so it chains in
+shell pipelines.
+
+On kind the mock engine has no guest VM, so `exec`/`top`/`logs` of a REAL running
+sandbox are the KVM/bare-metal tail; the kind-e2e smoke proves `ls`/`ps`/`tree`
+at the object level. `cp` and `port-forward` for operators remain the documented
+ergonomics longtail.
+
 ## Follow-ups
 
 - workspace verbs (`agentrun ws log|diff|revert|branch`) pending Workspace

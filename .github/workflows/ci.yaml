@@ -166,6 +166,11 @@ jobs:
           kind load docker-image agent-run-kvm-device-plugin:ci --name agent-run-ci
       - name: Build agentrun CLI
         run: go build -o /usr/local/bin/agentrun ./cmd/agentrun/
+      - name: Build kubectl-sandbox plugin
+        # Installed on PATH as kubectl-sandbox so it is invoked as
+        # "kubectl sandbox <verb>". The object-level smoke below proves
+        # ls/ps/tree render the cluster objects on the mock control plane.
+        run: go build -o /usr/local/bin/kubectl-sandbox ./cmd/kubectl-sandbox/
       - name: agentrun dev up (mock control plane on the existing kind cluster)
         # The dev overlay (deploy/dev/) runs a MOCK control plane: forkd --mock
         # (no KVM, no /dev/kvm, no kvm nodeSelector) and the controller with
@@ -355,6 +360,25 @@ jobs:
           ID=$(agentrun sandbox create --pool dev-default)
           echo "created sandbox: $ID"
           agentrun sandbox ls | grep -q "$ID"
+          agentrun sandbox terminate "$ID"
+      - name: kubectl sandbox ls/ps/tree render the objects (object-level smoke)
+        # Build a claim and a fork on the mock control plane, then assert the
+        # kubectl-sandbox plugin renders them at the OBJECT level: ls shows the
+        # claim, ps shows the fork, tree renders the lineage with the fork nested
+        # under its source claim. exec/top/logs of a REAL running sandbox are the
+        # KVM/bare-metal tail (the mock engine has no guest VM), documented in
+        # docs/cli.md; this smoke proves the read/list verbs over kubeconfig.
+        run: |
+          set -euo pipefail
+          ID=$(agentrun sandbox create --pool dev-default)
+          echo "created sandbox: $ID"
+          kubectl sandbox ls | grep -q "$ID"
+          agentrun sandbox fork "$ID" --replicas 1
+          echo "created a fork from: $ID"
+          # ps SOURCE column and the tree lineage root both carry the claim id.
+          kubectl sandbox ps | grep -q "$ID"
+          kubectl sandbox tree | grep -q "$ID"
+          echo "kubectl sandbox ls/ps/tree rendered the objects"
           agentrun sandbox terminate "$ID"
       - name: agentrun dev down (cleanup)
         if: always()
