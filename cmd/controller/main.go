@@ -151,7 +151,11 @@ func main() {
 		EnableHuskPods:     enableHuskPods,
 		HuskControlPort:    huskControlPort,
 		Feed: controller.NewEmitFeed(
-			mgr.GetEventRecorderFor("agentrun-controller"),
+			// record.EventRecorder (the v1 events API) is still supported; the v2
+			// events API GetEventRecorder returns a different type with a different
+			// signature, so migrating is a separate change. controller-runtime's own
+			// tests carry the same nolint on this deprecation.
+			mgr.GetEventRecorderFor("agentrun-controller"), //nolint:staticcheck // v1 events API supported; v2 migration out of scope
 			eventSink,
 			nil,
 		),
