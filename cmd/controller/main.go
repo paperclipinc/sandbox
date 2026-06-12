@@ -151,6 +151,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The Workspace reconciler (W4) is core, not behind the husk flag: it manages
+	// the declarative Workspace model (the revision DAG, retention, lineage, and
+	// head/revisions/resumable status). No data moves yet; hydrate/dehydrate is a
+	// later W4 slice.
+	if err := (&controller.WorkspaceReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to create controller", "controller", "Workspace")
+		os.Exit(1)
+	}
+
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
 	if discoveryNamespace == "" {
 		discoveryNamespace = "agent-run"

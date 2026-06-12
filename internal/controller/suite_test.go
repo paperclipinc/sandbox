@@ -201,6 +201,14 @@ func TestMain(m *testing.M) {
 		NodeRegistry: nodeRegistry,
 	}).SetupWithManager(mgr)
 
+	// The Workspace reconciler (W4): manages the revision DAG, retention,
+	// lineage, and head/revisions/resumable status. Core, not behind any flag.
+	if err := (&controller.WorkspaceReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+
 	go func() {
 		if err := mgr.Start(ctx); err != nil {
 			panic(err)
