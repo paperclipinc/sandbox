@@ -195,8 +195,52 @@ type WorkspaceRevisionStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Committed
 	Phase WorkspaceRevisionPhase `json:"phase,omitempty"`
 
+	// DiffSummary records the content-hash diff of this revision against the
+	// workspace head revision before it, when a terminate {diff: true} output
+	// requested it. It is a path-level summary (added, removed, modified file
+	// names plus counts); the file contents stay in the content store, never in
+	// the status. Unset when no diff was requested or the revision is a root.
+	// +optional
+	DiffSummary *RevisionDiffSummary `json:"diffSummary,omitempty"`
+
+	// GitPushes records the git rendezvous pushes this revision's terminate
+	// performed (the per-attempt branch and the remote), so the fork-and-merge
+	// rendezvous is auditable. The push content is the workspace repo paths; git
+	// is the merge layer and the engine never merges working trees.
+	// +optional
+	GitPushes []GitPushRecord `json:"gitPushes,omitempty"`
+
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+}
+
+// RevisionDiffSummary is the path-level content-hash diff of a revision against
+// its parent. The lists hold workspace-relative file names; a modified file
+// changed content (its chunk digests differ). Renames appear as a remove plus an
+// add on the workspace side (git handles renames on the repo-paths side).
+type RevisionDiffSummary struct {
+	// ParentRevision is the head revision the diff was computed against. Empty
+	// when this revision is the first in the workspace (a root: everything added).
+	// +optional
+	ParentRevision string `json:"parentRevision,omitempty"`
+
+	Added    []string `json:"added,omitempty"`
+	Removed  []string `json:"removed,omitempty"`
+	Modified []string `json:"modified,omitempty"`
+
+	// AddedCount, RemovedCount, and ModifiedCount summarize the lists for a quick
+	// human read and for indexers that do not want the full path lists.
+	AddedCount    int32 `json:"addedCount,omitempty"`
+	RemovedCount  int32 `json:"removedCount,omitempty"`
+	ModifiedCount int32 `json:"modifiedCount,omitempty"`
+}
+
+// GitPushRecord is one git rendezvous push performed on terminate.
+type GitPushRecord struct {
+	// Remote is the rendezvous remote the workspace repo paths were pushed to.
+	Remote string `json:"remote,omitempty"`
+	// Branch is the per-attempt branch the push landed on.
+	Branch string `json:"branch,omitempty"`
 }
 
 // +kubebuilder:object:root=true

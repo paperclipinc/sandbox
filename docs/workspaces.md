@@ -98,6 +98,73 @@ reason `WorkspaceBusy` and retries; it acquires no VM until the first claim
 releases the workspace. This keeps two sandboxes from racing to dehydrate the same
 workspace into divergent heads.
 
+## Outputs: capturing only what matters, with a diff
+
+By default the dehydrate-on-terminate captures the whole `/workspace` tree into
+the new revision. A claim narrows and enriches that capture with
+`spec.outputs`, matching the v2-spec `onTerminate.outputs` shape:
+
+```yaml
+apiVersion: agentrun.dev/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: agent-session-7
+spec:
+  poolRef: { name: python-pool }
+  workspaceRef: { name: project-acme }
+  outputs:
+    - { path: /workspace/dist }                       # capture only this subtree
+    - { diff: true }                                  # record the diff vs the parent head
+    - { git: { remote: rendezvous, branch: "attempt/{{.name}}" } }
+```
+
+- A `{path}` output narrows the captured revision to that `/workspace` subtree.
+  With any `path` output set, only the union of those subtrees enters the
+  revision; with no `path` output the whole workspace is captured (the default).
+  The filter is a prefix match on the workspace-relative file names, so `dist`
+  captures `dist/app.js` but never `distractor/x.txt`.
+- A `{diff: true}` output records a content-hash diff of the new revision against
+  the workspace head before it on `WorkspaceRevision.status.diffSummary`: the
+  added, removed, and modified file names plus counts. Modified means a file
+  present in both whose chunk digests differ (its content changed). An unchanged
+  tree diffs to empty. This is a content diff, not rename-aware: a rename shows
+  as a delete plus an add on the workspace side (git handles renames on the
+  repo-paths side).
+
+The secret exclude list still applies to the captured set, so outputs never widen
+what a revision may carry.
+
+## Git rendezvous: fork-and-merge through git
+
+A `{git}` output pushes the workspace repo paths to a rendezvous remote on a
+per-attempt branch. On terminate, for each `{git}` output the controller resolves
+the workspace `spec.git.paths` content from the just-dehydrated revision,
+materializes it into a temporary worktree, makes one deterministic commit, and
+pushes it to the output's `remote` on a branch rendered from the output's
+`branch` template (a `text/template` over `{{.name}}`, the claim name, defaulting
+to `attempt/<name>`). The push is recorded on
+`WorkspaceRevision.status.gitPushes` (the branch and remote).
+
+GIT IS THE MERGE LAYER. The engine only ever pushes a branch; it never merges
+working trees. Fork-and-merge means: fork the workspace, run each attempt in its
+own sandbox, push each attempt's repo paths to its own per-attempt branch, and
+let a human or CI merge the branches with git. There is no automatic merge by
+design.
+
+Honest behavior:
+
+- A `{git}` output on a workspace with no `spec.git.paths` is a no-op with a
+  logged warning: there is nothing to push.
+- A push failure surfaces on the claim/revision condition and the terminate
+  retries it; it is never silently swallowed. The revision and the dehydrated
+  marker are made durable first, so a failing push never loses the captured work.
+- A `{git}` output is a NEW EGRESS of tenant repo data to an operator-declared
+  external remote; see docs/threat-model.md section 3.
+
+The push uses the host `git` CLI via exec, so it adds no new dependency. CI's
+Linux runner has git; the controller image must ship git for the production path
+(the tests skip gracefully when git is absent so the unit suite is not flaky).
+
 ## Secrets are never captured into a revision
 
 Secret values live only in the guest's in-memory configured env (delivered over
@@ -120,12 +187,26 @@ PROVEN:
   manifest, dehydrate-on-terminate creating a `fromClaim` revision that advances
   the head, single-writer `WorkspaceBusy`, an unbound claim unaffected, and the
   secret exclude list passed to dehydrate (`internal/controller/workspace_binding_test.go`).
+- Outputs extraction: the path filter captures only the listed subtrees and the
+  content-hash diff detects add/remove/modify (unchanged diffs to empty) in unit
+  tests (`internal/workspace/outputs_test.go`); an envtest proves a `{path}`
+  output narrows the dehydrate capture and a `{diff: true}` output records the
+  diff summary on the new revision.
+- Git rendezvous: the push to a LOCAL bare repo lands the per-attempt branch with
+  exactly one commit carrying the repo-paths content
+  (`internal/workspace/git_test.go`); an envtest proves a `{git}` output renders
+  the branch, calls the rendezvous push with the resolved repo files, and records
+  the push on the revision status.
 
 OPEN (later W4 slices):
 
 - The per-workspace encryption key (#31).
 - The S3 / object-storage store backend (this slice uses the node CAS).
-- Outputs extraction and git rendezvous for fork-and-merge (slice 3).
+- A real external rendezvous server and its credentials (a referenced Secret,
+  principal-bound); this slice proves the push against a local bare repo with no
+  auth. There is no auto-merge by design: git is the merge layer.
+- The SDK/CLI `terminate(outputs=...)` surface and the `agentrun ws
+  log|diff|revert|branch` verbs (a separate workstream surface).
 - The CloudEvents revision change feed and the memory-snapshot pairing that
   produces a resumable head from a real checkpoint (slice 4).
 - A streaming (non-buffered) tar for very large workspaces (this slice caps and

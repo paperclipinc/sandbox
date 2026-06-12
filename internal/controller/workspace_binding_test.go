@@ -21,6 +21,7 @@ import (
 	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
+	"github.com/paperclipinc/sandbox/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,6 +35,7 @@ type wsRecorder struct {
 	hydrateCalls    int
 	dehydrateCalls  int
 	excludesPassed  []string
+	capturesPassed  []string
 	dehydrateDigest cas.Digest
 }
 
@@ -47,11 +49,12 @@ func (r *wsRecorder) install(t *testing.T, dehydrateDigest cas.Digest) {
 			r.hydratedDigest = manifest
 			return nil
 		},
-		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+		func(_ context.Context, _ *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			r.dehydrateCalls++
 			r.excludesPassed = append([]string(nil), excludePaths...)
+			r.capturesPassed = append([]string(nil), capturePaths...)
 			return r.dehydrateDigest, nil
 		},
 	)
@@ -62,6 +65,12 @@ func (r *wsRecorder) snapshot() (hydrateCalls int, hydrated cas.Digest, dehydrat
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.hydrateCalls, r.hydratedDigest, r.dehydrateCalls, append([]string(nil), r.excludesPassed...)
+}
+
+func (r *wsRecorder) captures() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.capturesPassed...)
 }
 
 // makeBoundClaim creates a template, pool, and claim bound to wsName.
@@ -272,6 +281,183 @@ func TestClaimWithoutWorkspaceRefUnaffected(t *testing.T) {
 	if hcalls != 0 || dcalls != 0 {
 		t.Fatalf("unbound claim invoked the transfer seams: hydrate=%d dehydrate=%d", hcalls, dcalls)
 	}
+}
+
+// TestClaimWorkspaceOutputsCapturePaths asserts that a claim whose
+// spec.outputs lists a {path} narrows the dehydrate capture to that subtree:
+// the dehydrate seam is invoked with the normalized capture path.
+func TestClaimWorkspaceOutputsCapturePaths(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x21)))
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-out-node", "wso-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, "ws-outputs", v1alpha1.WorkspaceRetention{})
+
+	makeBoundClaim(t, "wso", "ws-outputs", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-out-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Path: "/workspace/dist"}},
+	})
+	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wso-claim", v1alpha1.SandboxTerminated)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _, dcalls, _ := rec.snapshot()
+		if dcalls >= 1 {
+			captures := rec.captures()
+			if len(captures) != 1 || captures[0] != "dist" {
+				t.Fatalf("dehydrate capture paths = %v, want [dist]", captures)
+			}
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("dehydrate seam was not invoked for the outputs claim within 10s")
+}
+
+// TestClaimWorkspaceOutputsDiffRecorded asserts that a {diff: true} output makes
+// the new revision record a content-hash diff summary against the parent head.
+func TestClaimWorkspaceOutputsDiffRecorded(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x33)))
+
+	// Scripted diff: the diff seam reports one added and one modified path.
+	setWSDiff(func(_ context.Context, _ *v1alpha1.SandboxClaim, _, _ cas.Digest) (workspace.Diff, error) {
+		return workspace.Diff{Added: []string{"new.txt"}, Modified: []string{"main.go"}}, nil
+	})
+	t.Cleanup(func() { setWSDiff(nil) })
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-diff-node", "wsdf-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	makeWorkspace(t, "ws-diff", v1alpha1.WorkspaceRetention{})
+
+	makeBoundClaim(t, "wsdf", "ws-diff", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-diff-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Diff: true}},
+	})
+	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsdf-claim", v1alpha1.SandboxTerminated)
+
+	ws := waitWorkspace(t, "ws-diff", func(ws *v1alpha1.Workspace) bool {
+		return ws.Status.Head != ""
+	}, "head advanced after dehydrate")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var head v1alpha1.WorkspaceRevision
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: ws.Status.Head}, &head); err == nil {
+			if head.Status.DiffSummary != nil {
+				ds := head.Status.DiffSummary
+				if len(ds.Added) == 1 && ds.Added[0] == "new.txt" &&
+					len(ds.Modified) == 1 && ds.Modified[0] == "main.go" &&
+					ds.AddedCount == 1 && ds.ModifiedCount == 1 {
+					return
+				}
+				t.Fatalf("revision diff summary = %+v, want added [new.txt] modified [main.go]", ds)
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("revision did not record a diff summary within 10s")
+}
+
+// TestClaimWorkspaceGitOutputPushes asserts that a {git} output on a workspace
+// with spec.git.paths renders the per-attempt branch, calls the rendezvous seam
+// with the resolved repo files, and records the push on the new revision status.
+func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x44)))
+
+	// The repo-paths resolver returns one file under the git path.
+	setWSRepoFiles(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ cas.Digest, gitPaths []string) (map[string]string, error) {
+		return map[string]string{"repo/main.go": "package main\n"}, nil
+	})
+	t.Cleanup(func() { setWSRepoFiles(nil) })
+
+	var (
+		gitMu      sync.Mutex
+		gotRemote  string
+		gotBranch  string
+		gotFiles   map[string]string
+		pushCalled int
+	)
+	setWSRendezvous(func(_ context.Context, repoFiles map[string]string, remote, branch string) error {
+		gitMu.Lock()
+		defer gitMu.Unlock()
+		pushCalled++
+		gotRemote, gotBranch, gotFiles = remote, branch, repoFiles
+		return nil
+	})
+	t.Cleanup(func() { setWSRendezvous(nil) })
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-git-node", "wsg-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	ws := makeWorkspace(t, "ws-git", v1alpha1.WorkspaceRetention{})
+	ws.Spec.Git = v1alpha1.WorkspaceGit{Paths: []string{"/workspace/repo"}}
+	if err := k8sClient.Update(ctx, ws); err != nil {
+		t.Fatalf("set workspace git paths: %v", err)
+	}
+
+	makeBoundClaim(t, "wsg", "ws-git", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-git-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "file:///srv/git/rendezvous.git", Branch: "attempt/{{.name}}"}}},
+	})
+	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsg-claim", v1alpha1.SandboxTerminated)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		gitMu.Lock()
+		called, remote, branch, files := pushCalled, gotRemote, gotBranch, gotFiles
+		gitMu.Unlock()
+		if called >= 1 {
+			if remote != "file:///srv/git/rendezvous.git" {
+				t.Fatalf("rendezvous remote = %q, want file:///srv/git/rendezvous.git", remote)
+			}
+			if branch != "attempt/wsg-claim" {
+				t.Fatalf("rendezvous branch = %q, want attempt/wsg-claim", branch)
+			}
+			if files["repo/main.go"] != "package main\n" {
+				t.Fatalf("rendezvous repo files = %v, missing repo/main.go", files)
+			}
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if pushCalled == 0 {
+		t.Fatal("git rendezvous seam was not invoked within 10s")
+	}
+
+	// The push must be recorded on the new revision status.
+	wsHead := waitWorkspace(t, "ws-git", func(w *v1alpha1.Workspace) bool { return w.Status.Head != "" }, "head advanced")
+	for time.Now().Before(deadline) {
+		var head v1alpha1.WorkspaceRevision
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: wsHead.Status.Head}, &head); err == nil {
+			if len(head.Status.GitPushes) == 1 &&
+				head.Status.GitPushes[0].Branch == "attempt/wsg-claim" &&
+				head.Status.GitPushes[0].Remote == "file:///srv/git/rendezvous.git" {
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatal("revision did not record the git push within 10s")
 }
 
 func containsExclude(list []string, want string) bool {

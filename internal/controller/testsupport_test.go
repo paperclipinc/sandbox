@@ -19,6 +19,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/fork"
 	"github.com/paperclipinc/sandbox/internal/husk"
 	"github.com/paperclipinc/sandbox/internal/observability"
+	"github.com/paperclipinc/sandbox/internal/workspace"
 	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -68,16 +69,24 @@ func (r *SandboxClaimReconciler) SetCheckpointForTest(fn func(ctx context.Contex
 	r.Checkpoint = fn
 }
 
-// SetWorkspaceTransferForTest injects the workspace hydrate/dehydrate seams so
-// envtest can drive the binding lifecycle without a VM. hydrate records the
-// manifest it was asked to restore; dehydrate returns a scripted digest and
-// records the exclude list it was passed.
+// SetWorkspaceTransferForTest injects the workspace hydrate/dehydrate/diff/git
+// seams so envtest can drive the binding lifecycle without a VM. hydrate records
+// the manifest it was asked to restore; dehydrate returns a scripted digest and
+// records the exclude and capture lists it was passed; diff returns a scripted
+// content diff; rendezvous records the git push it was asked to make. A nil diff
+// or rendezvous leaves the production default in place.
 func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error),
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+	diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error),
+	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error,
+	repoFiles func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error),
 ) {
 	r.HydrateWorkspace = hydrate
 	r.DehydrateWorkspace = dehydrate
+	r.DiffWorkspace = diff
+	r.RendezvousGit = rendezvous
+	r.RepoFilesForGit = repoFiles
 }
 
 // EnsureHuskPDBForTest exposes ensureHuskPDB to the external controller_test

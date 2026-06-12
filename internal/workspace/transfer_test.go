@@ -146,7 +146,7 @@ func TestDehydrateHydrateRoundTrip(t *testing.T) {
 		src.writeFile(t, rel, content)
 	}
 
-	digest, err := Dehydrate(ctx, src, store, nil)
+	digest, err := Dehydrate(ctx, src, store, nil, nil)
 	if err != nil {
 		t.Fatalf("Dehydrate: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestDehydrateUnchangedTreeDedups(t *testing.T) {
 	a.writeFile(t, "a.txt", "alpha")
 	a.writeFile(t, "b/c.txt", "charlie")
 
-	d1, err := Dehydrate(ctx, a, store, nil)
+	d1, err := Dehydrate(ctx, a, store, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestDehydrateUnchangedTreeDedups(t *testing.T) {
 	b := newFakeAgent(t)
 	b.writeFile(t, "a.txt", "alpha")
 	b.writeFile(t, "b/c.txt", "charlie")
-	d2, err := Dehydrate(ctx, b, store, nil)
+	d2, err := Dehydrate(ctx, b, store, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestDehydrateUnchangedTreeDedups(t *testing.T) {
 	c := newFakeAgent(t)
 	c.writeFile(t, "a.txt", "alpha")
 	c.writeFile(t, "b/c.txt", "DELTA")
-	d3, err := Dehydrate(ctx, c, store, nil)
+	d3, err := Dehydrate(ctx, c, store, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestDehydrateExcludesSecretPaths(t *testing.T) {
 	a.writeFile(t, ".secrets/token", "super-secret-token")
 
 	excludes := []string{"/workspace/.netrc", ".secrets"}
-	digest, err := Dehydrate(ctx, a, store, excludes)
+	digest, err := Dehydrate(ctx, a, store, excludes, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +239,40 @@ func TestDehydrateExcludesSecretPaths(t *testing.T) {
 	}
 	if _, ok := got[".secrets/token"]; ok {
 		t.Error(".secrets/token was captured into the revision; secret exclusion failed")
+	}
+}
+
+func TestDehydrateCapturePathsOnlyCapturesSubtree(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	a := newFakeAgent(t)
+	a.writeFile(t, "dist/app.js", "built")
+	a.writeFile(t, "dist/sub/page.js", "built page")
+	a.writeFile(t, "src/main.go", "package main")
+	a.writeFile(t, "README.md", "readme")
+
+	// Capture only the dist subtree (the {path: /workspace/dist} output).
+	digest, err := Dehydrate(ctx, a, store, nil, []string{"dist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := newFakeAgent(t)
+	if err := Hydrate(ctx, dst, store, digest); err != nil {
+		t.Fatal(err)
+	}
+	got := dst.listFiles(t)
+	if _, ok := got["dist/app.js"]; !ok {
+		t.Error("captured revision missing dist/app.js")
+	}
+	if _, ok := got["dist/sub/page.js"]; !ok {
+		t.Error("captured revision missing dist/sub/page.js")
+	}
+	if _, ok := got["src/main.go"]; ok {
+		t.Error("captured revision included src/main.go outside the dist capture path")
+	}
+	if _, ok := got["README.md"]; ok {
+		t.Error("captured revision included README.md outside the dist capture path")
 	}
 }
 

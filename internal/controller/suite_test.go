@@ -16,6 +16,7 @@ import (
 	"github.com/paperclipinc/sandbox/internal/cas"
 	"github.com/paperclipinc/sandbox/internal/controller"
 	"github.com/paperclipinc/sandbox/internal/husk"
+	"github.com/paperclipinc/sandbox/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -55,7 +56,10 @@ var (
 	// suite's raw claim reconciler drives. Tests set them via setWSTransfer.
 	wsTransferMu sync.Mutex
 	wsHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
-	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error)
+	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
+	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
 )
 
 // setWSTransfer installs the workspace hydrate/dehydrate fakes; nil restores a
@@ -63,12 +67,43 @@ var (
 // pass.
 func setWSTransfer(
 	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
-	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error),
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
 ) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsHydrate = hydrate
 	wsDehydrate = dehydrate
+}
+
+// setWSDiff installs the workspace diff fake; nil falls back to a default that
+// returns an empty diff so a test that does not exercise the diff path is
+// unaffected.
+func setWSDiff(diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsDiff = diff
+}
+
+// setWSRendezvous installs the git rendezvous fake; nil falls back to the
+// production default (workspace.Rendezvous via the git CLI).
+func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string) error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsRendezvous = rv
+}
+
+// setWSRepoFiles installs the git repo-paths resolver fake; nil falls back to a
+// default that resolves no files.
+func setWSRepoFiles(fn func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	wsRepoFiles = fn
+}
+
+func currentWSRepoFiles() func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsRepoFiles
 }
 
 func currentWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
@@ -77,10 +112,22 @@ func currentWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, 
 	return wsHydrate
 }
 
-func currentWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+func currentWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsDehydrate
+}
+
+func currentWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsDiff
+}
+
+func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+	wsTransferMu.Lock()
+	defer wsTransferMu.Unlock()
+	return wsRendezvous
 }
 
 // setHuskTestCheckpointer installs the checkpointer the suite reconciler uses
@@ -213,11 +260,29 @@ func TestMain(m *testing.M) {
 			}
 			return fmt.Errorf("no workspace hydrate fake installed")
 		},
-		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths []string) (cas.Digest, error) {
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
 			if fn := currentWSDehydrate(); fn != nil {
-				return fn(ctx, claim, excludePaths)
+				return fn(ctx, claim, excludePaths, capturePaths)
 			}
 			return "", fmt.Errorf("no workspace dehydrate fake installed")
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error) {
+			if fn := currentWSDiff(); fn != nil {
+				return fn(ctx, claim, parent, child)
+			}
+			return workspace.Diff{}, nil
+		},
+		func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+			if fn := currentWSRendezvous(); fn != nil {
+				return fn(ctx, repoFiles, remote, branch)
+			}
+			return nil
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error) {
+			if fn := currentWSRepoFiles(); fn != nil {
+				return fn(ctx, claim, digest, gitPaths)
+			}
+			return nil, nil
 		},
 	)
 	if err := rawClaim.SetupWithManager(mgr); err != nil {

@@ -284,10 +284,22 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   with `fromClaim` lineage dehydrates on terminate (the head advances),
   single-writer-per-workspace, and secrets excluded from revisions. PROVEN on
   KVM (the in-VM tar round trip byte-identical) and in envtest (the binding +
-  revision lifecycle behind a transfer seam); see docs/workspaces.md. OPEN:
-  outputs extraction + git rendezvous for fork-and-merge (slice 3); the
-  CloudEvents revision change feed and the memory-snapshot pairing producing a
-  resumable head from a real checkpoint (slice 4); the per-workspace
+  revision lifecycle behind a transfer seam); see docs/workspaces.md.
+  DONE (slice 3, outputs extraction + git rendezvous for fork-and-merge): a
+  claim `spec.outputs` narrows the dehydrate capture to the listed `/workspace`
+  subtrees (path filter; no path output captures the whole workspace) and a
+  `{diff: true}` output records a content-hash diff of the new revision against
+  the parent head on `status.diffSummary`; a `{git}` output renders a per-attempt
+  branch from a `{{.name}}` template and pushes the workspace `spec.git.paths`
+  content to a rendezvous remote via the git CLI, recorded on
+  `status.gitPushes`. Git is the merge layer: the engine pushes branches, a
+  human/CI merges them, the engine never merges working trees. PROVEN: the path
+  filter + content-hash diff in unit + envtest, and the git push against a local
+  bare repo + an envtest push wiring; a `{git}` output is a new egress noted in
+  docs/threat-model.md. OPEN: the CloudEvents revision change feed and the
+  memory-snapshot pairing producing a resumable head from a real checkpoint
+  (slice 4); a real external rendezvous server + credentials (a referenced
+  Secret); the SDK/CLI `terminate(outputs=...)` surface; the per-workspace
   encryption key (#31); the per-node toolchain cache via Share; the S3
   object-store backend (this slice uses the node CAS).
 

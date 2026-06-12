@@ -57,7 +57,9 @@ rules:
   # status writes phase, conditions (NodeLost, Rejected, Terminated), warmed
   # counts, and FinishedAt. The Workspace reconciler writes head/revisions/
   # resumable and the Ready condition on workspaces, and the phase + condition
-  # on workspacerevisions.
+  # on workspacerevisions. The claim reconciler (W4 outputs) also writes the
+  # diffSummary and gitPushes on a revision status it created on terminate; the
+  # update verb on workspacerevisions/status is already covered here.
   - apiGroups:
       - agentrun.dev
     resources:
