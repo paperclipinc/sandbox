@@ -24,6 +24,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
 	"github.com/paperclipinc/sandbox/internal/facade"
@@ -32,10 +33,13 @@ import (
 var scheme = runtime.NewScheme()
 
 func init() {
-	// Register BOTH the upstream agents.x-k8s.io scheme (the Sandbox we watch)
-	// and our agentrun.dev scheme (the SandboxClaim we create), plus core/v1.
+	// Register the upstream agents.x-k8s.io scheme (the core Sandbox we watch),
+	// the upstream extensions.agents.x-k8s.io scheme (the SandboxTemplate /
+	// SandboxWarmPool / SandboxClaim extension kinds we map), and our agentrun.dev
+	// scheme (the template/pool/claim objects we create), plus core/v1.
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(extv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(runv1alpha1.AddToScheme(scheme))
 }
 
@@ -75,6 +79,26 @@ func main() {
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to set up facade Sandbox reconciler")
+		os.Exit(1)
+	}
+
+	// The extension reconcilers map the upstream extensions.agents.x-k8s.io kinds
+	// onto our agentrun.dev objects: their SandboxTemplate to our template and
+	// their SandboxWarmPool to our pool. They run in the same opt-in facade
+	// manager as the core Sandbox reconciler.
+	if err := (&facade.SandboxTemplateReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to set up facade SandboxTemplate reconciler")
+		os.Exit(1)
+	}
+
+	if err := (&facade.SandboxWarmPoolReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error(err, "unable to set up facade SandboxWarmPool reconciler")
 		os.Exit(1)
 	}
 

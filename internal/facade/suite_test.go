@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -43,6 +44,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	if err := extv1alpha1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
 	if err := runv1alpha1.AddToScheme(scheme); err != nil {
@@ -83,6 +87,18 @@ func TestMain(m *testing.M) {
 		Scheme:        mgr.GetScheme(),
 		DefaultPool:   "default-pool",
 		ClusterDomain: "cluster.local",
+	}).SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+	if err := (&facade.SandboxTemplateReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+	if err := (&facade.SandboxWarmPoolReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
