@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# OPT-IN monitoring layer. This is NOT part of the default `kubectl apply -k
+# deploy/` base: it depends on the Prometheus Operator (for the
+# monitoring.coreos.com/v1 PrometheusRule CRD) and on a Grafana running the
+# dashboard sidecar (for the grafana_dashboard ConfigMap convention). Install it
+# separately once those dependencies are present:
+#   kubectl apply -k deploy/monitoring/
+#
+# - prometheusrule.yaml: five alerts over the metrics the control plane exports,
+#   each linking a docs/runbooks file. Thresholds are environment-tunable.
+# - dashboard-configmap.yaml: the Grafana dashboard JSON wrapped in a ConfigMap
+#   with the grafana_dashboard: "1" sidecar label.
+resources:
+  - prometheusrule.yaml
+  - dashboard-configmap.yaml

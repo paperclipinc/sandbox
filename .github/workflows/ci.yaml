@@ -70,6 +70,24 @@ jobs:
         working-directory: deploy
       - name: kustomize base resolves
         run: kubectl kustomize deploy/ > /dev/null
+      - name: Install promtool
+        # promtool ships in the Prometheus release tarball. It validates the
+        # PromQL in the PrometheusRule so a bad expression fails CI.
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prometheus.tar.gz \
+            https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          sudo install /tmp/prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/promtool
+          promtool --version
+      - name: promtool validates the PrometheusRule
+        # promtool check rules expects a bare {groups: [...]} document, while the
+        # file on disk is a PrometheusRule CRD that nests the same groups under
+        # .spec. Extract .spec.groups to a temp rules file, then check it.
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml,sys; d=yaml.safe_load(open("deploy/monitoring/prometheusrule.yaml")); yaml.safe_dump({"groups": d["spec"]["groups"]}, open("/tmp/agentrun-rules.yaml","w"))'
+          promtool check rules /tmp/agentrun-rules.yaml
 
   talos-validate:
     # Validate the Talos machine configs. worker-kvm.yaml and controlplane.yaml

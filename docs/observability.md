@@ -192,8 +192,10 @@ reason codes only.
 |--------|------|---------|
 | `agentrun_fork_duration_seconds` | histogram | Time to fork a sandbox from snapshot, as measured by forkd. |
 | `agentrun_active_sandboxes` | gauge | Currently running sandboxes on this node. |
-| `agentrun_memory_shared_bytes` | gauge | Copy-on-write shared memory across forks. |
-| `agentrun_memory_unique_bytes` | gauge | Per-fork unique (dirty-page) memory at fork time. |
+| `agentrun_memory_shared_bytes` | gauge | CoW-aware shared memory: each template's shared page set counted once. |
+| `agentrun_memory_unique_bytes` | gauge | Per-fork unique (dirty-page) memory summed over all sandboxes. |
+| `agentrun_cow_memory_savings_bytes` | gauge | Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware). |
+| `agentrun_metered_disk_bytes` | gauge | CoW-aware metered backing storage: template volume seeds counted once. |
 
 ### Controller-level
 
@@ -218,9 +220,11 @@ pending-requeue, orphan-sweep, claim-error, and pool-reconcile paths).
 ### OPEN
 
 - Snapshot-distribution lag is not yet exported.
-- Grafana dashboards, PrometheusRule alerts with runbook URLs, and a
-  conditions/reason-code catalogue are a 1.0 maturity item (#29).
 - OpenCost and Hubble layers ride on husk pods (#18).
+
+The Grafana dashboard, PrometheusRule alerts with runbook URLs, and the
+conditions/reason-code catalogue that ride on these metrics are shipped; see
+"Dashboards, alerts, runbooks" below.
 
 ## `kubectl sandbox` plugin
 
@@ -264,3 +268,68 @@ strings, empty-list messages, and missing-cell dashes
 
 `kubectl sandbox top/tree/exec/logs` are documented follow-ups (#29); invoking
 them prints a "not yet implemented" notice.
+
+## Dashboards, alerts, runbooks
+
+The `deploy/monitoring/` kustomize layer packages a Grafana dashboard and a
+PrometheusRule over the metrics above, with one runbook per alert. It is OPT-IN:
+it is NOT part of the default `kubectl apply -k deploy/` base, because it has
+external dependencies. Install it separately once those are present:
+
+```
+kubectl apply -k deploy/monitoring/
+```
+
+### Artifacts
+
+- `deploy/monitoring/prometheusrule.yaml`: a `monitoring.coreos.com/v1`
+  PrometheusRule with five alerts: ClaimErrorRateHigh, ClaimsPendingSustained,
+  WarmPoolStarved, OrphanSweepSpike, and ForkLatencyHigh. Each alert links a
+  `docs/runbooks/` file via its `runbook_url` annotation.
+- `deploy/monitoring/dashboard.json` plus `dashboard-configmap.yaml`: a Grafana
+  dashboard (fork latency p50/p99, active sandboxes, CoW memory density, metered
+  disk, claims pending, claim error rate by pool/reason, pool ready snapshots,
+  orphan sweeps), wrapped in a ConfigMap.
+- `docs/runbooks/*.md`: one runbook per alert (signal, likely causes, diagnosis
+  with `kubectl sandbox ls/ps/top` and the metrics to check, remediation,
+  escalation).
+- `docs/conditions.md`: the normative reason-code catalogue the runbooks cite.
+
+### Dependencies
+
+- The PrometheusRule needs the Prometheus Operator (the
+  `monitoring.coreos.com/v1` PrometheusRule CRD) and an operator whose
+  `ruleSelector` matches the rule's labels.
+- The dashboard ConfigMap uses the Grafana sidecar convention: the
+  `grafana_dashboard: "1"` label, picked up by a Grafana running the dashboard
+  sidecar (the kube-prometheus-stack default).
+
+### Thresholds and the latency target
+
+Every alert threshold is environment-tunable: the numbers in the PrometheusRule
+are defensible starting points, not established SLOs, and each runbook says to
+tune them from the cluster's observed baseline. In particular the ForkLatencyHigh
+threshold is NOT the bare-metal latency target: the `<=10ms` p99 fork is a
+bare-metal TARGET, while the alert fires on a looser, cluster-specific budget so a
+busy or virtualized node does not page on the target itself.
+
+### PROVEN
+
+- The PrometheusRule is promtool-validated in CI (the manifests job extracts
+  `.spec.groups` and runs `promtool check rules`), so a bad PromQL expression
+  fails the build.
+- The dashboard and the alerts reference only metrics the control plane actually
+  exports (verified by grepping the metric names in `deploy/monitoring/` against
+  `internal/`).
+- The reason-code catalogue in `docs/conditions.md` covers every condition reason
+  the controllers emit.
+
+### OPEN
+
+- Per-cluster threshold tuning is left to the operator (the runbooks say to tune).
+- Helm-chart packaging of the dashboard and alerts is not done; the
+  `deploy/monitoring/` kustomize layer is the current slice.
+- Hubble flow panels and OpenCost cost-attribution need the Cilium/OpenCost
+  integrations (#18).
+- A snapshot-distribution-lag metric and its alert need the multi-node
+  distribution path (#3).

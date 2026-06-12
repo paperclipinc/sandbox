@@ -1,0 +1,140 @@
+# PrometheusRule for the agentrun.dev control plane.
+#
+# This requires the Prometheus Operator (the monitoring.coreos.com/v1
+# PrometheusRule CRD). It is an OPT-IN artifact: it is not part of the default
+# `kubectl apply -k deploy/` base. Install it with the monitoring layer:
+#   kubectl apply -k deploy/monitoring/
+#
+# Every alert pivots on a metric the control plane already exports:
+#   agentrun_claim_errors_total{pool,reason}  (controller, counter)
+#   agentrun_claim_pending_total              (controller, counter)
+#   agentrun_pool_ready_snapshots{pool}       (controller, gauge)
+#   agentrun_orphan_sweeps_total              (controller, counter)
+#   agentrun_fork_duration_seconds_bucket     (forkd, histogram)
+#
+# THRESHOLDS ARE ENVIRONMENT-TUNABLE. The numeric thresholds below are
+# defensible starting points, not established SLOs. Tune them per cluster from
+# observed baselines; each runbook says so. In particular the ForkLatencyHigh
+# threshold is NOT the bare-metal latency target: the <=10ms p99 fork is a
+# bare-metal TARGET (see the runbook), while the alert fires on a deliberately
+# looser, cluster-specific budget so a busy or virtualized node does not page on
+# the target itself.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentrun-control-plane
+  labels:
+    app.kubernetes.io/name: agentrun
+    app.kubernetes.io/component: monitoring
+    # Picked up by a Prometheus Operator configured to select this label; adjust
+    # to match your operator's ruleSelector.
+    release: prometheus
+spec:
+  groups:
+    - name: agentrun-claims
+      rules:
+        - alert: ClaimErrorRateHigh
+          # Terminal claim failures, split by pool and coarse reason. A sustained
+          # nonzero rate means claims are failing to place for a structural
+          # reason (fork, secret, volume, token) rather than transient retries.
+          # Threshold (errors/sec) is environment-tunable.
+          expr: |
+            sum by (pool, reason) (rate(agentrun_claim_errors_total[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Claim error rate elevated for pool {{ $labels.pool }} (reason {{ $labels.reason }})"
+            description: >
+              Claims in pool {{ $labels.pool }} are failing terminally at
+              {{ printf "%.3f" $value }}/s for the reason {{ $labels.reason }}
+              over the last 5m, sustained for 10m. This is a structural failure,
+              not a transient requeue. Threshold is environment-tunable.
+            runbook_url: "https://github.com/paperclipinc/sandbox/blob/main/docs/runbooks/ClaimErrorRateHigh.md"
+
+        - alert: ClaimsPendingSustained
+          # The pending-requeue counter climbs whenever a claim is requeued for
+          # no node with a ready snapshot. A sustained rate is capacity
+          # exhaustion: claims cannot be placed. Threshold is environment-tunable.
+          expr: |
+            sum(rate(agentrun_claim_pending_total[5m])) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Claims sustained pending (capacity exhaustion)"
+            description: >
+              Claims are being requeued for lack of a ready snapshot at
+              {{ printf "%.3f" $value }}/s over 5m, sustained for 15m. The fleet
+              cannot place new claims: warm pools are drained or nodes are full.
+              Threshold is environment-tunable.
+            runbook_url: "https://github.com/paperclipinc/sandbox/blob/main/docs/runbooks/ClaimsPendingSustained.md"
+
+    - name: agentrun-pools
+      rules:
+        - alert: WarmPoolStarved
+          # Ready snapshots per pool. Near-zero ready snapshots means the warm
+          # pool is starved: the next claim pays a cold fork or pends. The
+          # desired-vs-ready signal: poolReadySnapshots mirrors
+          # SandboxPool.Status.ReadySnapshots; a healthy pool keeps this at its
+          # desired count. Threshold (ready snapshots) is environment-tunable;
+          # set it to the pool's desired warm count or a low-water mark.
+          expr: |
+            min by (pool) (agentrun_pool_ready_snapshots) < 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Warm pool {{ $labels.pool }} starved of ready snapshots"
+            description: >
+              Pool {{ $labels.pool }} has fewer than 1 ready snapshot for 10m.
+              The warm pool is starved; new claims into this pool will cold-fork
+              or pend. Compare against the pool's desired warm count. Threshold
+              is environment-tunable.
+            runbook_url: "https://github.com/paperclipinc/sandbox/blob/main/docs/runbooks/WarmPoolStarved.md"
+
+    - name: agentrun-gc
+      rules:
+        - alert: OrphanSweepSpike
+          # Orphan sweeps reap forkd VMs the GC found with no owning claim. A
+          # sustained nonzero rate means VMs are leaking (controller/forkd
+          # disagreement, crashed claims, node churn) and being reaped. Steady
+          # reaping is a symptom, not the disease. Threshold is environment-tunable.
+          expr: |
+            sum(rate(agentrun_orphan_sweeps_total[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Orphan VM sweeps sustained (leaked sandboxes being reaped)"
+            description: >
+              The garbage collector is reaping orphan sandbox VMs at
+              {{ printf "%.4f" $value }}/s over 15m, sustained for 15m. VMs are
+              leaking and being cleaned up; investigate the source of the leak.
+              Threshold is environment-tunable.
+            runbook_url: "https://github.com/paperclipinc/sandbox/blob/main/docs/runbooks/OrphanSweepSpike.md"
+
+    - name: agentrun-fork-latency
+      rules:
+        - alert: ForkLatencyHigh
+          # p99 fork latency from the forkd histogram. The <=10ms p99 fork is a
+          # bare-metal TARGET (see the runbook), NOT this threshold: this alert
+          # fires on a looser, cluster-specific budget (50ms here) so a busy or
+          # virtualized node does not page on the target itself. Threshold is
+          # environment-tunable.
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(agentrun_fork_duration_seconds_bucket[5m]))
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fork p99 latency above the cluster budget"
+            description: >
+              p99 fork latency is {{ printf "%.4f" $value }}s over 5m, above the
+              cluster budget, sustained for 10m. The <=10ms p99 fork is a
+              bare-metal target, not this threshold; this budget is
+              environment-tunable. See the runbook for what drives fork latency.
+            runbook_url: "https://github.com/paperclipinc/sandbox/blob/main/docs/runbooks/ForkLatencyHigh.md"
