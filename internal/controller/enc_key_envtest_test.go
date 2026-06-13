@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/kms"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,7 +63,8 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 		_ = k8sClient.Delete(ctx, template)
 	})
 
-	// The key Secret is created with a 256-bit key.
+	// The key Secret is created holding ONLY the wrapped DEK plus the KEK id, and
+	// NOT a raw plaintext key (the old "key" data key must be absent).
 	var keySecret corev1.Secret
 	ok := waitFor(15*time.Second, func() bool {
 		return k8sClient.Get(ctx, types.NamespacedName{Name: encKeySecretName("enc-tmpl"), Namespace: "default"}, &keySecret) == nil
@@ -70,30 +72,48 @@ func TestEncryptedPoolCreatesKeySecretAndDelivers(t *testing.T) {
 	if !ok {
 		t.Fatal("enc-key Secret was not created for the encrypted template")
 	}
-	if len(keySecret.Data["key"]) != 32 {
-		t.Fatalf("enc-key length = %d, want 32", len(keySecret.Data["key"]))
+	if len(keySecret.Data["wrapped-dek"]) == 0 {
+		t.Fatal("enc-key Secret holds no wrapped-dek")
+	}
+	if _, hasRaw := keySecret.Data["key"]; hasRaw {
+		t.Fatal("enc-key Secret holds a raw plaintext key; envelope custody must store only the wrapped DEK")
+	}
+	if string(keySecret.Data["kek-id"]) != testKMS.KEKID() {
+		t.Fatalf("kek-id = %q, want %q", string(keySecret.Data["kek-id"]), testKMS.KEKID())
+	}
+	// The wrapped DEK must unwrap to a 32-byte DEK via the test KMS.
+	dek, uerr := testKMS.Unwrap(ctx, kms.WrappedKey{KEKID: string(keySecret.Data["kek-id"]), Ciphertext: keySecret.Data["wrapped-dek"]})
+	if uerr != nil {
+		t.Fatalf("unwrap stored wrapped DEK: %v", uerr)
+	}
+	if len(dek) != 32 {
+		t.Fatalf("unwrapped DEK length = %d, want 32", len(dek))
 	}
 	// Owner-referenced to the template so k8s GC crypto-shreds it on delete.
 	if len(keySecret.OwnerReferences) == 0 || keySecret.OwnerReferences[0].Kind != "SandboxTemplate" {
 		t.Fatalf("enc-key Secret is not owner-referenced to the template: %+v", keySecret.OwnerReferences)
 	}
 
-	// forkd's CreateTemplate received a non-empty key (presence/length, not value).
+	// forkd's CreateTemplate received the WRAPPED DEK (non-empty) and the KEK id.
 	if !waitFor(15*time.Second, func() bool {
 		seen, n := rec.CreateTemplateKeyLen()
-		return seen && n == 32
+		return seen && n > 0
 	}) {
 		seen, n := rec.CreateTemplateKeyLen()
-		t.Fatalf("CreateTemplate did not receive a 32-byte key (seen=%v len=%d)", seen, n)
+		t.Fatalf("CreateTemplate did not receive a wrapped DEK (seen=%v len=%d)", seen, n)
+	}
+	if got := rec.CreateTemplateKekID(); got != testKMS.KEKID() {
+		t.Fatalf("CreateTemplate KekId = %q, want %q", got, testKMS.KEKID())
 	}
 
-	// The key VALUE must never appear in the controller's logs. Scan the
-	// suite-wide log buffer for the generated key bytes (the key is random, so a
-	// hit would be unambiguous). Check both the raw bytes and a hex rendering in
-	// case a log path stringifies it.
+	// Neither the wrapped DEK nor the (unwrapped) DEK value must appear in the
+	// controller logs.
 	logs := logBuf.Bytes()
-	if bytes.Contains(logs, keySecret.Data["key"]) {
-		t.Fatal("the encryption key value leaked into the controller logs")
+	if bytes.Contains(logs, keySecret.Data["wrapped-dek"]) {
+		t.Fatal("the wrapped DEK leaked into the controller logs")
+	}
+	if bytes.Contains(logs, dek) {
+		t.Fatal("the plaintext DEK leaked into the controller logs")
 	}
 }
 
@@ -141,10 +161,13 @@ func TestEncryptedClaimDeliversKeyOnFork(t *testing.T) {
 
 	if !waitFor(20*time.Second, func() bool {
 		seen, n := rec.ForkKeyLen()
-		return seen && n == 32
+		return seen && n > 0
 	}) {
 		seen, n := rec.ForkKeyLen()
-		t.Fatalf("Fork did not receive a 32-byte key (seen=%v len=%d)", seen, n)
+		t.Fatalf("Fork did not receive a wrapped DEK (seen=%v len=%d)", seen, n)
+	}
+	if got := rec.ForkKekID(); got != testKMS.KEKID() {
+		t.Fatalf("Fork KekId = %q, want %q", got, testKMS.KEKID())
 	}
 }
 
@@ -299,20 +322,31 @@ func TestPlaintextPoolCreatesNoKeySecret(t *testing.T) {
 // (crypto-shred) and is idempotent.
 func TestDeleteEncKeyShredsSecret(t *testing.T) {
 	// EnsureEncKey creates the Secret; DeleteEncKey removes it.
-	key, err := controller.EnsureEncKey(ctx, k8sClient, "default", "shred-tmpl", nil)
+	wrapped, kekID, err := controller.EnsureEncKey(ctx, k8sClient, testKMS, "default", "shred-tmpl", nil)
 	if err != nil {
 		t.Fatalf("EnsureEncKey: %v", err)
 	}
-	if len(key) != 32 {
-		t.Fatalf("key length = %d, want 32", len(key))
+	if len(wrapped) == 0 {
+		t.Fatal("EnsureEncKey returned an empty wrapped DEK")
 	}
-	// Idempotent read returns the same key.
-	key2, err := controller.EnsureEncKey(ctx, k8sClient, "default", "shred-tmpl", nil)
+	if kekID != testKMS.KEKID() {
+		t.Fatalf("EnsureEncKey kekID = %q, want %q", kekID, testKMS.KEKID())
+	}
+	// The wrapped DEK unwraps to a 32-byte DEK.
+	dek, uerr := testKMS.Unwrap(ctx, kms.WrappedKey{KEKID: kekID, Ciphertext: wrapped})
+	if uerr != nil {
+		t.Fatalf("unwrap returned wrapped DEK: %v", uerr)
+	}
+	if len(dek) != 32 {
+		t.Fatalf("unwrapped DEK length = %d, want 32", len(dek))
+	}
+	// Idempotent read returns the same wrapped DEK.
+	wrapped2, _, err := controller.EnsureEncKey(ctx, k8sClient, testKMS, "default", "shred-tmpl", nil)
 	if err != nil {
 		t.Fatalf("EnsureEncKey read: %v", err)
 	}
-	if !bytes.Equal(key, key2) {
-		t.Fatal("EnsureEncKey returned a different key on the idempotent read")
+	if !bytes.Equal(wrapped, wrapped2) {
+		t.Fatal("EnsureEncKey returned a different wrapped DEK on the idempotent read")
 	}
 
 	if err := controller.DeleteEncKey(ctx, k8sClient, "default", "shred-tmpl"); err != nil {

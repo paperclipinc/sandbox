@@ -172,23 +172,40 @@ type EncKeyRecorder struct {
 	mu            sync.Mutex
 	createKeyLen  int
 	createKeySeen bool
+	createKekID   string
 	forkKeyLen    int
 	forkKeySeen   bool
+	forkKekID     string
 }
 
 // CreateTemplateKeyLen returns whether a CreateTemplate carried an encryption
-// key and its length.
+// key (the wrapped DEK) and its length.
 func (r *EncKeyRecorder) CreateTemplateKeyLen() (seen bool, length int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.createKeySeen, r.createKeyLen
 }
 
-// ForkKeyLen returns whether a Fork carried an encryption key and its length.
+// CreateTemplateKekID returns the KEK id a CreateTemplate carried (non-secret).
+func (r *EncKeyRecorder) CreateTemplateKekID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.createKekID
+}
+
+// ForkKeyLen returns whether a Fork carried an encryption key (the wrapped DEK)
+// and its length.
 func (r *EncKeyRecorder) ForkKeyLen() (seen bool, length int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.forkKeySeen, r.forkKeyLen
+}
+
+// ForkKekID returns the KEK id a Fork carried (non-secret).
+func (r *EncKeyRecorder) ForkKekID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.forkKekID
 }
 
 func (r *EncKeyRecorder) interceptor() grpc.UnaryServerInterceptor {
@@ -198,11 +215,13 @@ func (r *EncKeyRecorder) interceptor() grpc.UnaryServerInterceptor {
 			r.mu.Lock()
 			r.createKeySeen = true
 			r.createKeyLen = len(m.EncryptionKey)
+			r.createKekID = m.KekId
 			r.mu.Unlock()
 		case *forkdpb.ForkRequest:
 			r.mu.Lock()
 			r.forkKeySeen = true
 			r.forkKeyLen = len(m.EncryptionKey)
+			r.forkKekID = m.KekId
 			r.mu.Unlock()
 		}
 		return handler(ctx, req)

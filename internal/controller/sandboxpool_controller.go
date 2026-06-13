@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/kms"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,6 +62,13 @@ type SandboxPoolReconciler struct {
 	// them. Empty disables replication (the husk pods then require the secrets
 	// to already exist in their namespace). Only used when EnableHuskPods.
 	ControllerNamespace string
+
+	// KMS is the envelope-encryption Wrapper that wraps a template's at-rest DEK
+	// (the controller never persists the plaintext DEK). It is REQUIRED when any
+	// reconciled template is Encrypted; EnsureEncKey fails closed if it is nil.
+	// Built from the controller --kek-file (local AES-256-GCM KEK in dev/CI; a
+	// cloud KMS provider is a documented follow-up).
+	KMS kms.Wrapper
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed
@@ -273,16 +281,18 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	}
 	deficit := pool.Spec.Replicas - readySnapshots
 
-	var encKey []byte
+	var wrappedDEK []byte
+	var kekID string
 	if template.Spec.Encrypted {
 		var keyErr error
-		encKey, keyErr = EnsureEncKey(ctx, r.Client, pool.Namespace, templateID, template)
+		wrappedDEK, kekID, keyErr = EnsureEncKey(ctx, r.Client, r.KMS, pool.Namespace, templateID, template)
 		if keyErr != nil {
-			// The error names only the Secret, never key bytes.
+			// The error names only the Secret and the non-secret KEK id, never key
+			// bytes.
 			return fmt.Errorf("ensure encryption key for template %s: %w", templateID, keyErr)
 		}
 	}
-	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, encKey, deficit); err != nil {
+	if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Spec.Image, template.Spec.Init, template.Spec.Volumes, wrappedDEK, kekID, deficit); err != nil {
 		return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 	}
 	return nil
@@ -306,14 +316,14 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 // The pull token is the shared peer credential the controller is configured
 // with; it is delivered to the deficit node over its mTLS gRPC and is never
 // logged.
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, encKey []byte, deficit int32) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1alpha1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32) (int32, error) {
 	var added int32
 	var errs []error
 
 	// Whether distribution by pull applies: plaintext template, a peer token is
 	// configured, and a holder reporting a content-addressed digest exists. An
 	// encrypted template always builds per node (the carve-out above).
-	distribute := len(encKey) == 0 && r.PeerToken != ""
+	distribute := len(wrappedDEK) == 0 && r.PeerToken != ""
 
 	for _, node := range r.NodeRegistry.ListNodes() {
 		if added >= deficit {
@@ -339,14 +349,13 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			}
 		}
 
-		// Build path. Fail closed: an encrypted template's key travels in
+		// Build path. Fail closed: an encrypted template's WRAPPED DEK travels in
 		// CreateTemplate, so the node connection must be mTLS. Refuse to send the
-		// key in cleartext over an insecure channel (node.TLS nil and registry.TLS
-		// nil, i.e. PKI bootstrap disabled); skip the node without setting the key
-		// and record the refusal. A plaintext template carries no key and is
-		// unaffected.
-		if len(encKey) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
-			errs = append(errs, fmt.Errorf("node %s: refusing to deliver the encryption key over an insecure gRPC channel: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name))
+		// wrapped DEK over an insecure channel (node.TLS nil and registry.TLS nil,
+		// i.e. PKI bootstrap disabled); skip the node without setting it and record
+		// the refusal. A plaintext template carries no DEK and is unaffected.
+		if len(wrappedDEK) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
+			errs = append(errs, fmt.Errorf("node %s: refusing to deliver the wrapped DEK over an insecure gRPC channel: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name))
 			continue
 		}
 		conn, err := r.NodeRegistry.GetConnection(node.Name)
@@ -368,10 +377,12 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 			Image:        image,
 			InitCommands: initCommands,
 			Volumes:      volumeMounts(templateVolumes, nil),
-			// EncryptionKey is the at-rest key for an Encrypted template, delivered
-			// over mTLS. Empty for a plaintext template. A secret value: never
-			// logged.
-			EncryptionKey: encKey,
+			// EncryptionKey carries the WRAPPED DEK for an Encrypted template,
+			// delivered over mTLS; KekId names the KEK that wrapped it (non-secret)
+			// so the node selects the matching KEK to unwrap. Both empty for a
+			// plaintext template. The wrapped DEK is never logged.
+			EncryptionKey: wrappedDEK,
+			KekId:         kekID,
 		})
 		cancel()
 		if err != nil {

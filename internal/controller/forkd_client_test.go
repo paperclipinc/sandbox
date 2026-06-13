@@ -51,7 +51,7 @@ func TestForkOnNode(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1", nil)
+	result, err := r.forkOnNode(context.Background(), node, "py", "sb-1", map[string]string{"A": "1"}, map[string]string{"S": "x"}, nil, nil, "tok-sb-1", nil, "")
 	if err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestForkOnNodePlumbsNetworkPolicy(t *testing.T) {
 		Allow:  []string{"10.0.0.5:443", "api.example.com:443"},
 	}
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok", nil); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-net", nil, nil, policy, nil, "tok", nil, ""); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestForkOnNodeNilNetworkPolicy(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok", nil); err != nil {
+	if _, err := r.forkOnNode(context.Background(), node, "py", "sb-nonet", nil, nil, nil, nil, "tok", nil, ""); err != nil {
 		t.Fatalf("forkOnNode: %v", err)
 	}
 	if got := engine.LastForkNetwork(); got != nil {
@@ -137,7 +137,7 @@ func TestForkRunningOnNode(t *testing.T) {
 	}
 
 	claimRec := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent", nil); err != nil {
+	if _, err := claimRec.forkOnNode(context.Background(), node, "py", "parent", nil, nil, nil, nil, "tok-parent", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +161,7 @@ func TestForkOnNodeUnknownSnapshot(t *testing.T) {
 	}
 
 	r := &SandboxClaimReconciler{NodeRegistry: registry}
-	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb", nil); err == nil {
+	if _, err := r.forkOnNode(context.Background(), node, "missing", "sb", nil, nil, nil, nil, "tok-sb", nil, ""); err == nil {
 		t.Fatal("expected error")
 	} else if !isNotFound(err) {
 		t.Fatalf("expected NotFound through the wrap, got: %v", err)
@@ -199,7 +199,7 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	templateVols := []v1alpha1.SandboxVolume{
 		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1alpha1.ForkPolicyFresh},
 	}
-	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, 5)
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}

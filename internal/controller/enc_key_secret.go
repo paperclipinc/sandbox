@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 
+	"github.com/paperclipinc/mitos/internal/kms"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,12 +30,18 @@ import (
 // Secret that holds that template's at-rest encryption key.
 const encKeySecretSuffix = "-enc-key"
 
-// encKeyDataKey is the data key inside the enc-key Secret that holds the raw
-// 256-bit key bytes.
-const encKeyDataKey = "key"
+// encKeyWrappedDataKey is the data key inside the enc-key Secret that holds the
+// WRAPPED DEK (the per-template DEK encrypted under the KMS KEK). It is opaque
+// ciphertext, never the plaintext key.
+const encKeyWrappedDataKey = "wrapped-dek"
 
-// encKeyLen is the at-rest encryption key length in bytes (256-bit), matching
-// storecrypt's LUKS key length.
+// encKeyKEKIDDataKey is the data key inside the enc-key Secret that holds the
+// non-secret KEK id that wrapped the DEK, so the node can select the matching
+// KEK to unwrap.
+const encKeyKEKIDDataKey = "kek-id"
+
+// encKeyLen is the at-rest DEK length in bytes (256-bit), matching storecrypt's
+// LUKS key length.
 const encKeyLen = 32
 
 // encKeySecretName returns the name of the enc-key Secret for a template.
@@ -42,68 +49,86 @@ func encKeySecretName(templateID string) string {
 	return templateID + encKeySecretSuffix
 }
 
-// EnsureEncKey returns the per-template at-rest encryption key, creating the
-// backing Secret with a fresh 256-bit crypto/rand key on first call and reading
-// it back idempotently afterwards. The controller owns key custody: the key
-// lives only in this Secret (etcd) and is delivered to the node over the mTLS
-// RPC, never generated or persisted on the node. When owner is non-nil the
+// EnsureEncKey returns the per-template at-rest WRAPPED DEK plus its KEK id,
+// using envelope encryption. On first call it generates a fresh 256-bit DEK with
+// crypto/rand, wraps it with the KMS KEK (w), zeroizes the plaintext DEK
+// immediately, and persists ONLY the wrapped DEK and the (non-secret) KEK id in
+// the backing Secret; subsequent calls read the wrapped DEK back idempotently.
+// The plaintext DEK NEVER persists to etcd or disk and is held in controller
+// memory only for the duration of the wrap. The controller never unwraps; it
+// never sees the plaintext DEK after this returns. When owner is non-nil the
 // Secret is owner-referenced to it so Kubernetes garbage collection
-// crypto-shreds the Secret when the owner (the SandboxTemplate) is deleted. The
-// key value is a secret: it is NEVER logged, never put in an error message, and
-// never written to status, conditions, or events. Only the Secret name (safe)
-// appears in errors.
-func EnsureEncKey(ctx context.Context, c client.Client, ns, templateID string, owner client.Object) ([]byte, error) {
+// crypto-shreds the Secret (the only stored copy of the wrapped DEK) when the
+// owner is deleted. The plaintext DEK and the wrapped DEK are NEVER logged or
+// put in an error message; only the Secret name and the KEK id (both non-secret)
+// appear in errors.
+func EnsureEncKey(ctx context.Context, c client.Client, w kms.Wrapper, ns, templateID string, owner client.Object) (wrappedDEK []byte, kekID string, err error) {
 	name := encKeySecretName(templateID)
 
 	var secret corev1.Secret
-	err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &secret)
+	gerr := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &secret)
 	switch {
-	case err == nil:
-		key := secret.Data[encKeyDataKey]
-		if len(key) == 0 {
-			// Present but empty: the Secret exists without usable key material.
+	case gerr == nil:
+		wrapped := secret.Data[encKeyWrappedDataKey]
+		if len(wrapped) == 0 {
+			// Present but empty: the Secret exists without usable wrapped DEK.
 			// Refuse rather than silently regenerate (regenerating would make any
 			// already-encrypted snapshot unopenable). The error names only the
 			// Secret, never key bytes.
-			return nil, fmt.Errorf("enc-key secret %s/%s exists but holds no key; fix or delete it", ns, name)
+			return nil, "", fmt.Errorf("enc-key secret %s/%s exists but holds no wrapped DEK; fix or delete it", ns, name)
 		}
-		return key, nil
+		return wrapped, string(secret.Data[encKeyKEKIDDataKey]), nil
 
-	case apierrors.IsNotFound(err):
-		key := make([]byte, encKeyLen)
-		if _, rerr := rand.Read(key); rerr != nil {
-			return nil, fmt.Errorf("generate enc key for template %s: %w", templateID, rerr)
+	case apierrors.IsNotFound(gerr):
+		if w == nil {
+			return nil, "", fmt.Errorf("cannot create enc-key secret %s/%s: no KMS configured to wrap the DEK; set the controller --kek-file", ns, name)
+		}
+		dek := make([]byte, encKeyLen)
+		if _, rerr := rand.Read(dek); rerr != nil {
+			return nil, "", fmt.Errorf("generate DEK for template %s: %w", templateID, rerr)
+		}
+		wrapped, werr := w.Wrap(ctx, dek)
+		// Zeroize the plaintext DEK immediately after wrapping: it must not linger
+		// in controller memory and never reaches etcd or disk.
+		for i := range dek {
+			dek[i] = 0
+		}
+		if werr != nil {
+			return nil, "", fmt.Errorf("wrap DEK for template %s (kek %s): %w", templateID, w.KEKID(), werr)
 		}
 		secret = corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{encKeyDataKey: key},
+			Data: map[string][]byte{
+				encKeyWrappedDataKey: wrapped.Ciphertext,
+				encKeyKEKIDDataKey:   []byte(wrapped.KEKID),
+			},
 		}
 		if owner != nil {
 			if rerr := controllerutil.SetControllerReference(owner, &secret, c.Scheme()); rerr != nil {
-				return nil, fmt.Errorf("set owner on enc-key secret %s/%s: %w", ns, name, rerr)
+				return nil, "", fmt.Errorf("set owner on enc-key secret %s/%s: %w", ns, name, rerr)
 			}
 		}
 		if cerr := c.Create(ctx, &secret); cerr != nil {
 			if apierrors.IsAlreadyExists(cerr) {
 				// Lost the create race to a parallel reconcile; theirs wins. Re-read
-				// to return the persisted key.
+				// to return the persisted wrapped DEK.
 				var existing corev1.Secret
-				if gerr := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &existing); gerr != nil {
-					return nil, fmt.Errorf("re-read enc-key secret %s/%s after create conflict: %w", ns, name, gerr)
+				if rgerr := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &existing); rgerr != nil {
+					return nil, "", fmt.Errorf("re-read enc-key secret %s/%s after create conflict: %w", ns, name, rgerr)
 				}
-				k := existing.Data[encKeyDataKey]
-				if len(k) == 0 {
-					return nil, fmt.Errorf("enc-key secret %s/%s created concurrently but holds no key", ns, name)
+				ew := existing.Data[encKeyWrappedDataKey]
+				if len(ew) == 0 {
+					return nil, "", fmt.Errorf("enc-key secret %s/%s created concurrently but holds no wrapped DEK", ns, name)
 				}
-				return k, nil
+				return ew, string(existing.Data[encKeyKEKIDDataKey]), nil
 			}
-			return nil, fmt.Errorf("create enc-key secret %s/%s: %w", ns, name, cerr)
+			return nil, "", fmt.Errorf("create enc-key secret %s/%s: %w", ns, name, cerr)
 		}
-		return key, nil
+		return wrapped.Ciphertext, wrapped.KEKID, nil
 
 	default:
-		return nil, fmt.Errorf("get enc-key secret %s/%s: %w", ns, name, err)
+		return nil, "", fmt.Errorf("get enc-key secret %s/%s: %w", ns, name, gerr)
 	}
 }
 

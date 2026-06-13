@@ -62,7 +62,7 @@ func sandboxActivity(ctx context.Context, registry *NodeRegistry, nodeName, sand
 // policy (egress mode + allowlist); nil leaves the ForkRequest's NetworkConfig
 // unset and forkd applies no per-fork egress ruleset. The policy and allowlist
 // entries (IPs/ports/names) are safe to log.
-func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, encKey []byte) (*forkResult, error) {
+func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo, snapshotID, sandboxID string, env, secrets map[string]string, network *v1alpha1.NetworkPolicy, volumes []*forkdpb.VolumeMount, apiToken string, wrappedDEK []byte, kekID string) (*forkResult, error) {
 	// controller.forkOnNode is the child span whose context the otelgrpc client
 	// handler injects over the wire so the forkd.Fork span joins this trace.
 	// Only node and snapshot (config, no secrets) are recorded.
@@ -72,12 +72,12 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 	))
 	defer span.End()
 
-	// Fail closed: an encrypted template's key travels in this request, so the
-	// node connection must be mTLS. Refuse to send the key in cleartext over an
-	// insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI bootstrap
-	// disabled). A plaintext template carries no key and is unaffected.
-	if len(encKey) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
-		err := fmt.Errorf("refusing to deliver the encryption key over an insecure gRPC channel to node %s: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name)
+	// Fail closed: an encrypted template's WRAPPED DEK travels in this request, so
+	// the node connection must be mTLS. Refuse to send it over an insecure channel
+	// (node.TLS nil and registry.TLS nil, i.e. PKI bootstrap disabled). A
+	// plaintext template carries no DEK and is unaffected.
+	if len(wrappedDEK) > 0 && !r.NodeRegistry.NodeMTLS(node.Name) {
+		err := fmt.Errorf("refusing to deliver the wrapped DEK over an insecure gRPC channel to node %s: enable PKI bootstrap on the controller and mTLS on forkd, or disable template encryption", node.Name)
 		span.RecordError(err)
 		return nil, err
 	}
@@ -95,10 +95,12 @@ func (r *SandboxClaimReconciler) forkOnNode(ctx context.Context, node *NodeInfo,
 		Network:    toNetworkConfig(network),
 		Volumes:    volumes,
 		ApiToken:   apiToken,
-		// EncryptionKey lets the node open the source template's encrypted
-		// container before restoring. Empty for a plaintext template. A secret
-		// value: never logged.
-		EncryptionKey: encKey,
+		// EncryptionKey carries the WRAPPED DEK so the node can unwrap and open the
+		// source template's encrypted container before restoring; KekId names the
+		// KEK that wrapped it (non-secret). Both empty for a plaintext template.
+		// The wrapped DEK is never logged.
+		EncryptionKey: wrappedDEK,
+		KekId:         kekID,
 	})
 	if err != nil {
 		span.RecordError(err)

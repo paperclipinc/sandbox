@@ -128,7 +128,7 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
 	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, 1)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 1)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestDistributeNoHolderBuildsThenPulls(t *testing.T) {
 		"node-c": startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091", "10.0.0.3:9092"),
 	}
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, 3)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 3)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestDistributeEncryptedBuildsEverywhere(t *testing.T) {
 	engineB := startFakeForkdNodeTLSDist(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092", serverTLS, clientTLS)
 	_ = engineA
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), 1)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), "local:test", 1)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}

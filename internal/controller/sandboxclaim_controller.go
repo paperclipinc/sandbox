@@ -11,6 +11,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/observability"
 	"github.com/paperclipinc/mitos/internal/vsock"
 	"go.opentelemetry.io/otel/attribute"
@@ -56,6 +57,13 @@ type huskActivator func(ctx context.Context, addr string, tlsConf *tls.Config, r
 type SandboxClaimReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
+
+	// KMS is the envelope-encryption Wrapper used to wrap a template's at-rest DEK
+	// on the fork path (an idempotent read of the controller-owned Secret created
+	// at build time). REQUIRED when any reconciled template is Encrypted;
+	// EnsureEncKey fails closed if it is nil. Built from the controller
+	// --kek-file (local AES-256-GCM KEK in dev/CI; cloud KMS is a follow-up).
+	KMS kms.Wrapper
 
 	// APIReader is an uncached reader straight to the apiserver
 	// (mgr.GetAPIReader()). The deferred phase.changed emit reads the
@@ -422,14 +430,16 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// When the source template is encrypted, read its at-rest key from the
+	// When the source template is encrypted, read its WRAPPED DEK from the
 	// controller-owned Secret (idempotent read; created by the pool reconciler at
-	// build time) and deliver it so the node can open the encrypted container
-	// before restoring. The controller holds the key transiently; it is never
-	// logged. snapshotID equals the template id, so it names the key Secret.
-	var encKey []byte
+	// build time) and deliver it plus the KEK id so the node can unwrap and open
+	// the encrypted container before restoring. The controller never holds the
+	// plaintext DEK on this path; the wrapped DEK is never logged. snapshotID
+	// equals the template id, so it names the key Secret.
+	var wrappedDEK []byte
+	var kekID string
 	if template.Spec.Encrypted {
-		encKey, err = EnsureEncKey(ctx, r.Client, claim.Namespace, snapshotID, &template)
+		wrappedDEK, kekID, err = EnsureEncKey(ctx, r.Client, r.KMS, claim.Namespace, snapshotID, &template)
 		if err != nil {
 			logger.Error(err, "read encryption key for template", "template", snapshotID)
 			now := metav1.Now()
@@ -441,7 +451,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Call forkd on the selected node: this is the <2ms hot path
-	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, encKey)
+	result, err := r.forkOnNode(ctx, node, snapshotID, claim.Name, env, secretVals, template.Spec.Network, volumes, apiToken, wrappedDEK, kekID)
 	if err != nil {
 		// A NotFound from forkd usually means the snapshot is not built on
 		// that node yet; transient while the pool reconciler catches up.

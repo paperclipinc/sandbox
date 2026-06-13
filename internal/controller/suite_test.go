@@ -17,6 +17,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/eventfeed"
 	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -111,6 +112,10 @@ var (
 	ctx          context.Context
 	cancel       context.CancelFunc
 	testRegistry *controller.NodeRegistry
+	// testKMS is the envelope-encryption Wrapper injected into the envtest
+	// reconcilers: a local AES-256-GCM KEK so encrypted templates wrap their DEK
+	// without cloud credentials. Initialized in TestMain.
+	testKMS *kms.LocalKEK
 	// logBuf accumulates the controller's log output for the whole suite so a
 	// test can assert a secret value never appears in any log line. It is
 	// concurrency-safe because the manager logs from reconcile goroutines.
@@ -348,6 +353,18 @@ func TestMain(m *testing.M) {
 	nodeRegistry := controller.NewNodeRegistry()
 	testRegistry = nodeRegistry
 
+	// A fixed local KEK so envelope encryption wraps DEKs in envtest without
+	// cloud credentials. The KEK bytes are test-only and non-secret here.
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 3)
+	}
+	tk, kerr := kms.NewLocalKEK(kek)
+	if kerr != nil {
+		panic(kerr)
+	}
+	testKMS = tk
+
 	// The suite's manager-level pool reconciler runs the raw-forkd path
 	// explicitly (EnableHuskPods false). The husk-mode pool reconcile (build the
 	// snapshot + create husk pods) is covered by a directly driven reconciler in
@@ -359,10 +376,12 @@ func TestMain(m *testing.M) {
 		Client:         mgr.GetClient(),
 		NodeRegistry:   nodeRegistry,
 		EnableHuskPods: false,
+		KMS:            testKMS,
 	}).SetupWithManager(mgr)
 
 	rawClaim := &controller.SandboxClaimReconciler{
 		Client:       mgr.GetClient(),
+		KMS:          testKMS,
 		APIReader:    mgr.GetAPIReader(),
 		NodeRegistry: nodeRegistry,
 	}
@@ -442,6 +461,7 @@ func TestMain(m *testing.M) {
 		APIReader:      mgr.GetAPIReader(),
 		NodeRegistry:   nodeRegistry,
 		EnableHuskPods: true,
+		KMS:            testKMS,
 		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; the fake activator ignores it
 	}
 	huskClaim.OnlyLabel(controller.HuskTestClaimLabel)
