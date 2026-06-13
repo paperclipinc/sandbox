@@ -194,13 +194,14 @@ export class Sandbox {
     if (opts.timeoutSeconds !== undefined) {
       body["timeout"] = opts.timeoutSeconds;
     }
-    const resp = await this.http.postStream("/v1/exec/stream", body);
+    const resp = await this.http.postStream("/v1/exec/stream", body, signal);
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     const td = new TextDecoder();
     let buffered = "";
     let exitCode = 0;
     let execTimeMs: number | undefined;
+    let sawExit = false;
     const outParts: string[] = [];
     const errParts: string[] = [];
 
@@ -216,6 +217,7 @@ export class Sandbox {
       if (frame.exit_code !== undefined && frame.stream === undefined) {
         exitCode = frame.exit_code;
         execTimeMs = frame.exec_time_ms;
+        sawExit = true;
         if (frame.error) {
           throw new AgentRunError(`exec stream error: ${frame.error}`, {
             code: "exec_stream_error",
@@ -238,23 +240,52 @@ export class Sandbox {
       }
     };
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (signal?.aborted) {
-        await reader.cancel();
-        break;
+    let aborted = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (signal?.aborted) {
+          aborted = true;
+          await reader.cancel();
+          break;
+        }
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffered.indexOf("\n")) >= 0) {
+          const line = buffered.slice(0, nl);
+          buffered = buffered.slice(nl + 1);
+          handleLine(line);
+        }
       }
-      if (done) break;
-      buffered += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buffered.indexOf("\n")) >= 0) {
-        const line = buffered.slice(0, nl);
-        buffered = buffered.slice(nl + 1);
-        handleLine(line);
+    } catch (e) {
+      // An abort tears the fetch down: reader.read() rejects with an
+      // AbortError. That is an intentional kill, not a truncation; fall through
+      // and return the partial result rather than the truncation error below.
+      if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) {
+        aborted = true;
+      } else {
+        throw e;
       }
     }
-    if (buffered.trim() !== "") {
+    if (!aborted && buffered.trim() !== "") {
       handleLine(buffered.trim());
+    }
+
+    if (!aborted && !sawExit) {
+      // The body ended before the terminal exit frame: the stream was
+      // truncated or dropped. Surface it as an error rather than a misleading
+      // exitCode=0 success.
+      throw new AgentRunError(
+        "exec stream ended before the terminal exit frame",
+        {
+          code: "exec_stream_truncated",
+          cause:
+            "the connection was truncated or dropped; the exit code is unknown",
+          remediation:
+            "Retry the command; if it persists, inspect the forkd or sandbox-server logs for a dropped connection.",
+        },
+      );
     }
 
     return {

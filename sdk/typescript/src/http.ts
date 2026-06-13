@@ -73,13 +73,20 @@ export class HttpClient {
   /**
    * POSTs a JSON body to `path` and returns the raw streaming Response so the
    * caller can read the chunked NDJSON body line by line. Throws AgentRunError
-   * on a non-2xx status before any body is read.
+   * on a non-2xx status before any body is read. When `signal` is given it is
+   * passed to fetch so aborting it tears the connection down immediately,
+   * rather than only at the next chunk boundary.
    */
-  async postStream(path: string, body: unknown): Promise<Response> {
+  async postStream(
+    path: string,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const resp = await fetch(this.baseUrl + path, {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify(body),
+      signal,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");

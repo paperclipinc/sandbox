@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import uuid
 from typing import Callable, Optional
@@ -265,9 +266,15 @@ class Sandbox:
             exec_time_ms=data.get("exec_time_ms", 0),
         )
 
-    def _stream(self, command, timeout, working_dir, env, on_out, on_err):
+    def _stream(self, command, timeout, working_dir, env, on_out, on_err, client=None):
         """Opens /v1/exec/stream and feeds chunks to on_out/on_err. Returns
-        (exit_code, exec_time_ms). Raises on transport error frames."""
+        (exit_code, exec_time_ms). Raises on transport error frames and on a
+        stream that ends before the terminal exit frame.
+
+        Streams on `client` when given (a dedicated per-stream httpx client so a
+        kill() can tear down only that connection), otherwise on the shared
+        Sandbox client."""
+        http = client if client is not None else self._http
         payload: dict = {
             "sandbox": self._sandbox_ref,
             "command": command,
@@ -278,7 +285,8 @@ class Sandbox:
             payload["env"] = env
         exit_code = 0
         exec_time_ms = 0.0
-        with self._http.stream(
+        saw_exit = False
+        with http.stream(
             "POST",
             f"{self._base_url}/exec/stream",
             json=payload,
@@ -293,6 +301,7 @@ class Sandbox:
                 if "exit_code" in frame and "stream" not in frame:
                     exit_code = frame["exit_code"]
                     exec_time_ms = frame.get("exec_time_ms", 0.0)
+                    saw_exit = True
                     if frame.get("error"):
                         raise RuntimeError(f"exec stream error: {frame['error']}")
                     continue
@@ -301,6 +310,14 @@ class Sandbox:
                     on_err(data)
                 else:
                     on_out(data)
+        if not saw_exit:
+            # The body ended before the terminal exit frame: the stream was
+            # truncated or dropped. Surface it as an error rather than a
+            # misleading exit_code=0 success.
+            raise RuntimeError(
+                "exec stream ended before the terminal exit frame: "
+                "the connection was truncated or dropped; the exit code is unknown"
+            )
         return exit_code, exec_time_ms
 
     def exec_background(
@@ -312,27 +329,62 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
     ) -> "BackgroundProcess":
-        """Start a long-running command and return a handle. wait() drains to
-        completion; kill() closes the stream so forkd cancels the guest process
-        group. Default timeout is one day so a background server is not reaped by
-        the per-exec timeout."""
+        """Start a long-running command and return a handle. The command starts
+        running immediately on a background thread; wait() blocks for the
+        aggregate result. kill() closes only this stream's own client so forkd
+        cancels the guest process group, leaving the shared Sandbox client (and
+        every other exec/file call) untouched. Default timeout is one day so a
+        background server is not reaped by the per-exec timeout."""
         out_parts: list[bytes] = []
         err_parts: list[bytes] = []
+        # Resolve the endpoint and token on the calling thread so a failure to
+        # become ready surfaces here, not silently inside the drain thread.
+        base_url = self._base_url
+        self._sandbox_ref  # noqa: B018  force readiness/id resolution
+        # A dedicated client so kill() tears down only this stream, never the
+        # shared Sandbox client that other exec/file calls ride on.
+        stream_http = httpx.Client(timeout=30.0)
 
-        def drain() -> ExecResult:
-            exit_code, exec_time_ms = self._stream(
-                command, timeout, working_dir, env,
-                lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
-                lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
-            )
-            return ExecResult(
-                exit_code=exit_code,
-                stdout=b"".join(out_parts).decode("utf-8", "replace"),
-                stderr=b"".join(err_parts).decode("utf-8", "replace"),
-                exec_time_ms=exec_time_ms,
-            )
+        state: dict = {"result": None, "error": None}
+        done = threading.Event()
 
-        return BackgroundProcess(_drain=drain, _close=lambda: self._http.close())
+        def drain_thread() -> None:
+            try:
+                exit_code, exec_time_ms = self._stream(
+                    command, timeout, working_dir, env,
+                    lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
+                    lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
+                    client=stream_http,
+                )
+                state["result"] = ExecResult(
+                    exit_code=exit_code,
+                    stdout=b"".join(out_parts).decode("utf-8", "replace"),
+                    stderr=b"".join(err_parts).decode("utf-8", "replace"),
+                    exec_time_ms=exec_time_ms,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                state["error"] = exc
+            finally:
+                stream_http.close()
+                done.set()
+
+        # _base_url is read inside _stream; the thread relies on it being
+        # resolved above so no k8s call happens off the calling thread.
+        assert base_url
+        thread = threading.Thread(target=drain_thread, daemon=True)
+        thread.start()
+
+        def wait_for() -> ExecResult:
+            done.wait()
+            if state["error"] is not None:
+                raise state["error"]
+            return state["result"]
+
+        return BackgroundProcess(
+            _drain=wait_for,
+            _close=stream_http.close,
+            _done=done,
+        )
 
     def fork(self, n: int = 1, pause_source: bool = False) -> list[Sandbox]:
         """Fork this sandbox into n independent copies."""

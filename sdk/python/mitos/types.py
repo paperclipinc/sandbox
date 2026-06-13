@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -70,15 +71,24 @@ class ForkInfo:
 class BackgroundProcess:
     """A handle to a streaming exec started in the background.
 
-    wait() drains the stream to completion and returns the aggregate
-    ExecResult. kill() stops the process by closing the underlying HTTP
-    stream, which forkd turns into a context cancel that kills the guest
-    process group.
+    The command begins running on a background thread the moment the handle is
+    created. wait() blocks for that thread and returns the aggregate
+    ExecResult. kill() stops the process by closing only this stream's own HTTP
+    client, which forkd turns into a context cancel that kills the guest
+    process group; it never touches the shared Sandbox client. running() reports
+    whether the drain thread is still going.
     """
 
     _drain: Callable[[], ExecResult]
     _close: Callable[[], None]
+    _done: Optional[threading.Event] = None
     _result: Optional[ExecResult] = None
+
+    def running(self) -> bool:
+        """Whether the background command is still draining."""
+        if self._done is None:
+            return False
+        return not self._done.is_set()
 
     def wait(self) -> ExecResult:
         if self._result is None:
