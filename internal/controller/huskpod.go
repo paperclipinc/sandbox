@@ -267,6 +267,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// block below (it shares the snapshot placement requirement).
 	if opts.ExpectedDigest != "" {
 		args = append(args, "--manifest", filepath.Join(huskManifestDirMountPath, opts.ExpectedDigest))
+		// Pass the snapshot dir + expected digest so the dormant pod verifies the
+		// snapshot (the ~680 MiB re-hash) during Prepare, off the claim's Activate
+		// hot path. The claim then activates in ~tens of ms (load + handshake)
+		// instead of ~1.3 s (re-hash). The activate request carries the same
+		// SnapshotDir + ExpectedDigest, which the stub confirms before loading.
+		args = append(args, "--snapshot-dir", huskSnapshotMountPath, "--expected-digest", opts.ExpectedDigest)
 	} else {
 		args = append(args, "--allow-unverified-snapshots")
 	}

@@ -206,6 +206,18 @@ type Options struct {
 	// never log it. Nil disables the hook (the control-socket CI driver and unit
 	// tests that do not need the sandbox API leave it nil).
 	OnActivated func(vsockPath, token string) error
+	// PrepareSnapshotDir and PrepareExpectedDigest, when both set, move the
+	// fail-closed snapshot verification (the ~680 MiB mem+rootfs re-hash) OFF the
+	// Activate hot path and INTO Prepare, where it runs during the pre-paid
+	// dormant warm period. The snapshot is a read-only, content-addressed,
+	// immutable mount, so verifying it once at Prepare is equivalent to verifying
+	// at Activate, and Activate then only confirms the request names the same
+	// (dir, digest) it already verified before loading. This is what makes the
+	// claim->Ready latency the engine cost (~tens of ms) instead of the hash cost
+	// (~1.3 s on a slow CPU). Empty (or AllowUnverified) keeps the verify on the
+	// Activate path as before. The values are content addresses, not secrets.
+	PrepareSnapshotDir    string
+	PrepareExpectedDigest string
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -224,10 +236,17 @@ type Stub struct {
 	cfg          firecracker.VMConfig
 	readyTimeout time.Duration
 
-	mu         sync.Mutex
-	state      State
-	vm         vmm
-	generation uint64
+	// prepareSnapshotDir / prepareExpectedDigest are the snapshot the dormant
+	// pod verified at Prepare; prepareVerified records that the re-hash passed.
+	// Activate skips its own re-hash when the request names this exact snapshot.
+	prepareSnapshotDir    string
+	prepareExpectedDigest string
+
+	mu              sync.Mutex
+	state           State
+	vm              vmm
+	generation      uint64
+	prepareVerified bool
 }
 
 // New builds a Stub for the given VMConfig. By default it uses the production
@@ -242,6 +261,9 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		cfg:          cfg,
 		readyTimeout: opts.ReadyTimeout,
 		state:        StateNew,
+
+		prepareSnapshotDir:    opts.PrepareSnapshotDir,
+		prepareExpectedDigest: opts.PrepareExpectedDigest,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -283,6 +305,28 @@ func (s *Stub) Prepare(ctx context.Context) error {
 		return fmt.Errorf("husk: prepare dormant VMM: %w", err)
 	}
 	s.vm = vm
+
+	// Verify the snapshot NOW, while dormant, instead of on the Activate hot
+	// path. When the controller passes the snapshot dir + expected digest at
+	// startup we run the full fail-closed re-hash here, during the warm period a
+	// claim has not arrived yet. The snapshot is read-only and content-addressed,
+	// so this is the same gate Activate would run, just pre-paid. Prepare fails
+	// closed: a tampered or incompatible snapshot keeps the pod out of StateDormant
+	// so the pool never offers it for a claim. When the inputs are absent (e.g.
+	// AllowUnverified / a pre-digest pool) we skip this and Activate verifies as
+	// before.
+	if s.prepareSnapshotDir != "" && s.prepareExpectedDigest != "" {
+		if err := s.verify(ActivateRequest{
+			SnapshotDir:    s.prepareSnapshotDir,
+			ExpectedDigest: s.prepareExpectedDigest,
+		}); err != nil {
+			_ = s.vm.Close()
+			s.vm = nil
+			return fmt.Errorf("husk: prepare-time snapshot verification failed: %w", err)
+		}
+		s.prepareVerified = true
+	}
+
 	s.state = StateDormant
 	return nil
 }
@@ -323,9 +367,17 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	// the node disk after forkd's build-time verification, or one incompatible
 	// with this node, is refused here and never restored. Runs before any VMM
 	// load, so an unverified snapshot never touches the guest.
-	if err := s.verify(req); err != nil {
-		werr := fmt.Errorf("husk: snapshot verification failed: %w", err)
-		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	//
+	// Fast path: if Prepare already verified THIS exact snapshot (same dir + the
+	// same content-addressed digest) during the dormant period, the read-only
+	// immutable files cannot have changed, so we skip the ~680 MiB re-hash and go
+	// straight to load. Any mismatch (a different dir/digest than prepared, or no
+	// prepare-time verification) re-verifies here, fail-closed, exactly as before.
+	if !(s.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest) {
+		if err := s.verify(req); err != nil {
+			werr := fmt.Errorf("husk: snapshot verification failed: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
 	}
 
 	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, true, req.NetworkOverrides); err != nil {

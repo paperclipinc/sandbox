@@ -340,14 +340,24 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	})
 
 	args := strings.Join(pod.Spec.Containers[0].Args, " ")
-	if !strings.Contains(args, "--manifest /var/lib/mitos/manifest.json") {
+	// The manifest is mounted as a DIRECTORY (Talos rejects strict single-file
+	// hostPath checks at this depth); the stub is pointed at <dir>/<digest>.
+	if !strings.Contains(args, "--manifest /var/lib/mitos/manifests/"+digest) {
 		t.Errorf("args missing --manifest mount path: %v", pod.Spec.Containers[0].Args)
 	}
 	if strings.Contains(args, "--allow-unverified-snapshots") {
 		t.Errorf("verify must be ENFORCED when a digest is known; escape hatch present: %v", pod.Spec.Containers[0].Args)
 	}
+	// The dormant pod verifies the snapshot at Prepare (off the activate hot
+	// path), so the controller passes the snapshot dir + expected digest.
+	if !strings.Contains(args, "--snapshot-dir /var/lib/mitos/snapshot") {
+		t.Errorf("args missing --snapshot-dir for prepare-time verification: %v", pod.Spec.Containers[0].Args)
+	}
+	if !strings.Contains(args, "--expected-digest "+digest) {
+		t.Errorf("args missing --expected-digest for prepare-time verification: %v", pod.Spec.Containers[0].Args)
+	}
 
-	// The manifest is a read-only hostPath at <dataDir>/cas/manifests/<digest>.
+	// The manifest hostPath is the CAS manifests DIRECTORY (not the single file).
 	var manVol *corev1.Volume
 	for i := range pod.Spec.Volumes {
 		if pod.Spec.Volumes[i].Name == "snapshot-manifest" {
@@ -357,8 +367,8 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	if manVol == nil || manVol.HostPath == nil {
 		t.Fatalf("snapshot-manifest volume is not a hostPath: %+v", manVol)
 	}
-	if manVol.HostPath.Path != "/var/lib/mitos/cas/manifests/"+digest {
-		t.Errorf("manifest hostPath = %q, want /var/lib/mitos/cas/manifests/%s", manVol.HostPath.Path, digest)
+	if manVol.HostPath.Path != "/var/lib/mitos/cas/manifests" {
+		t.Errorf("manifest hostPath = %q, want /var/lib/mitos/cas/manifests", manVol.HostPath.Path)
 	}
 	var mounted bool
 	for _, m := range pod.Spec.Containers[0].VolumeMounts {

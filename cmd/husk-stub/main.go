@@ -272,6 +272,11 @@ func run() error {
 		ManifestPath:    *manifest,
 		Env:             detectedEnv,
 		AllowUnverified: *allowUnverified,
+		// When the controller passes the snapshot dir + expected digest at
+		// startup, the dormant pod verifies the snapshot during Prepare (pre-paid)
+		// so the claim's Activate is just the load + handshake, not the re-hash.
+		PrepareSnapshotDir:    *snapshotDir,
+		PrepareExpectedDigest: *expectedDigest,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")
