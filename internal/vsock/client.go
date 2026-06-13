@@ -2,9 +2,11 @@ package vsock
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -236,4 +238,150 @@ func (c *Client) UntarDir(path string, tar []byte) error {
 		UntarDir: &UntarDirRequest{Path: path, Tar: tar},
 	})
 	return err
+}
+
+// StreamConn is a DEDICATED vsock connection for one streaming exec. It is kept
+// separate from Client.conn so a long-running stream never interleaves with the
+// shared connection's one-shot Response calls (Ping, file ops, aggregated Exec).
+type StreamConn struct {
+	conn    net.Conn
+	scanner *bufio.Scanner
+}
+
+// DialStream opens a fresh vsock connection to the guest agent for one
+// streaming exec, performing the Firecracker UDS CONNECT preamble. The caller
+// must Close it when the stream ends or its HTTP client disconnects.
+func DialStream(udsPath string, guestPort int) (*StreamConn, error) {
+	conn, err := net.DialTimeout("unix", udsPath, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial stream vsock UDS: %w", err)
+	}
+	if _, err := conn.Write([]byte(fmt.Sprintf("CONNECT %d\n", guestPort))); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT: %w", err)
+	}
+	sc := bufio.NewScanner(conn)
+	sc.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
+	if !sc.Scan() {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT: no response")
+	}
+	if resp := sc.Text(); len(resp) < 2 || resp[:2] != "OK" {
+		conn.Close()
+		return nil, fmt.Errorf("vsock CONNECT rejected: %s", resp)
+	}
+	return &StreamConn{conn: conn, scanner: sc}, nil
+}
+
+// DialStreamUnix dials a plain unix socket that already speaks the CONNECT
+// preamble (the standalone server's unix fallback and tests).
+func DialStreamUnix(sockPath string) (*StreamConn, error) {
+	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial stream unix: %w", err)
+	}
+	if _, err := conn.Write([]byte(fmt.Sprintf("CONNECT %d\n", AgentPort))); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	sc := bufio.NewScanner(conn)
+	sc.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
+	if !sc.Scan() {
+		conn.Close()
+		return nil, fmt.Errorf("stream unix: no preamble response")
+	}
+	return &StreamConn{conn: conn, scanner: sc}, nil
+}
+
+// Close shuts the dedicated stream connection. Closing it while the guest is
+// still running cancels the guest exec (the guest sees the connection drop).
+func (s *StreamConn) Close() error {
+	return s.conn.Close()
+}
+
+// ChunkFunc receives one stream's bytes as they arrive. Returning a non-nil
+// error stops the stream early (the caller should then Close the StreamConn).
+type ChunkFunc func(stream StreamName, data []byte) error
+
+// ExecStream runs command on the guest and invokes onChunk for each stdout or
+// stderr chunk as it arrives, returning the terminal ExecStreamFrame (exit
+// code, exec time, and any spawn error). The request is sent once; frames are
+// read until the FrameExit line. If ctx is cancelled the connection is closed,
+// which the guest observes and uses to kill the process group.
+func (s *StreamConn) ExecStream(ctx context.Context, req *ExecRequest, onChunk ChunkFunc) (*ExecStreamFrame, error) {
+	data, err := json.Marshal(&Request{Type: TypeExecStream, ExecStream: req})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.conn.Write(append(data, '\n')); err != nil {
+		return nil, fmt.Errorf("send exec_stream: %w", err)
+	}
+
+	// Closing the connection on ctx cancel unblocks the scanner below.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.conn.Close()
+		case <-done:
+		}
+	}()
+
+	for s.scanner.Scan() {
+		var f ExecStreamFrame
+		if err := json.Unmarshal(s.scanner.Bytes(), &f); err != nil {
+			return nil, fmt.Errorf("decode exec_stream frame: %w", err)
+		}
+		switch f.Kind {
+		case FrameChunk:
+			if err := onChunk(f.Stream, f.Data); err != nil {
+				return nil, err
+			}
+		case FrameExit:
+			return &f, nil
+		default:
+			return nil, fmt.Errorf("unknown exec_stream frame kind: %q", f.Kind)
+		}
+	}
+	if err := s.scanner.Err(); err != nil {
+		return nil, fmt.Errorf("recv exec_stream: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, fmt.Errorf("exec_stream: connection closed before exit frame")
+}
+
+// Exec runs command to completion over the stream and returns the aggregated
+// stdout/stderr and exit code, matching the one-shot ExecResponse shape. It is
+// the streaming-native equivalent of Client.Exec and is what the HTTP /v1/exec
+// handler uses so blocking and streaming share one guest code path.
+func (s *StreamConn) Exec(command, workingDir string, env map[string]string, timeout int) (*ExecResponse, error) {
+	var out, errb strings.Builder
+	exit, err := s.ExecStream(context.Background(), &ExecRequest{
+		Command:    command,
+		WorkingDir: workingDir,
+		Env:        env,
+		Timeout:    timeout,
+	}, func(stream StreamName, data []byte) error {
+		if stream == StreamStdout {
+			out.Write(data)
+		} else {
+			errb.Write(data)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if exit.Error != "" {
+		return nil, fmt.Errorf("exec_stream: %s", exit.Error)
+	}
+	return &ExecResponse{
+		ExitCode:   exit.ExitCode,
+		Stdout:     out.String(),
+		Stderr:     errb.String(),
+		ExecTimeMs: exit.ExecTimeMs,
+	}, nil
 }
