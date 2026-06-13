@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/volume"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
@@ -18,8 +18,8 @@ import (
 
 // keyProbeEngine is a ForkEngine that, during CreateTemplate and Fork, reads the
 // key the daemon stashed in the provider and records it, so a test can assert
-// the request-delivered key was available to the engine during the call. It does
-// no real work otherwise.
+// the request-delivered (wrapped) DEK was available to the engine, unwrapped via
+// the KMS, during the call. It does no real work otherwise.
 type keyProbeEngine struct {
 	ForkEngine   // embedded so unused methods are present; calling them panics (none are exercised)
 	prov         *fork.RequestKeyProvider
@@ -35,8 +35,7 @@ func (e *keyProbeEngine) CreateTemplate(id, _ string, _ []string, _ []volume.Spe
 		e.createKeyErr = err
 		return nil
 	}
-	// Copy the bytes out; the provider may zeroize the backing array after the
-	// call returns.
+	// Copy the bytes out; the engine zeroizes the per-use copy after the call.
 	e.createKey = append([]byte(nil), k...)
 	return nil
 }
@@ -79,18 +78,39 @@ func newKeyTestClient(t *testing.T, engine ForkEngine, prov *fork.RequestKeyProv
 	return forkdpb.NewForkDaemonClient(conn), srv
 }
 
-// secretKey is a recognizable but non-real key the test scans the logs for.
-var secretKey = storecrypt.Key("THIS-IS-A-SECRET-KEY-32-BYTES!!!")
+// secretDEK is a recognizable but non-real DEK the test scans the logs for.
+var secretDEK = []byte("THIS-IS-A-SECRET-KEY-32-BYTES!!!")
 
-func TestCreateTemplateStashesRequestKeyAndForgets(t *testing.T) {
-	prov := fork.NewRequestKeyProvider()
+// testWrapper builds a LocalKEK from a fixed KEK and wraps secretDEK once, so the
+// tests can deliver the WRAPPED DEK plus its KEK id over the RPC.
+func testWrapper(t *testing.T) (*kms.LocalKEK, kms.WrappedKey) {
+	t.Helper()
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	w, err := kms.NewLocalKEK(kek)
+	if err != nil {
+		t.Fatalf("NewLocalKEK: %v", err)
+	}
+	wrapped, err := w.Wrap(context.Background(), secretDEK)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	return w, wrapped
+}
+
+func TestCreateTemplateStashesWrappedKeyAndForgets(t *testing.T) {
+	w, wrapped := testWrapper(t)
+	prov := fork.NewRequestKeyProvider(w)
 	engine := &keyProbeEngine{prov: prov}
 	client, _ := newKeyTestClient(t, engine, prov)
 
 	if _, err := client.CreateTemplate(context.Background(), &forkdpb.CreateTemplateRequest{
 		TemplateId:    "tmpl1",
 		Image:         "python:3.12-slim",
-		EncryptionKey: []byte(secretKey),
+		EncryptionKey: wrapped.Ciphertext,
+		KekId:         wrapped.KEKID,
 	}); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
@@ -98,24 +118,26 @@ func TestCreateTemplateStashesRequestKeyAndForgets(t *testing.T) {
 	if engine.createKeyErr != nil {
 		t.Fatalf("engine had no key during CreateTemplate: %v", engine.createKeyErr)
 	}
-	if !bytes.Equal(engine.createKey, []byte(secretKey)) {
-		t.Fatal("engine did not see the request-delivered key during CreateTemplate")
+	if !bytes.Equal(engine.createKey, secretDEK) {
+		t.Fatal("engine did not see the unwrapped DEK during CreateTemplate")
 	}
-	// After the call the daemon must have forgotten the key (crypto hygiene).
+	// After the call the daemon must have forgotten the wrapped DEK (hygiene).
 	if _, err := prov.KeyFor("tmpl1"); err == nil {
-		t.Fatal("daemon did not ForgetKey after CreateTemplate; key still present")
+		t.Fatal("daemon did not ForgetKey after CreateTemplate; wrapped DEK still present")
 	}
 }
 
-func TestForkStashesRequestKeyAndForgets(t *testing.T) {
-	prov := fork.NewRequestKeyProvider()
+func TestForkStashesWrappedKeyAndForgets(t *testing.T) {
+	w, wrapped := testWrapper(t)
+	prov := fork.NewRequestKeyProvider(w)
 	engine := &keyProbeEngine{prov: prov}
 	client, _ := newKeyTestClient(t, engine, prov)
 
 	if _, err := client.Fork(context.Background(), &forkdpb.ForkRequest{
 		SnapshotId:    "tmpl1",
 		SandboxId:     "sb-1",
-		EncryptionKey: []byte(secretKey),
+		EncryptionKey: wrapped.Ciphertext,
+		KekId:         wrapped.KEKID,
 	}); err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
@@ -123,16 +145,17 @@ func TestForkStashesRequestKeyAndForgets(t *testing.T) {
 	if engine.forkKeyErr != nil {
 		t.Fatalf("engine had no key during Fork: %v", engine.forkKeyErr)
 	}
-	if !bytes.Equal(engine.forkKey, []byte(secretKey)) {
-		t.Fatal("engine did not see the request-delivered key during Fork")
+	if !bytes.Equal(engine.forkKey, secretDEK) {
+		t.Fatal("engine did not see the unwrapped DEK during Fork")
 	}
 	if _, err := prov.KeyFor("tmpl1"); err == nil {
-		t.Fatal("daemon did not ForgetKey after Fork; key still present")
+		t.Fatal("daemon did not ForgetKey after Fork; wrapped DEK still present")
 	}
 }
 
 // TestKeyNeverLogged captures the daemon's log output across CreateTemplate and
-// Fork and asserts the key bytes never appear in any log line.
+// Fork and asserts neither the plaintext DEK nor the wrapped DEK ever appear in
+// any log line.
 func TestKeyNeverLogged(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Writer()
@@ -144,26 +167,32 @@ func TestKeyNeverLogged(t *testing.T) {
 		log.SetFlags(prevFlags)
 	})
 
-	prov := fork.NewRequestKeyProvider()
+	w, wrapped := testWrapper(t)
+	prov := fork.NewRequestKeyProvider(w)
 	engine := &keyProbeEngine{prov: prov}
 	client, _ := newKeyTestClient(t, engine, prov)
 
 	if _, err := client.CreateTemplate(context.Background(), &forkdpb.CreateTemplateRequest{
 		TemplateId:    "tmpl1",
 		Image:         "python:3.12-slim",
-		EncryptionKey: []byte(secretKey),
+		EncryptionKey: wrapped.Ciphertext,
+		KekId:         wrapped.KEKID,
 	}); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 	if _, err := client.Fork(context.Background(), &forkdpb.ForkRequest{
 		SnapshotId:    "tmpl1",
 		SandboxId:     "sb-1",
-		EncryptionKey: []byte(secretKey),
+		EncryptionKey: wrapped.Ciphertext,
+		KekId:         wrapped.KEKID,
 	}); err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
 
-	if bytes.Contains(buf.Bytes(), []byte(secretKey)) {
-		t.Fatal("the encryption key leaked into the daemon logs")
+	if bytes.Contains(buf.Bytes(), secretDEK) {
+		t.Fatal("the plaintext DEK leaked into the daemon logs")
+	}
+	if bytes.Contains(buf.Bytes(), wrapped.Ciphertext) {
+		t.Fatal("the wrapped DEK leaked into the daemon logs")
 	}
 }

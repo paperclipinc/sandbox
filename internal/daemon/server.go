@@ -13,7 +13,6 @@ import (
 
 	"github.com/paperclipinc/mitos/internal/cas"
 	"github.com/paperclipinc/mitos/internal/fork"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
 	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/paperclipinc/mitos/internal/vsock"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
@@ -58,12 +57,13 @@ func init() {
 	prometheus.MustRegister(forkDuration, activeSandboxes, memoryShared, memoryUnique, cowMemorySavings, meteredDisk)
 }
 
-// RequestKeyStasher is the narrow seam the gRPC handlers use to hand the
-// request-delivered encryption key to the engine for the duration of one
-// operation. fork.RequestKeyProvider satisfies it. The key is a secret value:
-// SetKey/ForgetKey carry it without ever logging it.
+// RequestKeyStasher is the seam the gRPC handlers use to hand the controller-
+// delivered WRAPPED DEK to the engine's key provider for the duration of a
+// CreateTemplate/Fork call. The same *fork.RequestKeyProvider satisfies it. The
+// wrapped DEK is opaque ciphertext and the (eventual) plaintext DEK is a secret
+// value: SetWrappedKey/ForgetKey carry the wrapped form without ever logging it.
 type RequestKeyStasher interface {
-	SetKey(scopeID string, key storecrypt.Key)
+	SetWrappedKey(scopeID string, wrappedDEK []byte, kekID string)
 	ForgetKey(scopeID string)
 }
 

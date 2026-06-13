@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/paperclipinc/mitos/internal/observability"
-	"github.com/paperclipinc/mitos/internal/storecrypt"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -38,12 +37,14 @@ func (g *grpcService) Fork(ctx context.Context, req *forkdpb.ForkRequest) (*fork
 	))
 	defer span.End()
 
-	// If the controller delivered an at-rest encryption key over the mTLS RPC,
-	// stash it for the engine to open the source template's encrypted container,
-	// and forget it once the fork returns. The key is a secret value: it is
-	// never logged and never recorded as a span attribute.
+	// If the controller delivered an at-rest WRAPPED DEK over the mTLS RPC, stash
+	// it (plus its KEK id) for the engine to unwrap and open the source
+	// template's encrypted container, and forget it once the fork returns.
+	// Neither the wrapped DEK nor the (eventual) plaintext is ever logged or
+	// recorded as a span attribute. The engine unwraps via the KMS and zeroizes
+	// the plaintext.
 	if len(req.EncryptionKey) > 0 && g.srv.keyProvider != nil {
-		g.srv.keyProvider.SetKey(req.SnapshotId, storecrypt.Key(req.EncryptionKey))
+		g.srv.keyProvider.SetWrappedKey(req.SnapshotId, req.EncryptionKey, req.KekId)
 		defer g.srv.keyProvider.ForgetKey(req.SnapshotId)
 	}
 
@@ -125,12 +126,13 @@ func (g *grpcService) CreateTemplate(ctx context.Context, req *forkdpb.CreateTem
 	if err != nil {
 		return nil, grpcError(err)
 	}
-	// If the controller delivered an at-rest encryption key over the mTLS RPC,
-	// stash it for the engine to build the snapshot inside an encrypted
-	// container, and forget it once the build returns. The key is a secret
-	// value: it is never logged and never recorded as a span attribute.
+	// If the controller delivered an at-rest WRAPPED DEK over the mTLS RPC, stash
+	// it (plus its KEK id) for the engine to unwrap and build the snapshot inside
+	// an encrypted container, and forget it once the build returns. Neither the
+	// wrapped DEK nor the (eventual) plaintext is ever logged or recorded as a
+	// span attribute. The engine unwraps via the KMS and zeroizes the plaintext.
 	if len(req.EncryptionKey) > 0 && g.srv.keyProvider != nil {
-		g.srv.keyProvider.SetKey(req.TemplateId, storecrypt.Key(req.EncryptionKey))
+		g.srv.keyProvider.SetWrappedKey(req.TemplateId, req.EncryptionKey, req.KekId)
 		defer g.srv.keyProvider.ForgetKey(req.TemplateId)
 	}
 	if err := g.srv.engine.CreateTemplate(req.TemplateId, req.Image, req.InitCommands, vols); err != nil {
