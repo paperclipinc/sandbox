@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 
 class ForkPolicy(str, Enum):
@@ -64,3 +64,26 @@ class ForkInfo:
     node: str
     phase: SandboxPhase
     fork_time_ms: float = 0.0
+
+
+@dataclass
+class BackgroundProcess:
+    """A handle to a streaming exec started in the background.
+
+    wait() drains the stream to completion and returns the aggregate
+    ExecResult. kill() stops the process by closing the underlying HTTP
+    stream, which forkd turns into a context cancel that kills the guest
+    process group.
+    """
+
+    _drain: Callable[[], ExecResult]
+    _close: Callable[[], None]
+    _result: Optional[ExecResult] = None
+
+    def wait(self) -> ExecResult:
+        if self._result is None:
+            self._result = self._drain()
+        return self._result
+
+    def kill(self) -> None:
+        self._close()

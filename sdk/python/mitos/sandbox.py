@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
-from mitos.types import ExecResult, FileInfo, ForkInfo, SandboxInfo, SandboxPhase
+from mitos.types import (
+    BackgroundProcess,
+    ExecResult,
+    FileInfo,
+    ForkInfo,
+    SandboxInfo,
+    SandboxPhase,
+)
 
 
 API_GROUP = "mitos.run"
@@ -207,8 +215,33 @@ class Sandbox:
         timeout: int = 30,
         working_dir: str = "/workspace",
         env: Optional[dict[str, str]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
     ) -> ExecResult:
-        """Execute a command in the sandbox."""
+        """Execute a command in the sandbox.
+
+        When on_stdout or on_stderr is given, output is streamed over
+        /v1/exec/stream (NDJSON) and the callbacks fire per chunk as bytes
+        arrive; the returned ExecResult still carries the full aggregate. With
+        no callbacks the blocking /v1/exec path is used unchanged.
+        """
+        if on_stdout is None and on_stderr is None:
+            return self._exec_blocking(command, timeout, working_dir, env)
+        out_parts: list[bytes] = []
+        err_parts: list[bytes] = []
+        exit_code, exec_time_ms = self._stream(
+            command, timeout, working_dir, env,
+            lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
+            lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
+        )
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=b"".join(out_parts).decode("utf-8", "replace"),
+            stderr=b"".join(err_parts).decode("utf-8", "replace"),
+            exec_time_ms=exec_time_ms,
+        )
+
+    def _exec_blocking(self, command, timeout, working_dir, env) -> ExecResult:
         payload: dict = {
             "sandbox": self._sandbox_ref,
             "command": command,
@@ -217,7 +250,6 @@ class Sandbox:
         }
         if env:
             payload["env"] = env
-
         resp = self._http.post(
             f"{self._base_url}/exec",
             json=payload,
@@ -226,13 +258,81 @@ class Sandbox:
         )
         resp.raise_for_status()
         data = resp.json()
-
         return ExecResult(
             exit_code=data["exit_code"],
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),
             exec_time_ms=data.get("exec_time_ms", 0),
         )
+
+    def _stream(self, command, timeout, working_dir, env, on_out, on_err):
+        """Opens /v1/exec/stream and feeds chunks to on_out/on_err. Returns
+        (exit_code, exec_time_ms). Raises on transport error frames."""
+        payload: dict = {
+            "sandbox": self._sandbox_ref,
+            "command": command,
+            "timeout": timeout,
+            "working_dir": working_dir,
+        }
+        if env:
+            payload["env"] = env
+        exit_code = 0
+        exec_time_ms = 0.0
+        with self._http.stream(
+            "POST",
+            f"{self._base_url}/exec/stream",
+            json=payload,
+            timeout=None,
+            headers=self._auth_headers(),
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                frame = json.loads(line)
+                if "exit_code" in frame and "stream" not in frame:
+                    exit_code = frame["exit_code"]
+                    exec_time_ms = frame.get("exec_time_ms", 0.0)
+                    if frame.get("error"):
+                        raise RuntimeError(f"exec stream error: {frame['error']}")
+                    continue
+                data = base64.b64decode(frame["data"]) if frame.get("data") else b""
+                if frame.get("stream") == "stderr":
+                    on_err(data)
+                else:
+                    on_out(data)
+        return exit_code, exec_time_ms
+
+    def exec_background(
+        self,
+        command: str,
+        timeout: int = 86400,
+        working_dir: str = "/workspace",
+        env: Optional[dict[str, str]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
+    ) -> "BackgroundProcess":
+        """Start a long-running command and return a handle. wait() drains to
+        completion; kill() closes the stream so forkd cancels the guest process
+        group. Default timeout is one day so a background server is not reaped by
+        the per-exec timeout."""
+        out_parts: list[bytes] = []
+        err_parts: list[bytes] = []
+
+        def drain() -> ExecResult:
+            exit_code, exec_time_ms = self._stream(
+                command, timeout, working_dir, env,
+                lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
+                lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
+            )
+            return ExecResult(
+                exit_code=exit_code,
+                stdout=b"".join(out_parts).decode("utf-8", "replace"),
+                stderr=b"".join(err_parts).decode("utf-8", "replace"),
+                exec_time_ms=exec_time_ms,
+            )
+
+        return BackgroundProcess(_drain=drain, _close=lambda: self._http.close())
 
     def fork(self, n: int = 1, pause_source: bool = False) -> list[Sandbox]:
         """Fork this sandbox into n independent copies."""
