@@ -30,6 +30,80 @@ class ExecResult:
 
 
 @dataclass
+class Result:
+    """One rich display artifact from run_code (mirrors E2B's Result).
+
+    data maps a MIME type to its payload (base64 for image/png, raw text for
+    text/html, image/svg+xml, text/markdown, text/latex, application/json,
+    text/plain). The typed properties are convenience accessors that return None
+    when that MIME type is absent. is_main_result is True for the cell's
+    last-expression value (an execute_result), False for a side display_data.
+    """
+
+    data: dict[str, str] = field(default_factory=dict)
+    is_main_result: bool = False
+
+    @property
+    def text(self) -> Optional[str]:
+        return self.data.get("text/plain")
+
+    @property
+    def png(self) -> Optional[str]:
+        return self.data.get("image/png")
+
+    @property
+    def svg(self) -> Optional[str]:
+        return self.data.get("image/svg+xml")
+
+    @property
+    def html(self) -> Optional[str]:
+        return self.data.get("text/html")
+
+    @property
+    def markdown(self) -> Optional[str]:
+        return self.data.get("text/markdown")
+
+    @property
+    def latex(self) -> Optional[str]:
+        return self.data.get("text/latex")
+
+    @property
+    def json(self) -> Optional[str]:
+        return self.data.get("application/json")
+
+    @property
+    def chart(self) -> Optional[str]:
+        # Structured chart data, when a kernel emits it under this MIME type.
+        return self.data.get("application/vnd.vegalite.v5+json") or self.data.get(
+            "application/vnd.vega.v5+json"
+        )
+
+
+@dataclass
+class ExecutionError:
+    """A structured exception from run_code (mirrors E2B's error)."""
+
+    name: str
+    value: str
+    traceback: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Execution:
+    """The full result of a run_code call (mirrors E2B's Execution).
+
+    text is the REPL last-expression value (the text/plain of the main result);
+    logs holds buffered stdout/stderr lines; results is every rich display
+    artifact in order; error is the structured exception, or None.
+    """
+
+    text: Optional[str] = None
+    logs: dict[str, list[str]] = field(default_factory=lambda: {"stdout": [], "stderr": []})
+    results: list[Result] = field(default_factory=list)
+    error: Optional[ExecutionError] = None
+
+
+@dataclass
 class FileInfo:
     name: str
     is_dir: bool
