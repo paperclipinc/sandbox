@@ -1,0 +1,93 @@
+name: Publish signed images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to build and publish (for example v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # Build, push, cosign keyless-sign, and SBOM-attest the three mitos images
+    # under ghcr.io/paperclipinc (supply chain, issue #35). Keyless signing
+    # uses the workflow GitHub OIDC identity (id-token: write); there is NO
+    # private key in the repo or in secrets. Each image is pushed by digest and
+    # the signature and SBOM attestation are bound to that digest.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mitos-controller
+            dockerfile: Dockerfile.controller
+          - name: mitos-forkd
+            dockerfile: Dockerfile.forkd
+          - name: mitos-husk-stub
+            dockerfile: Dockerfile.husk-stub
+    env:
+      REGISTRY: ghcr.io
+      IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags and labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=sha
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Cosign keyless sign by digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+      - name: Cosign attest the SBOM by digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate "sbom-${{ matrix.name }}.spdx.json" \
+            --type spdxjson \
+            "${IMAGE}@${DIGEST}"
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: sbom-${{ matrix.name }}.spdx.json
