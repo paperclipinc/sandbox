@@ -441,6 +441,42 @@ func TestBuildHuskPodMountsWritableRootfsCoWDir(t *testing.T) {
 	if !strings.Contains(args, "--template-rootfs "+wantTemplateRootfs) {
 		t.Errorf("args missing --template-rootfs %s: %v", wantTemplateRootfs, container.Args)
 	}
+
+	// The template dir mount (the clone SOURCE) must be READ-ONLY: the stub only
+	// reads it to clone the rootfs, so a writable mount would re-open the shared-RW
+	// residual this fix closes.
+	var tmplMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == "template" {
+			tmplMount = &container.VolumeMounts[i]
+		}
+	}
+	if tmplMount == nil {
+		t.Fatal("expected a template volume mount")
+	}
+	if !tmplMount.ReadOnly {
+		t.Error("the template dir mount must be read-only (the stub only reads it to clone the rootfs)")
+	}
+
+	// The per-pod VM id flows from the downward API pod name: a POD_NAME env from
+	// metadata.name plus --vm-id $(POD_NAME). This scopes the clone path per pod so
+	// two husk pods on one node never collide on the shared CoW hostPath.
+	var podNameEnv *corev1.EnvVar
+	for i := range container.Env {
+		if container.Env[i].Name == "POD_NAME" {
+			podNameEnv = &container.Env[i]
+		}
+	}
+	if podNameEnv == nil {
+		t.Fatal("expected a POD_NAME env var")
+	}
+	if podNameEnv.ValueFrom == nil || podNameEnv.ValueFrom.FieldRef == nil ||
+		podNameEnv.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+		t.Errorf("POD_NAME must come from the downward API metadata.name, got %+v", podNameEnv.ValueFrom)
+	}
+	if !strings.Contains(args, "--vm-id $(POD_NAME)") {
+		t.Errorf("args missing --vm-id $(POD_NAME): %v", container.Args)
+	}
 }
 
 // TestBuildHuskPodEscapeHatchWhenNoDigest proves the fallback: with no recorded

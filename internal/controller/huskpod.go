@@ -263,6 +263,15 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		"--tls-cert", filepath.Join(huskTLSMountPath, "tls.crt"),
 		"--tls-key", filepath.Join(huskTLSMountPath, "tls.key"),
 		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
+		// Per-pod VM id from the downward API pod name (set on the container env
+		// below). It scopes this pod's per-activation rootfs CoW clone path
+		// (<rootfs-cow-dir>/<id>/rootfs.ext4), which is written under a node
+		// hostPath shared by EVERY husk pod on the node. Without a per-pod id every
+		// husk pod would clone to the IDENTICAL path and overwrite or delete each
+		// other's live rootfs (cross-pod corruption); the pod name is unique per
+		// node, so each pod gets its own clone. $(POD_NAME) is substituted by the
+		// kubelet from the env var, not the shell.
+		"--vm-id", "$(POD_NAME)",
 	}
 
 	// Snapshot verify gate (fail-closed): when the pool has a recorded template
@@ -393,7 +402,13 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 				},
 			},
 		})
-		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir})
+		// READ-ONLY: the stub only READS the template rootfs to reflink-clone it
+		// per activation; it never writes the template dir. Mounting it read-only
+		// (like the snapshot, kernel, and manifest mounts) closes the shared-RW
+		// residual at the mount itself, so no husk pod can write through to the
+		// shared template even if a future code path tried. The per-activation CoW
+		// clone is written to the SEPARATE writable husk-rootfs-cow mount below.
+		mounts = append(mounts, corev1.VolumeMount{Name: "template", MountPath: templateDir, ReadOnly: true})
 
 		// The writable per-activation rootfs CoW directory, a sibling of the
 		// template dir under the node data dir so the stub's reflink clone of the
@@ -492,6 +507,20 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 					// snapshot are read-only hostPath mounts. The controller dials
 					// the control port to activate (slice 2).
 					Args: args,
+					// POD_NAME via the downward API: the kubelet substitutes it
+					// into the --vm-id $(POD_NAME) arg above so each husk pod gets
+					// a UNIQUE per-pod VM id. That id scopes the per-activation
+					// rootfs CoW clone path under the shared node hostPath, so two
+					// husk pods on one node never collide on, overwrite, or delete
+					// each other's rootfs clone. The pod name is unique per node.
+					Env: []corev1.EnvVar{{
+						Name: "POD_NAME",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.name",
+							},
+						},
+					}},
 					Ports: []corev1.ContainerPort{{
 						// The activated VM's sandbox HTTP API (exec/files). The
 						// claim's Status.Endpoint is podIP:this, so it must be a
