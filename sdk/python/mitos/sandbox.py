@@ -266,14 +266,20 @@ class Sandbox:
             exec_time_ms=data.get("exec_time_ms", 0),
         )
 
-    def _stream(self, command, timeout, working_dir, env, on_out, on_err, client=None):
+    def _stream(
+        self, command, timeout, working_dir, env, on_out, on_err,
+        client=None, on_response=None,
+    ):
         """Opens /v1/exec/stream and feeds chunks to on_out/on_err. Returns
         (exit_code, exec_time_ms). Raises on transport error frames and on a
         stream that ends before the terminal exit frame.
 
         Streams on `client` when given (a dedicated per-stream httpx client so a
         kill() can tear down only that connection), otherwise on the shared
-        Sandbox client."""
+        Sandbox client. When on_response is given it is called with the live
+        streaming Response so a kill() can close that exact connection and
+        unblock the in-flight read deterministically, independent of how the
+        installed httpx version handles Client.close()."""
         http = client if client is not None else self._http
         payload: dict = {
             "sandbox": self._sandbox_ref,
@@ -293,6 +299,8 @@ class Sandbox:
             timeout=None,
             headers=self._auth_headers(),
         ) as resp:
+            if on_response is not None:
+                on_response(resp)
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if not line:
@@ -345,8 +353,13 @@ class Sandbox:
         # shared Sandbox client that other exec/file calls ride on.
         stream_http = httpx.Client(timeout=30.0)
 
-        state: dict = {"result": None, "error": None}
+        state: dict = {"result": None, "error": None, "response": None}
         done = threading.Event()
+        resp_lock = threading.Lock()
+
+        def capture_response(resp) -> None:
+            with resp_lock:
+                state["response"] = resp
 
         def drain_thread() -> None:
             try:
@@ -355,6 +368,7 @@ class Sandbox:
                     lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
                     lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
                     client=stream_http,
+                    on_response=capture_response,
                 )
                 state["result"] = ExecResult(
                     exit_code=exit_code,
@@ -380,9 +394,26 @@ class Sandbox:
                 raise state["error"]
             return state["result"]
 
+        def kill() -> None:
+            # Close the exact in-flight streaming response first so the read the
+            # drain thread is blocked on aborts deterministically; relying on
+            # Client.close() alone is not portable across httpx versions. Then
+            # close the per-stream client (never the shared Sandbox client) and
+            # join the drain thread so kill() returns only once the thread has
+            # observed the teardown and set _done.
+            with resp_lock:
+                resp = state["response"]
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            stream_http.close()
+            thread.join(timeout=5.0)
+
         return BackgroundProcess(
             _drain=wait_for,
-            _close=stream_http.close,
+            _close=kill,
             _done=done,
         )
 
