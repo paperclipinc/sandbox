@@ -183,7 +183,7 @@ jobs:
       # job; unfixed advisories are reported but do not gate (no action to
       # take). Accepted CVEs live in .trivyignore with a reason.
       - name: Trivy scan controller image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
           image-ref: mitos-controller:ci
           scanners: vuln
@@ -192,7 +192,7 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
       - name: Trivy scan forkd image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
           image-ref: mitos-forkd:ci
           scanners: vuln
@@ -201,7 +201,7 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
       - name: Trivy scan husk-stub image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
           image-ref: mitos-husk-stub:ci
           scanners: vuln
