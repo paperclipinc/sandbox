@@ -53,6 +53,13 @@ privileged process and RUN many times by unprivileged pods.
   KVM nodes (and the `--enable-raw-forkd` fork-per-claim engine). The privileged
   surface is now confined to the BUILD path, run once per node per template,
   rather than every sandbox execution.
+- forkd `privileged: true` (deploy/daemon/daemonset.yaml), REGRESSION pending
+  jailer-in-pod. Without the per-VM jailer mediating, forkd needs unrestricted
+  /dev/kvm, /dev/net/tun, cgroup, and chroot access, so the trimmed capability
+  set is replaced by privileged until the jailer runs inside the forkd pod.
+  Status: accepted, time-boxed to the jailer-in-pod follow-up. Mitigation: the
+  forkd pod runs only on labelled KVM nodes (mitos.run/kvm) and is not exposed
+  to tenant traffic; husk pods, not forkd, are the tenant execution surface.
 
 ### Unprivileged-stub escape surface (issue #18 re-derivation)
 
