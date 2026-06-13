@@ -719,6 +719,21 @@ verified. In rough order of leverage:
   use; `typescript-sdk` CI job builds, tests, type-checks, and packs the
   package; real in-VM exec proven by the KVM CI of the underlying API; npm
   publish is a release follow-up. Parity table in sdk/typescript/README.md.
+- ✅ **SDK first-impression ergonomics + LLM-legible errors (#28)**: the
+  server returns the structured error envelope
+  `{error:{code, message, cause, remediation}}` from forkd and the standalone
+  sandbox-server (`internal/apierr`), with a CI test asserting every error path
+  carries a non-empty code and remediation and never a secret value; both SDKs
+  parse it into a structured `AgentRunError`. The Python SDK gains the one-liner
+  `AgentRun().sandbox("python")` backed by a lazy admin-disableable default pool
+  (a `SandboxTemplate` plus a `SandboxPool` under a deterministic name),
+  `from_name()` reconnect, `wait_until_ready()`, and an `AsyncAgentRun` over
+  `httpx.AsyncClient` for the hot paths (exec, files, fork). The TypeScript SDK
+  aligns to the same envelope and adds the same `sandbox(image)` and `fromName`,
+  with the default-pool name computed identically in both languages. Every SDK
+  README example is runnable against the real API; the root README's
+  non-existent `Sandbox.create` example is gone. Cluster behaviors are
+  KVM-cluster-verified; the error and wire shapes are unit-tested.
 - ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
 - ✅ One-command local story: `mitos dev up` (kind + mock control plane from
   deploy/dev/), proven in the kind CI smoke. OPEN: document the KVM-passthrough

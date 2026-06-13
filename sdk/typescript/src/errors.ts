@@ -39,13 +39,36 @@ export class AgentRunError extends Error {
     token?: string,
   ): AgentRunError {
     const safeBody = redact(bodyText, token).trim();
-    const code = codeForStatus(status);
-    const cause = safeBody === "" ? `HTTP ${status}` : safeBody;
-    const remediation = remediationForStatus(status);
-    return new AgentRunError(
-      `sandbox API request failed: HTTP ${status} (${code})`,
-      { code, cause, remediation },
-    );
+    let code = codeForStatus(status);
+    let message = `sandbox API request failed: HTTP ${status} (${code})`;
+    let cause = safeBody === "" ? `HTTP ${status}` : safeBody;
+    let remediation = remediationForStatus(status);
+
+    try {
+      const parsed = JSON.parse(safeBody) as unknown;
+      if (parsed && typeof parsed === "object" && "error" in parsed) {
+        const err = (parsed as { error: unknown }).error;
+        if (err && typeof err === "object") {
+          const e = err as {
+            code?: string;
+            message?: string;
+            cause?: string;
+            remediation?: string;
+          };
+          code = e.code || code;
+          message = e.message || message;
+          cause = (e.cause && redact(e.cause, token)) || cause;
+          remediation = e.remediation || remediation;
+        } else if (typeof err === "string") {
+          // Legacy bare {"error": "msg"} body.
+          cause = redact(err, token) || cause;
+        }
+      }
+    } catch {
+      // Not JSON; keep the status-derived defaults with the text body as cause.
+    }
+
+    return new AgentRunError(message, { code, cause, remediation });
   }
 }
 

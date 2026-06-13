@@ -1,4 +1,6 @@
+from mitos.aio import AsyncAgentRun, AsyncSandbox
 from mitos.client import AgentRun
+from mitos.errors import AgentRunError
 from mitos.sandbox import Sandbox
 from mitos.types import (
     Execution,
@@ -11,6 +13,9 @@ from mitos.types import (
 
 __all__ = [
     "AgentRun",
+    "AgentRunError",
+    "AsyncAgentRun",
+    "AsyncSandbox",
     "Sandbox",
     "ExecResult",
     "Execution",

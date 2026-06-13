@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from mitos.errors import AgentRunError
 from mitos.sandbox import Sandbox, SandboxFiles
 from mitos.types import SandboxPhase
 
@@ -152,8 +153,9 @@ def test_sandbox_wait_ready_failed(pending_sandbox, mock_api):
         "status": {"phase": "Failed"}
     }
 
-    with pytest.raises(RuntimeError, match="failed"):
+    with pytest.raises(AgentRunError, match="failed") as ei:
         pending_sandbox._wait_ready(timeout=1.0)
+    assert ei.value.code == "sandbox_failed"
 
 
 def test_wait_ready_reads_token_secret(mock_api):

@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import httpx
 
+from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.types import Execution, ExecResult, Result
 from mitos.sandbox import _parse_run_code_stream
 
@@ -43,7 +44,7 @@ class DirectSandbox:
             f"{self._server_url}/v1/exec",
             json={"sandbox": self.id, "command": command, "timeout": timeout},
         )
-        resp.raise_for_status()
+        raise_for_status(resp)
         data = resp.json()
         return ExecResult(
             exit_code=data["exit_code"],
@@ -78,7 +79,7 @@ class DirectSandbox:
             json=payload,
             timeout=timeout + 10,
         ) as resp:
-            resp.raise_for_status()
+            raise_for_status_stream(resp)
             return _parse_run_code_stream(resp.iter_lines(), on_stdout, on_stderr, on_result)
 
     def terminate(self) -> None:
@@ -104,12 +105,12 @@ class SandboxServer:
 
     def health(self) -> dict:
         resp = self._http.get(f"{self.url}/v1/health")
-        resp.raise_for_status()
+        raise_for_status(resp)
         return resp.json()
 
     def list_templates(self) -> list[dict]:
         resp = self._http.get(f"{self.url}/v1/templates")
-        resp.raise_for_status()
+        raise_for_status(resp)
         return resp.json()
 
     def create_template(self, id: str, init_wait_seconds: int = 5) -> dict:
@@ -117,7 +118,7 @@ class SandboxServer:
             f"{self.url}/v1/templates",
             json={"id": id, "init_wait_seconds": init_wait_seconds},
         )
-        resp.raise_for_status()
+        raise_for_status(resp)
         return resp.json()
 
     def fork(self, template: str, id: Optional[str] = None) -> DirectSandbox:
@@ -127,7 +128,7 @@ class SandboxServer:
             f"{self.url}/v1/fork",
             json={"template": template, "id": id},
         )
-        resp.raise_for_status()
+        raise_for_status(resp)
         data = resp.json()
         return DirectSandbox(
             id=data["id"],
@@ -139,5 +140,5 @@ class SandboxServer:
 
     def list_sandboxes(self) -> list[dict]:
         resp = self._http.get(f"{self.url}/v1/sandboxes")
-        resp.raise_for_status()
+        raise_for_status(resp)
         return resp.json()

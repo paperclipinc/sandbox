@@ -18,12 +18,53 @@ const TOKEN_SECRET_SUFFIX = "-sandbox-token";
 const DEFAULT_POLL_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 50;
 
+const DEFAULT_POOL_PREFIX = "mitos-default-";
+
+/**
+ * Deterministic default-pool name for an image: lowercased, "/" and ":" to "-",
+ * other unsafe characters collapsed, bounded to 40 chars after the prefix, with
+ * leading/trailing "-" and "." stripped (a trailing "." is an invalid object
+ * name). Kept byte-for-byte equivalent to the Python default_pool_name so both
+ * SDKs target the same pool object.
+ */
+export function defaultPoolName(image: string): string {
+  const collapsed = image
+    .toLowerCase()
+    .replace(/[/:]/g, "-")
+    .replace(/[^a-z0-9.-]+/g, "-");
+  // Bound first, then strip trailing/leading "-" and "." so truncation can
+  // never leave a name ending in "." or "-" (both invalid object-name tails).
+  const slug = collapsed.slice(0, 40).replace(/^[-.]+|[-.]+$/g, "");
+  return DEFAULT_POOL_PREFIX + slug;
+}
+
+function statusOf(e: unknown): number | undefined {
+  if (e && typeof e === "object") {
+    const anyE = e as { statusCode?: number; response?: { statusCode?: number } };
+    return anyE.statusCode ?? anyE.response?.statusCode;
+  }
+  return undefined;
+}
+
+function isNotFound(e: unknown): boolean {
+  return statusOf(e) === 404;
+}
+
+function isConflict(e: unknown): boolean {
+  return statusOf(e) === 409;
+}
+
 export interface AgentRunOptions {
   namespace?: string;
   k8s?: K8sApi;
   pollTimeoutMs?: number;
   /** Override the poll wait, for tests. Defaults to a real setTimeout. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Whether sandbox(image) may lazily create a default pool when none is named.
+   * Defaults to true; set false to require an explicit pool (admin opt-out).
+   */
+  allowDefaultPool?: boolean;
 }
 
 export interface CreateOptions {
@@ -52,6 +93,7 @@ export class AgentRun {
   private readonly k8s: K8sApi;
   private readonly pollTimeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly allowDefaultPool: boolean;
 
   constructor(opts?: AgentRunOptions) {
     if (!opts?.k8s) {
@@ -66,6 +108,152 @@ export class AgentRun {
     this.k8s = opts.k8s;
     this.pollTimeoutMs = opts.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
     this.sleep = opts.sleep ?? defaultSleep;
+    this.allowDefaultPool = opts.allowDefaultPool ?? true;
+  }
+
+  /**
+   * The one-liner entry point (docs/api/v2-spec.md section 1.2). Pass an image
+   * for the lazy path (ensures mitos-default-<image-slug>, creating it and its
+   * SandboxTemplate if absent and allowed) or { pool } for the explicit path,
+   * which never creates a pool. Exactly one of image or { pool } is required.
+   */
+  async sandbox(
+    image?: string,
+    opts?: CreateOptions & { pool?: string },
+  ): Promise<Sandbox> {
+    let pool = opts?.pool;
+    if (!pool && !image) {
+      throw new AgentRunError("sandbox() needs an image or a pool", {
+        code: "missing_image_or_pool",
+        remediation: 'Pass an image ("python") or { pool: "my-pool" }.',
+      });
+    }
+    if (!pool) {
+      if (!this.allowDefaultPool) {
+        throw new AgentRunError("default pools are disabled on this client", {
+          code: "no_default_pool",
+          remediation:
+            "Pass { pool } for an existing pool, or set allowDefaultPool: true.",
+        });
+      }
+      pool = await this.ensureDefaultPool(image as string);
+    }
+    return this.create(pool, opts);
+  }
+
+  /**
+   * Reconnect to an existing sandbox by name: a durable handle across
+   * processes. Resolves the endpoint and the per-sandbox token from the
+   * cluster. The token is read into memory only and is never logged.
+   */
+  async fromName(name: string): Promise<Sandbox> {
+    const obj = await this.k8s.getClaim(this.namespace, name);
+    const status = obj.status ?? {};
+    const endpoint = (status["endpoint"] as string) ?? "";
+    let token: string | undefined;
+    try {
+      const secret = await this.k8s.readSecret(this.namespace, name + TOKEN_SECRET_SUFFIX);
+      token = secret["token"] || undefined;
+    } catch {
+      // No token Secret; proceed tokenless.
+    }
+    return new Sandbox({
+      id: name,
+      endpoint: toBaseUrl(endpoint),
+      token,
+      terminator: async () => {
+        await this.k8s.deleteClaim(this.namespace, name);
+      },
+    });
+  }
+
+  private async ensureDefaultPool(image: string): Promise<string> {
+    const name = defaultPoolName(image);
+    try {
+      const existing = await this.k8s.getPool(this.namespace, name);
+      await this.verifyPoolImage(existing, name, image);
+      return name;
+    } catch (e) {
+      if (e instanceof AgentRunError) {
+        throw e;
+      }
+      if (!isNotFound(e)) {
+        throw e;
+      }
+    }
+    // The CRD splits image from pool: SandboxTemplate.spec.image, SandboxPool.
+    // spec.templateRef. Create both under the same deterministic name.
+    const template: CustomObject = {
+      apiVersion: `${API_GROUP}/${API_VERSION}`,
+      kind: "SandboxTemplate",
+      metadata: { name, namespace: this.namespace },
+      spec: { image },
+    };
+    try {
+      await this.k8s.createTemplate(this.namespace, template);
+    } catch (e) {
+      if (!isConflict(e)) {
+        throw e; // 409: another caller raced us; reuse it
+      }
+    }
+    const pool: CustomObject = {
+      apiVersion: `${API_GROUP}/${API_VERSION}`,
+      kind: "SandboxPool",
+      metadata: { name, namespace: this.namespace },
+      spec: { templateRef: { name }, replicas: 1 },
+    };
+    try {
+      await this.k8s.createPool(this.namespace, pool);
+    } catch (e) {
+      if (!isConflict(e)) {
+        throw e;
+      }
+    }
+    return name;
+  }
+
+  /**
+   * Guards the default-pool reuse path against a slug collision serving the
+   * wrong image. The slug normalizes ":"/"/" and other characters to "-", so
+   * two distinct images can map to one default pool (for example "python:3.11"
+   * and "python-3.11"). Reads the referenced SandboxTemplate's spec.image and
+   * compares it to the requested image; a mismatch throws rather than silently
+   * running the first caller's image.
+   */
+  private async verifyPoolImage(
+    pool: CustomObject,
+    name: string,
+    image: string,
+  ): Promise<void> {
+    const templateRef = (pool.spec?.["templateRef"] ?? {}) as { name?: string };
+    const templateName = templateRef.name ?? name;
+    const remediation = `Pass { pool: "${name}" } explicitly to reuse this pool, or use a distinct image that maps to a different default pool.`;
+    let template: CustomObject;
+    try {
+      template = await this.k8s.getTemplate(this.namespace, templateName);
+    } catch (e) {
+      // Pool with no resolvable template: cannot prove the image, so fail
+      // closed rather than risk the wrong image.
+      throw new AgentRunError(
+        `default pool ${name} references template ${templateName} that could not be read`,
+        {
+          code: "pool_image_mismatch",
+          cause: `reading SandboxTemplate ${templateName} failed with status ${statusOf(e) ?? "unknown"}`,
+          remediation,
+        },
+      );
+    }
+    const existingImage = (template.spec?.["image"] as string | undefined);
+    if (existingImage !== image) {
+      throw new AgentRunError(
+        `default pool ${name} already exists for a different image`,
+        {
+          code: "pool_image_mismatch",
+          cause: `pool ${name} runs image ${JSON.stringify(existingImage)}, not the requested ${JSON.stringify(image)} (the image slug collides)`,
+          remediation,
+        },
+      );
+    }
   }
 
   /**

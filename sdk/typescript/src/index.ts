@@ -24,7 +24,7 @@ export type { SandboxOptions, Terminator, RunCodeCallbacks } from "./sandbox.js"
 export { SandboxServer } from "./server.js";
 export type { Template, ServerSandbox } from "./server.js";
 
-export { AgentRun } from "./client.js";
+export { AgentRun, defaultPoolName } from "./client.js";
 export type { AgentRunOptions, CreateOptions } from "./client.js";
 
 export { KubeConfigApi } from "./k8s.js";

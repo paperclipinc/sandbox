@@ -84,9 +84,11 @@ def test_fork_auto_id():
 
 def test_fork_unknown_template():
     server = SandboxServer(SERVER_URL)
-    import httpx
-    with pytest.raises(httpx.HTTPStatusError):
+    from mitos.errors import AgentRunError
+    with pytest.raises(AgentRunError) as ei:
         server.fork("nonexistent")
+    assert ei.value.status == 404
+    assert ei.value.code == "not_found"
 
 
 def test_list_sandboxes():

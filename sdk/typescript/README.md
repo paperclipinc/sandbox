@@ -90,6 +90,30 @@ await sandbox.terminate();
 
 Full runnable example: [`examples/cluster.ts`](examples/cluster.ts).
 
+### The one-liner: sandbox(image) and fromName
+
+```typescript
+import { AgentRun, KubeConfigApi } from "@mitos/sdk";
+
+const c = new AgentRun({ k8s: new KubeConfigApi() });
+
+// Lazy default pool: ensures mitos-default-python (a SandboxTemplate plus a
+// SandboxPool referencing it) if you have none, then claims from it.
+const sb = await c.sandbox("python");
+const { stdout } = await sb.exec("python -c 'print(2 + 2)'");
+console.log(stdout.trim()); // 4
+await sb.files.write("/workspace/notes.md", "# findings");
+
+// Reconnect to a live sandbox by id (a durable handle across processes).
+const again = await c.fromName(sb.id);
+await sb.terminate();
+```
+
+Pass `{ pool: "my-pool" }` for the explicit path, which never creates a pool.
+The default-pool name is computed by `defaultPoolName(image)` byte-for-byte
+identically to the Python `default_pool_name`, so both SDKs target the same
+pool object. Set `{ allowDefaultPool: false }` to require an explicit pool.
+
 ## Bearer token model
 
 In cluster mode the controller creates a per-sandbox `Secret` named
@@ -112,9 +136,10 @@ sandbox API with `AllowTokenless`.
 
 - The SDK speaks the correct wire protocol. Every public method is driven
   against a mock HTTP server in the test suite (`test/`) that reproduces the
-  exact JSON shapes the real `forkd` and `sandbox-server` emit. 31 tests
-  cover exec, files read/write/list, fork, terminate, auth, error handling,
-  and cluster polling.
+  exact JSON shapes the real `forkd` and `sandbox-server` emit. The suite
+  covers exec (blocking and streaming), files read/write/list, fork, terminate,
+  auth, structured error parsing, the one-liner lazy default pool, fromName
+  reconnect, and cluster polling.
 - The package type-checks (`tsc --noEmit`) and builds (`tsc`) cleanly under
   TypeScript 5.7 strict mode.
 - The examples type-check under `tsconfig.examples.json` (separate check so
@@ -145,8 +170,12 @@ See [`sdk/python/README.md`](../python/README.md) for the Python SDK.
 | `server.fork(template)`         | `server.fork(template)`             | returns a `Sandbox`                 |
 | `server.list_sandboxes()`       | `server.listSandboxes()`            | active sandboxes on the server      |
 | `AgentRun(namespace=...)`       | `new AgentRun({ k8s, namespace })`  | cluster mode                        |
+| `client.sandbox("python")`      | `client.sandbox("python")`          | one-liner; lazy default pool        |
+| `client.sandbox(pool="p")`      | `client.sandbox(undefined, {pool})` | explicit pool; never creates        |
+| `client.from_name(name)`        | `client.fromName(name)`             | reconnect by id                     |
 | `client.create(pool)`           | `client.create(pool)`               | creates a `SandboxClaim`            |
 | `client.list(pool)`             | `client.list(pool)`                 | lists `SandboxClaim`s               |
+| `AgentRunError(code, ...)`      | `AgentRunError{code, errorCause}`   | parsed from the server envelope     |
 | `sandbox.exec(cmd)`             | `sandbox.exec(cmd)`                 | returns `ExecResult`                |
 | `sandbox.exec_result.stdout`    | `result.stdout`                     | camelCase in TS                     |
 | `sandbox.files.read(path)`      | `sandbox.files.read(path)`          | UTF-8 string                        |
@@ -181,7 +210,7 @@ try {
 ```bash
 npm ci
 npm run build   # tsc -> dist/
-npm test        # vitest: 31 conformance tests
+npm test        # vitest conformance suite
 npm run lint    # tsc --noEmit + tsc --project tsconfig.examples.json
 npm pack --dry-run
 ```

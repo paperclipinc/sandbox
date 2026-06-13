@@ -35,6 +35,21 @@ export interface K8sApi {
   deleteClaim(namespace: string, name: string): Promise<void>;
   listClaims(namespace: string): Promise<CustomObjectList>;
   /**
+   * Gets a SandboxPool. Rejects with an error carrying statusCode 404 when the
+   * pool is absent, so the lazy-default-pool path can tell absent from a real
+   * failure.
+   */
+  getPool(namespace: string, name: string): Promise<CustomObject>;
+  /** Creates a SandboxPool. */
+  createPool(namespace: string, pool: CustomObject): Promise<void>;
+  /** Creates a SandboxTemplate (the pool's templateRef target). */
+  createTemplate(namespace: string, template: CustomObject): Promise<void>;
+  /**
+   * Gets a SandboxTemplate. Used by the default-pool reuse path to confirm a
+   * reused pool runs the requested image (guarding against a slug collision).
+   */
+  getTemplate(namespace: string, name: string): Promise<CustomObject>;
+  /**
    * Reads a Secret and returns its data as decoded UTF-8 strings keyed by the
    * Secret key. Values are held in memory only and must never be logged.
    */
@@ -114,6 +129,52 @@ export class KubeConfigApi implements K8sApi {
       plural: "sandboxclaims",
     });
     return res as CustomObjectList;
+  }
+
+  async getPool(namespace: string, name: string): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.getNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "sandboxpools",
+      name,
+    });
+    return res as CustomObject;
+  }
+
+  async createPool(namespace: string, pool: CustomObject): Promise<void> {
+    await this.ready;
+    await this.customApi.createNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "sandboxpools",
+      body: pool,
+    });
+  }
+
+  async createTemplate(namespace: string, template: CustomObject): Promise<void> {
+    await this.ready;
+    await this.customApi.createNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "sandboxtemplates",
+      body: template,
+    });
+  }
+
+  async getTemplate(namespace: string, name: string): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.getNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "sandboxtemplates",
+      name,
+    });
+    return res as CustomObject;
   }
 
   async readSecret(

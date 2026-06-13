@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/mitos/internal/apierr"
 	"github.com/paperclipinc/mitos/internal/daemon"
 	"github.com/paperclipinc/mitos/internal/firecracker"
 )
@@ -270,7 +271,19 @@ func resp(w http.ResponseWriter, v any) {
 }
 
 func errResp(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	apierr.Encode(w, codeForStatus(code).WithCause(msg))
+}
+
+// codeForStatus picks the catalogue entry for the HTTP statuses the standalone
+// sandbox-server emits. It mirrors the daemon shim so both encoders share the
+// same envelope shape.
+func codeForStatus(status int) apierr.Error {
+	switch status {
+	case http.StatusBadRequest:
+		return apierr.Catalogue["invalid_json"]
+	case http.StatusNotFound:
+		return apierr.Catalogue["not_found"]
+	default:
+		return apierr.Catalogue["internal"]
+	}
 }

@@ -75,6 +75,8 @@ def test_direct_sandbox_run_code_routes(monkeypatch):
     captured = {}
 
     class _FakeResp:
+        is_success = True
+
         def raise_for_status(self):
             return None
 
