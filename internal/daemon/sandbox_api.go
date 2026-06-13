@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/mitos/internal/apierr"
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
@@ -350,7 +351,7 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeErr(w, fmt.Sprintf("exec failed: %v", err), 500)
+		writeAPIErr(w, apierr.Catalogue["exec_failed"].WithCause(fmt.Sprintf("exec failed: %v", err)))
 		return
 	}
 
@@ -575,7 +576,7 @@ func (api *SandboxAPI) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 	content, err := agent.ReadFile(req.Path)
 	if err != nil {
-		writeErr(w, err.Error(), 500)
+		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
 		return
 	}
 
@@ -611,7 +612,7 @@ func (api *SandboxAPI) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.WriteFile(req.Path, []byte(req.Content), mode); err != nil {
-		writeErr(w, err.Error(), 500)
+		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
 		return
 	}
 
@@ -643,7 +644,7 @@ func (api *SandboxAPI) handleListDir(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := agent.ListDir(req.Path)
 	if err != nil {
-		writeErr(w, err.Error(), 500)
+		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
 		return
 	}
 
@@ -672,7 +673,7 @@ func (api *SandboxAPI) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Mkdir(req.Path); err != nil {
-		writeErr(w, err.Error(), 500)
+		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
 		return
 	}
 
@@ -701,7 +702,7 @@ func (api *SandboxAPI) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.Remove(req.Path); err != nil {
-		writeErr(w, err.Error(), 500)
+		writeAPIErr(w, apierr.Catalogue["file_failed"].WithCause(err.Error()))
 		return
 	}
 
@@ -720,8 +721,34 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeAPIErr writes an LLM-legible error envelope. Prefer this over writeErr at
+// new call sites: it carries a stable code and an actionable remediation.
+func writeAPIErr(w http.ResponseWriter, e apierr.Error) {
+	apierr.Encode(w, e)
+}
+
+// writeErr is the legacy shim. It maps a status to the closest catalogue entry
+// and uses msg as the cause, so every existing call site now emits the
+// {error:{code,message,cause,remediation}} envelope without a per-site rewrite.
+// The cause is built from sandbox ids, paths, and operation names only and never
+// carries a secret value.
 func writeErr(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	writeAPIErr(w, codeForStatus(code).WithCause(msg))
+}
+
+// codeForStatus picks the catalogue entry for an HTTP status used by the legacy
+// writeErr call sites.
+func codeForStatus(status int) apierr.Error {
+	switch status {
+	case http.StatusBadRequest:
+		return apierr.Catalogue["invalid_json"]
+	case http.StatusRequestEntityTooLarge:
+		return apierr.Catalogue["body_too_large"]
+	case http.StatusUnauthorized:
+		return apierr.Catalogue["unauthorized"]
+	case http.StatusNotFound:
+		return apierr.Catalogue["not_found"]
+	default:
+		return apierr.Catalogue["internal"]
+	}
 }
