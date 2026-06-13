@@ -95,3 +95,33 @@ func TestReplicateHuskSecretsSameNamespaceIsNoop(t *testing.T) {
 		t.Fatalf("same-namespace replication should be a noop, got %v", err)
 	}
 }
+
+func TestReconcileHuskPodsReplicatesSecretsIntoPoolNamespace(t *testing.T) {
+	c := newCoreClient(t)
+	ctrlNS := newPKINamespace(t, c)
+	poolNS := newPKINamespace(t, c)
+
+	// Seed the control plane secrets in the controller namespace, as EnsurePKI
+	// would.
+	if err := c.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ctrlNS, Name: controller.CASecretName},
+		Data:       map[string][]byte{"ca.crt": []byte("CA"), "ca.key": []byte("KEY")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ctrlNS, Name: controller.ForkdTLSSecretName},
+		Data:       map[string][]byte{"tls.crt": []byte("L"), "tls.key": []byte("K")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ReplicateHuskSecrets is what reconcileHuskPods calls; assert it bridges
+	// ctrlNS -> poolNS (the reconcile-level wiring is covered by the existing
+	// huskpod envtest, which now runs with ControllerNamespace set).
+	if err := controller.ReplicateHuskSecrets(ctx, c, ctrlNS, poolNS); err != nil {
+		t.Fatal(err)
+	}
+	_ = getSecret(t, c, poolNS, controller.CASecretName)
+	_ = getSecret(t, c, poolNS, controller.ForkdTLSSecretName)
+}

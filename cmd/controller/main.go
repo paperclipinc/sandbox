@@ -133,16 +133,22 @@ func main() {
 	// never logged.
 	peerToken := os.Getenv("FORKD_PEER_TOKEN")
 
+	poolControllerNamespace := os.Getenv("FORKD_NAMESPACE")
+	if poolControllerNamespace == "" {
+		poolControllerNamespace = "mitos"
+	}
+
 	if err := (&controller.SandboxPoolReconciler{
-		Client:            mgr.GetClient(),
-		NodeRegistry:      nodeRegistry,
-		PeerToken:         peerToken,
-		EnableHuskPods:    enableHuskPods,
-		HuskStubImage:     huskStubImage,
-		KVMResourceName:   "mitos.run/kvm",
-		DataDir:           huskDataDir,
-		HuskTLSSecretName: controller.ForkdTLSSecretName,
-		HuskCASecretName:  controller.CASecretName,
+		Client:              mgr.GetClient(),
+		NodeRegistry:        nodeRegistry,
+		PeerToken:           peerToken,
+		EnableHuskPods:      enableHuskPods,
+		HuskStubImage:       huskStubImage,
+		KVMResourceName:     "mitos.run/kvm",
+		DataDir:             huskDataDir,
+		HuskTLSSecretName:   controller.ForkdTLSSecretName,
+		HuskCASecretName:    controller.CASecretName,
+		ControllerNamespace: poolControllerNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)
