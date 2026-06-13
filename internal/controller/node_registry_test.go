@@ -61,6 +61,36 @@ func TestRegisterCarriesConnectionForward(t *testing.T) {
 	}
 }
 
+// TestNodeUnhealthyAfterProbeFailureThreshold asserts a node whose liveness
+// probe (forkd GetCapacity) has failed at least probeFailureThreshold times in a
+// row is treated as unhealthy and dropped from SelectNode, even though its
+// heartbeat is fresh (its pod is still Running, but forkd is hung or the host
+// died). A single failure must NOT flap the node out.
+func TestNodeUnhealthyAfterProbeFailureThreshold(t *testing.T) {
+	r := NewNodeRegistry()
+	node := &NodeInfo{Name: "n1", Endpoint: "10.0.0.1:9090", LastHeartbeat: time.Now()}
+
+	// One failure short of the threshold: still healthy (no single-blip flap).
+	node.probeFailures = probeFailureThreshold - 1
+	r.Register(node)
+	if !r.NodeHealthy("n1") {
+		t.Fatalf("node with %d/%d probe failures must still be healthy", node.probeFailures, probeFailureThreshold)
+	}
+	if _, err := r.SelectNode("", ""); err != nil {
+		t.Fatalf("SelectNode below threshold: %v", err)
+	}
+
+	// At the threshold: unhealthy, dropped from scheduling.
+	node = &NodeInfo{Name: "n1", Endpoint: "10.0.0.1:9090", LastHeartbeat: time.Now(), probeFailures: probeFailureThreshold}
+	r.Register(node)
+	if r.NodeHealthy("n1") {
+		t.Fatal("node at the probe-failure threshold must be unhealthy")
+	}
+	if _, err := r.SelectNode("", ""); err == nil {
+		t.Fatal("SelectNode must not place onto a node failing its liveness probe")
+	}
+}
+
 func TestNodesWithTemplate(t *testing.T) {
 	r := NewNodeRegistry()
 	r.Register(&NodeInfo{Name: "a", TemplateIDs: []string{"py"}})

@@ -58,11 +58,27 @@ type NodeInfo struct {
 	// scheduler uses it to project the marginal memory cost of placing a fork.
 	TemplateEstimates map[string]TemplateCapacity
 	LastHeartbeat     time.Time
+	// probeFailures is the number of CONSECUTIVE forkd liveness probes
+	// (GetCapacity) that have failed for this node. Discovery resets it to 0 on a
+	// successful probe and increments it on a failure (carried across the
+	// every-15s re-register). A node at or above probeFailureThreshold is treated
+	// as unhealthy and dropped from scheduling even while its pod is still
+	// Running: a hung forkd or a dead host whose pod has not yet been observed
+	// gone must not keep receiving forks. A single failure does NOT flap a node
+	// out (the threshold absorbs a transient blip).
+	probeFailures int
 	// TLS, when set, overrides the registry-level TLS config for dials to
 	// this node; lets tests run mixed TLS/insecure fleets in one registry.
 	TLS  *tls.Config
 	conn *grpc.ClientConn
 }
+
+// probeFailureThreshold is the number of CONSECUTIVE failed liveness probes
+// after which a node is treated as unhealthy. Set above 1 so a single transient
+// probe blip does not flap a node out of the schedulable set; at the every-15s
+// discovery interval, three failures means roughly 45s of an unreachable forkd
+// before the node is dropped, well inside the 2-minute heartbeat TTL.
+const probeFailureThreshold = 3
 
 // TemplateCapacity is the controller-side mirror of the forkd proto
 // TemplateCapacity: the per-template memory estimate the scheduler bin-packs
@@ -460,8 +476,30 @@ func (r *NodeRegistry) PruneStale(maxAge time.Duration) int {
 	return pruned
 }
 
+// isHealthy reports whether the node is schedulable. Health requires BOTH a
+// recent heartbeat (the 2-minute last-seen TTL) AND a live forkd: a node whose
+// liveness probe (GetCapacity) has failed probeFailureThreshold times in a row
+// is unhealthy even with a fresh heartbeat, since its pod can still be Running
+// while forkd is hung or its host is dead. This ties health to a LIVENESS
+// signal, not just last-seen, so a hung forkd cannot stay schedulable.
 func (n *NodeInfo) isHealthy() bool {
+	if n.probeFailures >= probeFailureThreshold {
+		return false
+	}
 	return time.Since(n.LastHeartbeat) < 2*time.Minute
+}
+
+// priorProbeFailures returns the consecutive-probe-failure count currently
+// recorded for the named node, or 0 when the node is not registered. Discovery
+// uses it to carry the count across the every-15s re-register (which replaces
+// the whole NodeInfo struct).
+func (r *NodeRegistry) priorProbeFailures(name string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if node, ok := r.nodes[name]; ok {
+		return node.probeFailures
+	}
+	return 0
 }
 
 func (n *NodeInfo) hasSnapshot(id string) bool {

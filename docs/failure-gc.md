@@ -100,17 +100,46 @@ bootstrap window where state is lost.
   fresh `GarbageCollector` with no prior state against live forkd VMs
   (`TestGCSweepsOrphanVMs`, `TestGCLiveClaimByNameNotSwept`).
 
-### NodeLost: a claim on a lost node reaches a terminal phase
+### Node health: liveness, not just last-seen
 
-A Ready claim whose node is no longer a healthy registered node is transitioned
-to the terminal `Failed` phase with a `NodeLost` reason and `FinishedAt` stamped.
-The node is gone, so there is nothing to terminate; the GC only stamps state. The
-orphan sweep and NodeLost never fight: the sweep visits only healthy nodes, so a
-claim on a lost node is never swept. A claim on a still-healthy node is untouched.
+A node is schedulable only while it is healthy. Health requires BOTH a recent
+heartbeat (the 2-minute last-seen TTL on `LastHeartbeat`) AND a live forkd: a
+node whose forkd liveness probe (the discovery `GetCapacity` call, every 15s)
+fails `probeFailureThreshold` (3) times in a row is marked unhealthy and dropped
+from `SelectNode`, even with a fresh heartbeat. This closes the gap where a pod
+stays `Running` while forkd is hung or the host is dead: previously such a node
+stayed healthy and schedulable for the full 2-minute TTL on stale capacity. The
+threshold absorbs a transient single-probe blip (no flapping); at the 15s
+interval, 3 failures is roughly 45s before the node leaves the schedulable set,
+well inside the heartbeat TTL.
 
-- Bound: within one `Interval` of the node going unhealthy or leaving the
-  registry.
-- Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`.
+- Bound: roughly `probeFailureThreshold * discovery interval` (about 45s) before
+  a hung forkd's node is dropped from scheduling.
+- Proving tests: `TestNodeUnhealthyAfterProbeFailureThreshold`,
+  `TestSyncPodsDropsNodeOnRepeatedProbeFailure`.
+
+### NodeLost: a raw-forkd claim on a lost node reaches a terminal phase
+
+In RAW-FORKD mode, a Ready claim whose node is no longer a healthy registered
+node is transitioned to the terminal `Failed` phase with a `NodeLost` reason and
+`FinishedAt` stamped. The node is gone, so there is nothing to terminate; the GC
+only stamps state. The ephemeral VM died with the node and there is no recovery,
+so failing the claim (and letting the TTL pass reap it) is correct. The orphan
+sweep and NodeLost never fight: the sweep visits only healthy nodes, so a claim
+on a lost node is never swept. A claim on a still-healthy node is untouched.
+
+In HUSK mode, `markNodeLost` is a no-op: a Ready husk-backed claim recovers from
+node loss by RE-PENDING onto a replacement dormant slot (owned by
+`checkHuskPodLost` and the husk pod watch, which the warm pool self-heals). The
+GC must not race that re-pend into a terminal `Failed`, so it skips the
+node-lost-fail entirely in husk mode. The GC carries `EnableHuskPods` from the
+controller run mode to make this decision.
+
+- Bound: raw mode fails within one `Interval` of the node going unhealthy or
+  leaving the registry; husk mode re-pends on the pod event (or the claim's own
+  requeue).
+- Proving tests: `TestGCMarksNodeLost`, `TestGCLeavesHealthyNodeClaim`,
+  `TestGCInHuskModeDoesNotFailNodeLostClaim`.
 
 ### TTL hygiene: finished objects are deleted, including early-failed claims
 

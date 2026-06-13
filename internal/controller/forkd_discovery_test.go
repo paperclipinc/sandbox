@@ -98,3 +98,46 @@ func TestSyncPodsRegistersAndRefreshesCapacity(t *testing.T) {
 		t.Fatal("maxSandboxes not refreshed from GetCapacity")
 	}
 }
+
+// TestSyncPodsDropsNodeOnRepeatedProbeFailure drives the liveness signal: a pod
+// is Running (so NodeInfoFromPod registers it) but its forkd GetCapacity probe
+// always fails (the endpoint is dead, simulating a hung forkd or a dead host
+// whose pod is still Running). After probeFailureThreshold consecutive failures
+// the node is unhealthy and excluded from SelectNode; a single failure does not
+// flap it out.
+func TestSyncPodsDropsNodeOnRepeatedProbeFailure(t *testing.T) {
+	registry := NewNodeRegistry()
+	// Point the derived Endpoint at a closed port so every GetCapacity dial/RPC
+	// fails. Use a short bounded timeout via the discovery's own 5s call timeout.
+	d := &ForkdDiscovery{
+		Registry: registry,
+		GRPCPort: 1, // 127.0.0.1:1 refuses connections
+		HTTPPort: 2,
+	}
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "forkd-dead",
+			Labels: map[string]string{"app.kubernetes.io/component": "forkd"},
+		},
+		Spec:   corev1.PodSpec{NodeName: "dead-worker"},
+		Status: corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+
+	// First sync: one probe failure. Below the threshold, the node is still
+	// healthy (a single blip must not flap it out).
+	d.syncPods(context.Background(), []corev1.Pod{pod})
+	if !registry.NodeHealthy("dead-worker") {
+		t.Fatal("a single probe failure must not mark the node unhealthy")
+	}
+
+	// Keep syncing until the consecutive-failure count crosses the threshold.
+	for i := 1; i < probeFailureThreshold; i++ {
+		d.syncPods(context.Background(), []corev1.Pod{pod})
+	}
+	if registry.NodeHealthy("dead-worker") {
+		t.Fatalf("after %d consecutive probe failures the node must be unhealthy", probeFailureThreshold)
+	}
+	if _, err := registry.SelectNode("", ""); err == nil {
+		t.Fatal("SelectNode must not place onto a node failing its liveness probe")
+	}
+}

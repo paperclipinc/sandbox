@@ -56,11 +56,24 @@ depends on whether the node is already warm for `T`:
 Both estimates come from the node's own per-template capacity record when it has
 one, then from any node that has forked `T`, then from a configured default
 (256 MiB shared, 8 MiB unique) so an unknown template is never treated as free.
-A node admits a fork only when its projected cost fits its remaining budget:
+A node admits a fork only when it is below its sandbox-count ceiling AND its
+projected cost fits its remaining budget:
 
 ```
-projectedCost(node, T) <= budget(node) - MemoryUsed(node)
+ActiveSandboxes(node) < MaxSandboxes(node)   # count ceiling (MaxSandboxes 0 = unlimited)
+projectedCost(node, T) <= budget(node) - MemoryUsed(node)   # memory headroom
 ```
+
+### Sandbox-count ceiling
+
+forkd enforces a per-node `MaxSandboxes` cap (the host-DoS ceiling, PR #110):
+`engine.Fork` past it returns gRPC `ResourceExhausted`. Both `ActiveSandboxes`
+and `MaxSandboxes` arrive on the capacity heartbeat, so the scheduler also
+enforces the cap at SCHEDULE time: a node where `MaxSandboxes > 0` and
+`ActiveSandboxes >= MaxSandboxes` does not admit, so a full node is not selected
+and the node-side `ResourceExhausted` reject becomes a rare race (the window
+between `SelectNode` and the `Fork` RPC) rather than the primary path to the cap.
+`MaxSandboxes` 0 (unset, e.g. the mock engine) imposes no count ceiling.
 
 ## The bin-packing policy
 
@@ -122,6 +135,15 @@ The claim reconciler then:
 A claim that becomes admittable before the deadline (a node frees memory or a
 new node joins) proceeds to `Restoring` as usual, and the pending stamp is
 cleared so a later shortage starts a fresh clock.
+
+The same `NoCapacity` machinery also catches the schedule-time race on the
+RAW-FORKD path: when `SelectNode` picks a node but the `Fork` RPC is rejected
+with `ResourceExhausted` (the node filled to its `MaxSandboxes` cap in the
+window after selection) or `Unavailable` (the node went away mid-fork), the
+claim RE-PENDS through `reconcileNoCapacity` instead of failing terminally, so
+it retries on a node with headroom and only fails after the bounded wait. A
+`NotFound` keeps its own snapshot-not-yet-on-node retry; any other forkd error
+still fails the claim. (The husk path does not use the `Fork` RPC.)
 
 A claim that stays capacity-pending longer than `--max-pending-duration`
 (default 5m) FAILS cleanly: `Phase = Failed`, a `Ready=False` condition with

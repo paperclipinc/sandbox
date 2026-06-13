@@ -82,6 +82,7 @@ func (d *ForkdDiscovery) sync(ctx context.Context) {
 
 // syncPods registers every running forkd pod and refreshes its capacity.
 func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
+	logger := log.FromContext(ctx).WithName("forkd-discovery")
 	for _, pod := range pods {
 		info, ok := NodeInfoFromPod(pod, d.GRPCPort, d.HTTPPort, d.CASPort)
 		if !ok {
@@ -91,7 +92,17 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 		// Populate capacity before the registry ever sees the struct;
 		// registered NodeInfo fields are read under the registry's RLock and
 		// must never be mutated afterwards outside it.
-		d.refreshCapacity(ctx, info)
+		probeOK := d.refreshCapacity(ctx, info)
+		// Tie health to the LIVENESS probe: a failed GetCapacity (forkd hung or
+		// host dead while the pod is still Running) increments the consecutive
+		// failure count carried across re-registers; a success resets it. A node
+		// past the threshold is dropped from scheduling by isHealthy.
+		if probeOK {
+			info.probeFailures = 0
+		} else {
+			info.probeFailures = d.Registry.priorProbeFailures(info.Name) + 1
+			logger.Info("forkd liveness probe failed", "node", info.Name, "consecutiveFailures", info.probeFailures, "threshold", probeFailureThreshold)
+		}
 		d.Registry.Register(info)
 	}
 }
@@ -99,22 +110,24 @@ func (d *ForkdDiscovery) syncPods(ctx context.Context, pods []corev1.Pod) {
 // refreshCapacity fills template/capacity fields via forkd's GetCapacity,
 // dialing the node directly (the node is not registered yet; the registry
 // must only ever see fully-populated NodeInfo structs; see AddTemplate's
-// locking contract).
-func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
+// locking contract). It returns whether the probe SUCCEEDED: a failed probe is
+// the liveness signal the caller uses to mark a node unhealthy, so a hung forkd
+// (pod still Running) is not registered as schedulable on stale capacity.
+func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) bool {
 	creds := insecure.NewCredentials()
 	if d.TLS != nil {
 		creds = credentials.NewTLS(d.TLS)
 	}
 	conn, err := grpc.NewClient(info.Endpoint, grpc.WithTransportCredentials(creds))
 	if err != nil {
-		return
+		return false
 	}
 	defer conn.Close()
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	resp, err := forkdpb.NewForkDaemonClient(conn).GetCapacity(cctx, &forkdpb.GetCapacityRequest{})
 	if err != nil {
-		return
+		return false
 	}
 	info.ActiveSandboxes = resp.ActiveSandboxes
 	info.MaxSandboxes = resp.MaxSandboxes
@@ -136,6 +149,7 @@ func (d *ForkdDiscovery) refreshCapacity(ctx context.Context, info *NodeInfo) {
 		}
 		info.TemplateEstimates = estimates
 	}
+	return true
 }
 
 // NodeInfoFromPod maps a forkd pod to a NodeInfo. Returns false when the pod
