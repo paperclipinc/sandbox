@@ -119,6 +119,9 @@ func main() {
 	mux.Handle("POST /v1/exec", apiHandler)
 	mux.Handle("POST /v1/exec/stream", apiHandler)
 	mux.Handle("POST /v1/files/", apiHandler)
+	// The PTY route lives on the SandboxAPI's own outer mux (registered there
+	// outside requireBearer); delegate the WebSocket upgrade GET to it.
+	mux.Handle("GET /v1/pty", apiHandler)
 
 	log.Printf("sandbox-server listening on %s (mock=%v)", addr, mockMode)
 	if err := http.ListenAndServe(addr, mux); err != nil {
