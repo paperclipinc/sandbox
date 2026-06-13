@@ -10,6 +10,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/kms"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +48,25 @@ type SandboxPoolReconciler struct {
 	// hostPath is rooted here (<DataDir>/templates/<id>/snapshot). Empty defaults
 	// to /var/lib/mitos. Only used when EnableHuskPods is true.
 	DataDir string
+	// HuskMemoryHeadroom is the FIXED-FLOOR memory headroom added on top of a
+	// husk pod's memory request to size its memory LIMIT (production-blocker #2,
+	// cap 1). The limit must include headroom because the cgroup that the limit
+	// caps holds MORE than the guest's configured RAM: the Firecracker VMM
+	// itself, the husk-stub process, and copy-on-write dirty-page slack as the
+	// restored VM faults in and writes pages. A limit equal to the request would
+	// OOM-kill a VM running normally at its configured RAM (destroying the
+	// activate latency); the headroom is what makes the limit transparent to a
+	// legitimate VM while still capping a runaway. The effective headroom is
+	// max(this floor, HuskMemoryHeadroomPercent% of the request) so a large VM
+	// gets proportional slack and a small VM gets at least the floor. Zero
+	// selects the default floor (defaultHuskMemoryHeadroom, 256Mi). Tunable via
+	// the controller --husk-memory-headroom flag.
+	HuskMemoryHeadroom resource.Quantity
+	// HuskMemoryHeadroomPercent is the PROPORTIONAL memory headroom (percent of
+	// the memory request) considered alongside HuskMemoryHeadroom; the larger of
+	// the two is used. Zero selects the default (defaultHuskMemoryHeadroomPercent,
+	// 25). Tunable via the controller --husk-memory-headroom-percent flag.
+	HuskMemoryHeadroomPercent int
 	// HuskTLSSecretName is the Secret holding the husk stub's mTLS server leaf
 	// (tls.crt, tls.key), mounted into each husk pod so the stub can serve the
 	// mTLS network control. Only used when EnableHuskPods is true.

@@ -170,6 +170,44 @@ var (
 	defaultHuskMemory = resource.MustParse("512Mi")
 )
 
+// Memory-limit headroom defaults (production-blocker #2, cap 1). The husk
+// container's memory LIMIT is sized = memory request + headroom, where the
+// headroom is max(defaultHuskMemoryHeadroom, defaultHuskMemoryHeadroomPercent%
+// of the request). The headroom exists because the cgroup the limit caps holds
+// MORE than the guest's configured RAM: the Firecracker VMM, the husk-stub, and
+// copy-on-write dirty-page slack as the restored VM faults in and writes pages.
+// A limit equal to the request would OOM-kill a VM running normally at its
+// configured RAM and destroy the activate latency; the headroom is what keeps
+// the limit transparent to a legitimate VM while still capping a runaway tenant.
+// Both are operator-tunable via the controller flags.
+var defaultHuskMemoryHeadroom = resource.MustParse("256Mi")
+
+const defaultHuskMemoryHeadroomPercent = 25
+
+// huskMemoryLimit returns the husk container's memory limit: the memory request
+// plus the headroom max(floor, percent% of the request). It never returns a
+// value less than or equal to the request, so a VM at its configured RAM is
+// never OOM-killed by a too-tight limit. floor zero selects the default floor;
+// percent zero selects the default percent.
+func huskMemoryLimit(memReq, floor resource.Quantity, percent int) resource.Quantity {
+	if floor.IsZero() {
+		floor = defaultHuskMemoryHeadroom
+	}
+	if percent <= 0 {
+		percent = defaultHuskMemoryHeadroomPercent
+	}
+	// Proportional component: percent% of the request, computed in bytes to
+	// avoid losing precision on binary-SI quantities.
+	proportional := resource.NewQuantity(memReq.Value()*int64(percent)/100, memReq.Format)
+	headroom := floor
+	if proportional.Cmp(headroom) > 0 {
+		headroom = *proportional
+	}
+	limit := memReq.DeepCopy()
+	limit.Add(headroom)
+	return limit
+}
+
 // buildHuskPod builds the warm-pool husk pod for a pool. The pod is
 // GenerateName <pool>-husk- in the pool namespace, owner-referenced to the pool
 // for garbage collection, labeled for the warm-pool selector, and runs the
@@ -192,6 +230,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	if !template.Spec.Resources.Memory.IsZero() {
 		memReq = template.Spec.Resources.Memory
 	}
+	// Memory LIMIT = request + headroom (production-blocker #2, cap 1). The
+	// headroom (floor + proportional) is operator-tunable on the reconciler; the
+	// zero values select the documented defaults (256Mi floor, 25 percent).
+	memLimit := huskMemoryLimit(memReq, r.HuskMemoryHeadroom, r.HuskMemoryHeadroomPercent)
 
 	// SecurityContext decisions (each load-bearing; the husk pod is the new
 	// execution surface, so it is locked down and the device exception is the KVM
@@ -543,11 +585,26 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						Limits: corev1.ResourceList{
 							// The KVM device is a countable device-plugin
 							// resource: request and limit must be equal and
-							// non-zero. cpu/memory are left as requests only
-							// (no hard limit) so the dormant-to-active memory
-							// growth is not OOM-killed by a tight limit; sizing
-							// the limit is a conformance-slice decision.
+							// non-zero.
 							corev1.ResourceName(kvmResource): resource.MustParse("1"),
+							// Memory LIMIT (production-blocker #2, cap 1): the
+							// host-DoS cap. Sized = request + headroom so a VM
+							// running normally at its configured RAM is NEVER
+							// OOM-killed (the headroom covers the Firecracker
+							// VMM, the husk-stub, and CoW dirty-page slack),
+							// while a runaway tenant is capped before it can OOM
+							// the node. This is an O(1) SIZING decision at pod
+							// CREATE, off the activate/fork hot path: the kubelet
+							// enforces the cgroup limit, the controller never
+							// throttles the running VM. A too-tight limit (limit
+							// == request) would OOM-kill the VM and destroy the
+							// activate latency, which is why the headroom is
+							// load-bearing and operator-tunable.
+							corev1.ResourceMemory: memLimit,
+							// cpu is deliberately left WITHOUT a limit: a cpu
+							// limit throttles the VM (cgroup cpu.max) and would
+							// hurt the activate latency. cpu stays requests-only
+							// for scheduler truth.
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{

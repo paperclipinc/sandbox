@@ -98,6 +98,18 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if got := ctr.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
 		t.Errorf("memory request = %s, want 1Gi (from template)", got.String())
 	}
+	// Memory LIMIT = request + headroom (production-blocker #2, cap 1): the VM
+	// at its configured RAM is never OOM-killed but a runaway is capped. Default
+	// headroom max(256Mi, 25%); for 1Gi that is 256Mi.
+	wantMemLimit := resource.MustParse("1Gi")
+	wantMemLimit.Add(resource.MustParse("256Mi"))
+	if got := ctr.Resources.Limits[corev1.ResourceMemory]; got.Cmp(wantMemLimit) != 0 {
+		t.Errorf("memory limit = %s, want %s (request + headroom)", got.String(), wantMemLimit.String())
+	}
+	// cpu stays requests-only: a cpu limit would throttle and hurt activate latency.
+	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
+		t.Error("cpu limit must NOT be set (throttling hurts activate latency)")
+	}
 
 	sc := ctr.SecurityContext
 	if sc == nil {
@@ -219,6 +231,22 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	kvm := corev1.ResourceName("mitos.run/kvm")
 	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("kvm request = %s, want 1 (the device-plugin exception)", got.String())
+	}
+
+	// production-blocker #2, cap 1: the memory LIMIT is set (host-DoS cap) and
+	// strictly exceeds the request (headroom so a legitimate VM is never
+	// OOM-killed). Setting a limit does not affect PSA admission (PSA does not
+	// gate on resource limits), so this stays restricted-clean.
+	ctr := pod.Spec.Containers[0]
+	lim, ok := ctr.Resources.Limits[corev1.ResourceMemory]
+	if !ok {
+		t.Fatal("memory limit must be set (host-DoS cap, production-blocker #2)")
+	}
+	if req := ctr.Resources.Requests[corev1.ResourceMemory]; lim.Cmp(req) <= 0 {
+		t.Errorf("memory limit %s must exceed request %s (headroom)", lim.String(), req.String())
+	}
+	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
+		t.Error("cpu limit must NOT be set (throttling hurts activate latency)")
 	}
 }
 
@@ -539,6 +567,122 @@ func TestBuildHuskPodDefaultSizing(t *testing.T) {
 	}
 	if got := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
 		t.Errorf("default memory request = %s, want 512Mi", got.String())
+	}
+	// Default-sized VM (512Mi) still gets a memory limit with headroom: 512Mi +
+	// max(256Mi, 25% of 512Mi=128Mi) = 512Mi + 256Mi = 768Mi.
+	wantMemLimit := resource.MustParse("512Mi")
+	wantMemLimit.Add(resource.MustParse("256Mi"))
+	if got := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]; got.Cmp(wantMemLimit) != 0 {
+		t.Errorf("default memory limit = %s, want %s (request + headroom)", got.String(), wantMemLimit.String())
+	}
+}
+
+// TestBuildHuskPodMemoryLimitWithHeadroom covers production-blocker #2, cap 1:
+// the husk container carries a memory LIMIT (today: requests only, "no hard
+// limit", so a tenant VM can OOM the node). The limit is sized = memory request
+// + headroom so a VM running at its configured RAM is never OOM-killed (the
+// headroom covers the Firecracker VMM, the husk-stub, and CoW dirty-page slack),
+// while a runaway is capped. The default headroom is max(256Mi, 25% of the
+// request). cpu stays requests-only (a cpu limit would throttle and hurt the
+// activate latency).
+func TestBuildHuskPodMemoryLimitWithHeadroom(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mem-pool", Namespace: "default", UID: "pool-uid-mem"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "mem-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "mem-tmpl", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Image:     "python:3.12-slim",
+			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("1Gi")},
+		},
+	}
+
+	c := k8sClient
+	r := &controller.SandboxPoolReconciler{Client: c}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	ctr := pod.Spec.Containers[0]
+
+	// request stays the configured 1Gi (scheduler truth).
+	if got := ctr.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Errorf("memory request = %s, want 1Gi", got.String())
+	}
+	// limit = 1Gi + max(256Mi, 25% of 1Gi) = 1Gi + 256Mi = 1280Mi.
+	wantLimit := resource.MustParse("1Gi")
+	wantLimit.Add(resource.MustParse("256Mi"))
+	if got := ctr.Resources.Limits[corev1.ResourceMemory]; got.Cmp(wantLimit) != 0 {
+		t.Errorf("memory limit = %s, want %s (request + 256Mi headroom)", got.String(), wantLimit.String())
+	}
+	// The limit must be STRICTLY GREATER than the request: a too-tight limit
+	// (limit == request) OOM-kills the VM as soon as the VMM and CoW slack are
+	// counted, destroying the activate latency. This is the load-bearing invariant.
+	req := ctr.Resources.Requests[corev1.ResourceMemory]
+	if lim := ctr.Resources.Limits[corev1.ResourceMemory]; lim.Cmp(req) <= 0 {
+		t.Errorf("memory limit %s must exceed request %s (headroom for the VMM, stub, CoW slack)", lim.String(), req.String())
+	}
+
+	// cpu has NO limit (a cpu limit throttles and hurts activate latency); cpu
+	// stays requests-only for scheduler truth.
+	if _, ok := ctr.Resources.Limits[corev1.ResourceCPU]; ok {
+		t.Errorf("cpu limit must NOT be set (cpu throttling hurts activate latency); limits = %+v", ctr.Resources.Limits)
+	}
+}
+
+// TestBuildHuskPodMemoryLimitProportionalForLargeVM verifies the percentage
+// component dominates for a large VM: a 16Gi request gets 25% = 4Gi of headroom
+// (not the 256Mi floor), so the absolute slack scales with the VM.
+func TestBuildHuskPodMemoryLimitProportionalForLargeVM(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "big-pool", Namespace: "default", UID: "pool-uid-big"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "big-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "big-tmpl", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Image:     "python:3.12-slim",
+			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("16Gi")},
+		},
+	}
+
+	c := k8sClient
+	r := &controller.SandboxPoolReconciler{Client: c}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	ctr := pod.Spec.Containers[0]
+
+	// limit = 16Gi + max(256Mi, 25% of 16Gi=4Gi) = 16Gi + 4Gi = 20Gi.
+	wantLimit := resource.MustParse("16Gi")
+	wantLimit.Add(resource.MustParse("4Gi"))
+	if got := ctr.Resources.Limits[corev1.ResourceMemory]; got.Cmp(wantLimit) != 0 {
+		t.Errorf("memory limit = %s, want %s (request + 25%% headroom)", got.String(), wantLimit.String())
+	}
+}
+
+// TestBuildHuskPodMemoryLimitConfigurableHeadroom verifies an operator can tune
+// the fixed-floor headroom via the reconciler field (the --husk-memory-headroom
+// flag): a 512Mi floor produces request + 512Mi for a small VM where the floor
+// dominates the percentage.
+func TestBuildHuskPodMemoryLimitConfigurableHeadroom(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "cfg-pool", Namespace: "default", UID: "pool-uid-cfg"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "cfg-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cfg-tmpl", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Image:     "python:3.12-slim",
+			Resources: v1alpha1.SandboxResources{Memory: resource.MustParse("512Mi")},
+		},
+	}
+
+	c := k8sClient
+	headroom := resource.MustParse("512Mi")
+	r := &controller.SandboxPoolReconciler{Client: c, HuskMemoryHeadroom: headroom}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
+	ctr := pod.Spec.Containers[0]
+
+	// limit = 512Mi + max(512Mi floor, 25% of 512Mi=128Mi) = 512Mi + 512Mi = 1Gi.
+	if got := ctr.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Errorf("memory limit = %s, want 1Gi (request + 512Mi configured floor)", got.String())
 	}
 }
 

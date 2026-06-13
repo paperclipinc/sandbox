@@ -11,6 +11,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/eventfeed"
 	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/observability"
+	resourceapi "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -52,6 +53,8 @@ func main() {
 	var huskStubImage string
 	var huskControlPort int
 	var huskDataDir string
+	var huskMemoryHeadroom string
+	var huskMemoryHeadroomPercent int
 	var eventSinkURL string
 	var kekFile string
 
@@ -65,6 +68,8 @@ func main() {
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDataDir, "husk-data-dir", "/var/lib/mitos", "forkd data directory on the node; the husk pod's read-only snapshot hostPath is rooted here (<dir>/templates/<id>/snapshot). Only used with --enable-husk-pods.")
+	flag.StringVar(&huskMemoryHeadroom, "husk-memory-headroom", "256Mi", "Fixed-floor memory headroom added on top of a husk pod's memory request to size its memory LIMIT (production-blocker #2, cap 1). The limit must exceed the request because the cgroup holds MORE than the guest RAM: the Firecracker VMM, the husk-stub, and copy-on-write dirty-page slack. The effective headroom is max(this floor, --husk-memory-headroom-percent% of the request), so a large VM gets proportional slack and a small VM gets at least this floor. A too-tight limit OOM-kills a normal VM and destroys the activate latency; raise this if pods are OOM-killed at their configured RAM. Only used with --enable-husk-pods.")
+	flag.IntVar(&huskMemoryHeadroomPercent, "husk-memory-headroom-percent", 25, "Proportional memory headroom (percent of the memory request) for a husk pod's memory LIMIT, considered alongside --husk-memory-headroom; the larger of the two is used. Only used with --enable-husk-pods.")
 	flag.DurationVar(&maxPendingDuration, "max-pending-duration", controller.DefaultMaxPendingDuration, "How long a claim may stay Pending for lack of node capacity before it fails with a capacity-exhaustion error. Scale out nodes or raise the overcommit factor to admit more sandboxes.")
 	flag.StringVar(&eventSinkURL, "event-sink-url", "", "Optional operator webhook the controller POSTs the workspace revision change feed to as CloudEvents 1.0 (workspace.revision.created, sandbox.phase.changed). Empty disables the webhook (Kubernetes Events are still always recorded). The feed carries names, content digests, lineage, and phases only; never secret values. The URL is operator config, the same trust class as a git rendezvous remote (see docs/threat-model.md).")
 	flag.StringVar(&kekFile, "kek-file", "", "Path to the 32-byte AES-256 KEK file (mounted from a Kubernetes Secret) used to WRAP each Encrypted template's per-template DEK (envelope encryption). REQUIRED when any reconciled template sets Encrypted: true; without it EnsureEncKey fails closed. The KEK is a secret value: it is never logged. Cloud KMS providers (AWS/GCP/Vault) are a documented follow-up.")
@@ -157,18 +162,26 @@ func main() {
 		logger.Info("envelope encryption KMS loaded", "kekID", w.KEKID())
 	}
 
+	huskHeadroomQty, err := resourceapi.ParseQuantity(huskMemoryHeadroom)
+	if err != nil {
+		logger.Error(err, "invalid --husk-memory-headroom", "value", huskMemoryHeadroom)
+		os.Exit(1)
+	}
+
 	if err := (&controller.SandboxPoolReconciler{
-		Client:              mgr.GetClient(),
-		NodeRegistry:        nodeRegistry,
-		PeerToken:           peerToken,
-		EnableHuskPods:      enableHuskPods,
-		HuskStubImage:       huskStubImage,
-		KVMResourceName:     "mitos.run/kvm",
-		DataDir:             huskDataDir,
-		HuskTLSSecretName:   controller.ForkdTLSSecretName,
-		HuskCASecretName:    controller.CASecretName,
-		ControllerNamespace: poolControllerNamespace,
-		KMS:                 encKMS,
+		Client:                    mgr.GetClient(),
+		NodeRegistry:              nodeRegistry,
+		PeerToken:                 peerToken,
+		EnableHuskPods:            enableHuskPods,
+		HuskStubImage:             huskStubImage,
+		KVMResourceName:           "mitos.run/kvm",
+		DataDir:                   huskDataDir,
+		HuskMemoryHeadroom:        huskHeadroomQty,
+		HuskMemoryHeadroomPercent: huskMemoryHeadroomPercent,
+		HuskTLSSecretName:         controller.ForkdTLSSecretName,
+		HuskCASecretName:          controller.CASecretName,
+		ControllerNamespace:       poolControllerNamespace,
+		KMS:                       encKMS,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)
