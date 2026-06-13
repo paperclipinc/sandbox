@@ -145,6 +145,11 @@ func TestHandlerWithWrongBearerIs401(t *testing.T) {
 	if resp.StatusCode != 401 {
 		t.Fatalf("status = %d, body = %s, want 401", resp.StatusCode, body)
 	}
+	// The 401 envelope must never reflect the presented bearer back to the
+	// caller; the cause is a fixed string, not the supplied token.
+	if strings.Contains(body, "tok-wrong") {
+		t.Fatalf("401 body reflected the presented token: %s", body)
+	}
 }
 
 func TestHandlerNoTokenRegisteredFailsClosed(t *testing.T) {
