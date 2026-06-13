@@ -13,6 +13,7 @@ resources:
   - crds/mitos.run_sandboxclaims.yaml
   - crds/mitos.run_sandboxforks.yaml
   - controller/namespace.yaml
+  - imagepullsecret.yaml
   - rbac/serviceaccount.yaml
   - rbac/clusterrole.yaml
   - rbac/clusterrolebinding.yaml
