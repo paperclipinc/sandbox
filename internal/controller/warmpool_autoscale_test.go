@@ -104,3 +104,33 @@ func TestComputeDesiredWarm(t *testing.T) {
 		})
 	}
 }
+
+func TestPoolDemandTracker(t *testing.T) {
+	d := NewPoolDemand()
+	key := "ns/poolA"
+
+	if _, ok := d.LastArrival(key); ok {
+		t.Fatal("expected no arrival recorded yet")
+	}
+
+	t1 := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	d.RecordArrival(key, t1)
+	got, ok := d.LastArrival(key)
+	if !ok || !got.Equal(t1) {
+		t.Fatalf("LastArrival = %v ok=%v, want %v", got, ok, t1)
+	}
+
+	// A later arrival advances the timestamp; an earlier one does not move it back.
+	t2 := t1.Add(time.Minute)
+	d.RecordArrival(key, t2)
+	d.RecordArrival(key, t1)
+	got, _ = d.LastArrival(key)
+	if !got.Equal(t2) {
+		t.Fatalf("LastArrival = %v, want the latest %v", got, t2)
+	}
+
+	// Independent pools are tracked independently.
+	if _, ok := d.LastArrival("ns/poolB"); ok {
+		t.Fatal("poolB must be independent of poolA")
+	}
+}

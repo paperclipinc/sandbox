@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"sync"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
@@ -71,4 +72,42 @@ func computeDesiredWarm(pool *v1alpha1.SandboxPool, dormant, inUse int32, lastCl
 		return target, true
 	}
 	return dormant, false
+}
+
+// PoolDemand tracks the most recent claim-arrival time per pool, the demand
+// signal the autoscaler uses to decide whether the scale-down cooldown has
+// elapsed. It is process-local and best-effort: a controller restart loses the
+// in-flight window and the pool simply treats the next reconcile as "no recent
+// claim" (it will not scale down until a fresh cooldown elapses or LastArrival
+// is repopulated by the next claim). It holds only timestamps, never any claim
+// payload, so it carries no secret. Safe for concurrent use.
+type PoolDemand struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// NewPoolDemand builds an empty demand tracker.
+func NewPoolDemand() *PoolDemand {
+	return &PoolDemand{last: make(map[string]time.Time)}
+}
+
+// RecordArrival stamps a claim arrival for the pool key (namespace/name) at t,
+// advancing the recorded time only forward so an out-of-order reconcile cannot
+// move the window backwards.
+func (d *PoolDemand) RecordArrival(key string, t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if prev, ok := d.last[key]; ok && t.Before(prev) {
+		return
+	}
+	d.last[key] = t
+}
+
+// LastArrival returns the most recent recorded claim-arrival time for the pool
+// key and whether one was recorded.
+func (d *PoolDemand) LastArrival(key string) (time.Time, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	t, ok := d.last[key]
+	return t, ok
 }
