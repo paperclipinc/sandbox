@@ -23,6 +23,11 @@ type MockEngine struct {
 	counter   atomic.Int64
 	// Simulated fork latency
 	ForkDelay time.Duration
+	// ForkErr, when set, is returned by every Fork call before any sandbox is
+	// created. Tests use it to simulate a node-side fork rejection (e.g.
+	// fork.ErrAtCapacity -> gRPC ResourceExhausted) without driving the engine
+	// to its real cap. Read under the lock.
+	ForkErr error
 	// PausedSources records source sandbox IDs that were "paused" during ForkRunning.
 	PausedSources []string
 	// terminated records every sandbox ID passed to Terminate, in call order,
@@ -146,8 +151,12 @@ func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkRes
 	start := time.Now()
 
 	e.mu.RLock()
+	forkErr := e.ForkErr
 	_, ok := e.findTemplateBySnapshot(snapshotID)
 	e.mu.RUnlock()
+	if forkErr != nil {
+		return nil, forkErr
+	}
 	if !ok {
 		return nil, fmt.Errorf("snapshot %s not found", snapshotID)
 	}

@@ -16,8 +16,24 @@ import (
 
 // isNotFound reports whether err (possibly wrapped) carries gRPC NotFound.
 func isNotFound(err error) bool {
+	return hasGRPCCode(err, codes.NotFound)
+}
+
+// isRetryableCapacity reports whether err (possibly wrapped) carries a forkd
+// Fork rejection that should re-pend the claim rather than fail it terminally:
+// ResourceExhausted (the node hit its MaxSandboxes count cap, PR #110, a
+// schedule-time race) or Unavailable (the node went away mid-fork). Both are
+// transient from the claim's view: another node, or this one once it drains,
+// can take the fork, so the claim routes to the bounded NoCapacity re-pend.
+func isRetryableCapacity(err error) bool {
+	return hasGRPCCode(err, codes.ResourceExhausted) || hasGRPCCode(err, codes.Unavailable)
+}
+
+// hasGRPCCode reports whether err (possibly wrapped) carries the given gRPC
+// status code anywhere in its unwrap chain.
+func hasGRPCCode(err error, code codes.Code) bool {
 	for e := err; e != nil; e = errors.Unwrap(e) {
-		if s, ok := status.FromError(e); ok && s.Code() == codes.NotFound {
+		if s, ok := status.FromError(e); ok && s.Code() == code {
 			return true
 		}
 	}

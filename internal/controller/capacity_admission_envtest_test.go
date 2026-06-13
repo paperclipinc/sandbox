@@ -7,6 +7,9 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -174,6 +177,73 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 	}
 	if got := counterValue(t, "mitos_claim_errors_total", map[string]string{"pool": "cap2-pool", "reason": "capacity"}); got <= errBefore {
 		t.Fatalf("claim_errors_total{pool=cap2-pool,reason=capacity} = %v, want > %v", got, errBefore)
+	}
+}
+
+// TestClaimRePendsOnForkdResourceExhausted drives the schedule-time race: the
+// node admits the fork (ample memory headroom) and SelectNode picks it, but the
+// forkd Fork RPC rejects with ResourceExhausted (the node filled to its
+// MaxSandboxes between selection and the RPC, PR #110). The claim must RE-PEND
+// with a NoCapacity condition (bounded retry), NOT fail terminally: another
+// node, or this one once it drains, can still take the fork.
+func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-3", "cap3-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	// The node has memory headroom so admits() selects it; the forkd Fork RPC is
+	// what rejects, exactly the race the schedule-time count check cannot close.
+	testRegistry.SetNodeMemory("cap-node-3", 16*gib, 0)
+	engine.ForkErr = fork.ErrAtCapacity // -> gRPC ResourceExhausted
+
+	makeCapacityFixture(t, "cap3")
+
+	pending := waitForPhase(t, "cap3", v1alpha1.SandboxPending, 15*time.Second)
+	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
+	if cond == nil || cond.Reason != "NoCapacity" {
+		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("NoCapacity Ready condition status = %q, want False", cond.Status)
+	}
+	if pending.Status.Phase == v1alpha1.SandboxFailed {
+		t.Fatal("claim must NOT be Failed on a forkd ResourceExhausted reject")
+	}
+
+	// Clearing the reject lets a later reconcile place the claim and go Ready,
+	// proving the re-pend was recoverable (not a dead end).
+	engine.ForkErr = nil
+	ready := waitForPhase(t, "cap3", v1alpha1.SandboxReady, 15*time.Second)
+	if ready.Status.Node != "cap-node-3" {
+		t.Fatalf("ready node = %q, want cap-node-3", ready.Status.Node)
+	}
+}
+
+// TestClaimRePendsOnForkdUnavailable drives the node-died-mid-fork race: the
+// forkd Fork RPC fails with Unavailable (the node went away between selection
+// and the RPC). Like ResourceExhausted, the claim must RE-PEND (NoCapacity), not
+// fail terminally, so it retries on a healthy node.
+func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
+	stop, engine, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "cap-node-4", "cap4-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	testRegistry.SetNodeMemory("cap-node-4", 16*gib, 0)
+	engine.ForkErr = status.Error(codes.Unavailable, "node draining")
+
+	makeCapacityFixture(t, "cap4")
+
+	pending := waitForPhase(t, "cap4", v1alpha1.SandboxPending, 15*time.Second)
+	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
+	if cond == nil || cond.Reason != "NoCapacity" {
+		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
+	}
+	if pending.Status.Phase == v1alpha1.SandboxFailed {
+		t.Fatal("claim must NOT be Failed on a forkd Unavailable reject")
 	}
 }
 

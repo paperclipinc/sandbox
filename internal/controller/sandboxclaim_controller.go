@@ -484,6 +484,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			_ = r.Status().Update(ctx, &claim)
 			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
+		// The node rejected the fork on its sandbox-count cap (ResourceExhausted,
+		// PR #110) or went away mid-fork (Unavailable). Both are transient: the
+		// claim was placed onto a node that filled or died between SelectNode and
+		// the Fork RPC (a schedule-time race the count-admission check shrinks but
+		// cannot eliminate). Re-pend through the bounded NoCapacity machinery
+		// instead of failing terminally, so the claim retries on a node with
+		// headroom and only fails after the bounded wait.
+		if isRetryableCapacity(err) {
+			logger.Info("node rejected fork (capacity/unavailable), re-pending", "node", node.Name, "error", err.Error())
+			return r.reconcileNoCapacity(ctx, &claim, err)
+		}
 		logger.Error(err, "fork failed", "node", node.Name)
 		recordClaimError(claim.Spec.PoolRef.Name, "fork")
 		now := metav1.Now()

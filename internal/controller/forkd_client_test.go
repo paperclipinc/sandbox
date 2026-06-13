@@ -181,6 +181,26 @@ func TestIsNotFound(t *testing.T) {
 	}
 }
 
+func TestIsRetryableCapacity(t *testing.T) {
+	for _, code := range []codes.Code{codes.ResourceExhausted, codes.Unavailable} {
+		wrapped := fmt.Errorf("forkd fork on n1: %w", status.Error(code, "boom"))
+		if !isRetryableCapacity(wrapped) {
+			t.Fatalf("wrapped %s should be retryable-capacity", code)
+		}
+	}
+	// NotFound is the snapshot-not-yet-on-node path, handled separately.
+	if isRetryableCapacity(fmt.Errorf("wrap: %w", status.Error(codes.NotFound, "missing"))) {
+		t.Fatal("NotFound is not a retryable-capacity error")
+	}
+	// A hard internal error must still fail the claim.
+	if isRetryableCapacity(fmt.Errorf("wrap: %w", status.Error(codes.Internal, "boom"))) {
+		t.Fatal("Internal is not a retryable-capacity error")
+	}
+	if isRetryableCapacity(fmt.Errorf("plain error")) {
+		t.Fatal("plain error is not a retryable-capacity error")
+	}
+}
+
 func TestPoolSnapshotAccounting(t *testing.T) {
 	addrWith, _ := startFakeForkd(t, "py-tmpl")
 	addrWithout, engineWithout := startFakeForkd(t)
