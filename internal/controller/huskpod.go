@@ -643,7 +643,50 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 // extras. A production readiness gate (Running+Ready before counting a slot
 // warm) is layered on in the activation slice; object existence is the correct
 // convergence target for this object-lifecycle slice.
-func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {
+// huskReconcileResult reports the post-reconcile warm-pool counts and whether
+// this reconcile changed the dormant count (a scale event), so the caller can
+// emit metrics and status without re-listing pods.
+type huskReconcileResult struct {
+	dormant  int32 // unclaimed warm pods after reconcile
+	inUse    int32 // claimed/active pods (the demand signal)
+	scaledUp bool  // dormant count increased this reconcile
+	scaledDn bool  // dormant count decreased this reconcile
+}
+
+// countHuskPods lists the pool's husk pods and returns the current dormant and
+// in-use counts WITHOUT creating or deleting anything, so the autoscaler can
+// compute a desired count before reconcileHuskPods drives toward it. Same
+// filtering as reconcileHuskPods (non-terminating, owned, dormant vs claimed).
+func (r *SandboxPoolReconciler) countHuskPods(ctx context.Context, pool *v1alpha1.SandboxPool) (dormant, inUse int32, err error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(pool.Namespace),
+		client.MatchingLabels{huskPoolLabel: pool.Name, huskLabel: "true"},
+	); err != nil {
+		return 0, 0, fmt.Errorf("list husk pods for pool %s: %w", pool.Name, err)
+	}
+	var owned, dorm int32
+	for i := range pods.Items {
+		p := pods.Items[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		if owner := metav1.GetControllerOf(&p); owner == nil || owner.UID != pool.UID {
+			continue
+		}
+		owned++
+		if _, claimed := p.Labels[huskClaimLabel]; !claimed {
+			dorm++
+		}
+	}
+	use := owned - dorm
+	if use < 0 {
+		use = 0
+	}
+	return dorm, use, nil
+}
+
+func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate, desired int32) (huskReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
 	var pods corev1.PodList
@@ -651,7 +694,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		client.InNamespace(pool.Namespace),
 		client.MatchingLabels{huskPoolLabel: pool.Name, huskLabel: "true"},
 	); err != nil {
-		return 0, fmt.Errorf("list husk pods for pool %s: %w", pool.Name, err)
+		return huskReconcileResult{}, fmt.Errorf("list husk pods for pool %s: %w", pool.Name, err)
 	}
 
 	// Keep only non-terminating pods this pool actually owns. A pod with a
@@ -686,7 +729,11 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 	}
 
 	existing := int32(len(dormant))
-	desired := pool.Spec.Replicas
+	inUse := int32(len(owned)) - existing
+	if inUse < 0 {
+		inUse = 0
+	}
+	result := huskReconcileResult{dormant: existing, inUse: inUse}
 
 	switch {
 	case existing < desired:
@@ -700,7 +747,8 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		// pods that would fail to mount their secrets.
 		if r.ControllerNamespace != "" {
 			if err := ReplicateHuskSecrets(ctx, r.Client, r.ControllerNamespace, pool.Namespace); err != nil {
-				return existing, fmt.Errorf("replicate husk secrets into %s: %w", pool.Namespace, err)
+				result.dormant = existing
+				return result, fmt.Errorf("replicate husk secrets into %s: %w", pool.Namespace, err)
 			}
 		}
 		opts := HuskPodOptions{
@@ -723,10 +771,12 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		for i := int32(0); i < deficit; i++ {
 			pod := r.buildHuskPod(pool, template, opts)
 			if err := r.Create(ctx, pod); err != nil {
-				return existing, fmt.Errorf("create husk pod for pool %s: %w", pool.Name, err)
+				result.dormant = existing
+				return result, fmt.Errorf("create husk pod for pool %s: %w", pool.Name, err)
 			}
 			existing++
 		}
+		result.scaledUp = true
 
 	case existing > desired:
 		// Delete the extras deterministically from the DORMANT set only (never a
@@ -739,13 +789,16 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		for i := int32(0); i < surplus; i++ {
 			victim := dormant[len(dormant)-1-int(i)]
 			if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
-				return existing, fmt.Errorf("delete surplus husk pod %s: %w", victim.Name, err)
+				result.dormant = existing
+				return result, fmt.Errorf("delete surplus husk pod %s: %w", victim.Name, err)
 			}
 			existing--
 		}
+		result.scaledDn = true
 	}
 
-	return existing, nil
+	result.dormant = existing
+	return result, nil
 }
 
 func ptrBool(b bool) *bool { return &b }

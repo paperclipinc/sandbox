@@ -833,6 +833,47 @@ Firecracker runs on the host); preemption priority-class tuning and
 Karpenter-specific provisioner hints; the re-derived threat model for the
 drain/checkpoint surface; a drain/re-pend latency benchmark.
 
+## 6g. Warm-pool autoscaling
+
+A SandboxPool's warm buffer is demand-driven when `spec.autoscale` is set. The
+controller scales the count of DORMANT husk pods from claim demand:
+
+- `minWarm`: dormant floor when idle (default 0). Set it equal to `replicas` for
+  the legacy fixed pool.
+- `maxWarm`: dormant ceiling, required when autoscaling is on, so a burst cannot
+  create unbounded pods.
+- `targetSpare`: spare dormant pods kept on top of the in-use count (default 2),
+  the burst-absorption headroom.
+- `scaleDownCooldownSeconds`: idle window before scaling down (default 300), the
+  anti-thrash hysteresis. Scale-up is never delayed.
+
+Formula, computed each pool reconcile:
+
+    desired = clamp(inUse + targetSpare, min(minWarm, maxWarm), maxWarm)
+
+where `inUse` is the count of husk pods carrying `mitos.run/claim`. Scale-up
+applies immediately; scale-down applies only after `scaleDownCooldownSeconds`
+have elapsed since the last claim arrival, otherwise the current dormant level is
+held. A scale-down only ever deletes surplus DORMANT pods (sorted by name, from
+the tail); a claimed/in-use pod is never a scale-down victim. When `spec.autoscale`
+is nil the warm pool keeps the legacy behavior: desired equals `spec.replicas`.
+
+This is distinct from the unschedulable-husk cluster-autoscaler signal in
+section 6f: that grows the NODE pool from Pending+Unschedulable pods; this grows
+the WARM (dormant) pod buffer within the existing nodes from claim pressure.
+
+Status surfaces `status.desiredWarm` and `status.lastScaleDownTime`. Metrics:
+`mitos_pool_warm_dormant`, `mitos_pool_warm_in_use`, `mitos_pool_desired_warm`
+(gauges), `mitos_pool_warm_scale_up_total`, `mitos_pool_warm_scale_down_total`
+(counters), `mitos_pool_refill_latency_seconds`,
+`mitos_claim_wait_for_warm_seconds` (histograms).
+
+Refill cost: each new dormant pod re-verifies the ~680 MiB snapshot during its
+dormant Prepare (off the claim hot path, per pod). A per-node verify cache that
+lets the second-and-later dormant pod on a node skip the re-hash is tracked as a
+separate follow-up because it crosses the husk-pod / forkd trust boundary; see
+the autoscaler plan Appendix A.
+
 ## 7. Proven vs remaining
 
 ### Proven so far

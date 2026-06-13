@@ -168,6 +168,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The warm-pool autoscaler's demand signal: a single process-local tracker
+	// SHARED between the pool reconciler (reads last claim arrival to gate
+	// scale-down) and the claim reconciler (records arrivals). Both reconcilers
+	// must get the same pointer.
+	poolDemand := controller.NewPoolDemand()
+
 	if err := (&controller.SandboxPoolReconciler{
 		Client:                    mgr.GetClient(),
 		NodeRegistry:              nodeRegistry,
@@ -182,6 +188,7 @@ func main() {
 		HuskCASecretName:          controller.CASecretName,
 		ControllerNamespace:       poolControllerNamespace,
 		KMS:                       encKMS,
+		Demand:                    poolDemand,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxPool")
 		os.Exit(1)
@@ -199,6 +206,7 @@ func main() {
 		EnableHuskPods:     enableHuskPods,
 		HuskControlPort:    huskControlPort,
 		KMS:                encKMS,
+		Demand:             poolDemand,
 		Feed: controller.NewEmitFeed(
 			// record.EventRecorder (the v1 events API) is still supported; the v2
 			// events API GetEventRecorder returns a different type with a different

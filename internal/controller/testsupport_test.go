@@ -153,7 +153,8 @@ func (r *SandboxPoolReconciler) EnsureHuskPDBForTest(ctx context.Context, pool *
 // ReconcileHuskPodsForTest exposes reconcileHuskPods to the external
 // controller_test package so the warm-pool lifecycle can be envtested.
 func (r *SandboxPoolReconciler) ReconcileHuskPodsForTest(ctx context.Context, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (int32, error) {
-	return r.reconcileHuskPods(ctx, pool, template)
+	res, err := r.reconcileHuskPods(ctx, pool, template, pool.Spec.Replicas)
+	return res.dormant, err
 }
 
 // EnsureTemplateBuiltForTest exposes ensureTemplateBuilt to the external

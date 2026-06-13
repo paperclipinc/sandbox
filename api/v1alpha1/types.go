@@ -188,6 +188,51 @@ type SandboxPoolSpec struct {
 	// +kubebuilder:default=Kill
 	// +optional
 	DrainPolicy HuskDrainPolicy `json:"drainPolicy,omitempty"`
+
+	// Autoscale turns the warm pool from a fixed Replicas pre-fill into a
+	// demand-driven autoscaler: it scales the number of DORMANT husk pods up
+	// under claim pressure and back down to a floor after an idle cooldown.
+	// When nil the pool keeps exactly the legacy behavior (the warm pool is held
+	// at Replicas). When set, the desired dormant count is
+	// clamp(inUse + targetSpare, minWarm, maxWarm) and Replicas is ignored for
+	// warm-pool sizing (it stays the scale-subresource target for back-compat).
+	// +optional
+	Autoscale *PoolAutoscaleSpec `json:"autoscale,omitempty"`
+}
+
+// PoolAutoscaleSpec configures demand-driven warm-pool autoscaling for a husk
+// pool. It only governs the count of DORMANT (unclaimed) husk pods; an active
+// claim's pod is never scaled away. All counts are dormant-pod counts.
+type PoolAutoscaleSpec struct {
+	// MinWarm is the floor: the dormant pod count the pool holds when fully idle.
+	// Operators who want the legacy fixed pool set MinWarm equal to Replicas.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=0
+	// +optional
+	MinWarm int32 `json:"minWarm,omitempty"`
+
+	// MaxWarm is the ceiling: the dormant pod count is never driven above this,
+	// regardless of demand, so a burst cannot create unbounded pods. Required
+	// when autoscaling is enabled.
+	// +kubebuilder:validation:Minimum=1
+	MaxWarm int32 `json:"maxWarm"`
+
+	// TargetSpare is the headroom kept on top of the current in-use count: the
+	// pool aims to always have this many SPARE dormant pods ready, so a claim
+	// burst up to TargetSpare within one reconcile interval hits a ready dormant
+	// pod instead of cold-starting. Default 2.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=2
+	// +optional
+	TargetSpare int32 `json:"targetSpare,omitempty"`
+
+	// ScaleDownCooldownSeconds is the anti-thrash window: after the pool reduces
+	// the dormant count it will not reduce it again until this many seconds have
+	// elapsed with NO claim arrival. Scale UP is never delayed. Default 300.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=300
+	// +optional
+	ScaleDownCooldownSeconds int32 `json:"scaleDownCooldownSeconds,omitempty"`
 }
 
 type SandboxPoolStatus struct {
@@ -203,6 +248,15 @@ type SandboxPoolStatus struct {
 	// identity visible in the CRD so integrity can be audited. A content
 	// address, safe to log.
 	TemplateDigest string `json:"templateDigest,omitempty"`
+
+	// DesiredWarm is the autoscaler's computed desired dormant pod count as of
+	// the last reconcile. Equal to Replicas when autoscaling is off. Observability
+	// only; mirrors the mitos_pool_desired_warm gauge.
+	DesiredWarm int32 `json:"desiredWarm,omitempty"`
+
+	// LastScaleDownTime records when the pool last reduced its dormant pod count,
+	// so an operator can see the scale-down cooldown state.
+	LastScaleDownTime *metav1.Time `json:"lastScaleDownTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -184,6 +184,23 @@ tenant's filesystem state into another. The clone is removed on pod teardown
 (`Stub.Close`). Fully pod-native snapshot delivery (a CAS pull into the pod,
 removing the shared read-only mem/vmstate hostPath) remains a documented follow-up.
 
+### Warm-pool autoscaling (no integrity-gate move)
+
+Demand-driven warm-pool autoscaling changes only WHEN and HOW MANY dormant husk
+pods the controller creates or deletes. It does NOT change the snapshot integrity
+gate: every dormant pod still runs the same fail-closed Prepare-time verify
+(digest + snapcompat) against the read-only mounted CAS manifest before it can be
+offered for a claim (Surface 3). The autoscaler reads only pod labels (dormant vs
+claimed) and a process-local claim-arrival timestamp; it trusts no
+tenant-controlled input, holds no secret, and a compromised husk pod cannot
+influence the desired count beyond appearing claimed (which only makes the pool
+create MORE warm capacity, never fewer or unverified pods). Scale-down deletes
+only surplus DORMANT pods, never a claimed/in-use one. Security surface: unchanged.
+
+A SEPARATE follow-up (a per-node verify cache so the second dormant pod on a node
+skips the ~680 MiB re-hash) WILL touch the integrity gate and must land with its
+own threat-model delta; it is intentionally out of scope here.
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts
