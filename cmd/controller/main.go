@@ -187,7 +187,7 @@ func main() {
 
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
 	if discoveryNamespace == "" {
-		discoveryNamespace = "mitos-system"
+		discoveryNamespace = "mitos"
 	}
 	discovery := &controller.ForkdDiscovery{
 		Client:    mgr.GetClient(),
