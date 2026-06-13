@@ -645,6 +645,41 @@ func TestPrepareChrootForVMLinksFiles(t *testing.T) {
 	}
 }
 
+func TestPrepareChrootForVMMakesFilesReadableByJailedUID(t *testing.T) {
+	// The jailed Firecracker runs as the unprivileged per-VM uid and must READ the
+	// snapshot mem/vmstate inside its chroot to restore. chownIntoJail only chowns
+	// cfg.ChrootFiles + the run dir at LAUNCH time (Prepare); the husk per-activate
+	// snapshot files are placed AFTER that launch and are never chowned. So the
+	// chroot copy must be world-readable, independent of the source mode. Here the
+	// source is 0600 (would be unreadable by the jailed uid); the chroot file the
+	// jailed VMM opens must still be world-readable.
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	src := filepath.Join(dataDir, "templates", "t1", "snapshot", "mem")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("snap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultVMConfig()
+	cfg.ID = "husk"
+	cfg.Jailer = testJailerConfig(filepath.Join(root, "jail"), dataDir)
+
+	if err := PrepareChrootForVM(cfg, "husk", []string{src}); err != nil {
+		t.Fatalf("PrepareChrootForVM: %v", err)
+	}
+	linked := chrootPath(cfg.Jailer.ChrootBaseDir, "husk", src)
+	info, err := os.Stat(linked)
+	if err != nil {
+		t.Fatalf("chroot file missing: %v", err)
+	}
+	if info.Mode().Perm()&0o044 == 0 {
+		t.Fatalf("chroot snapshot file %q mode = %v, want world/group-readable so the jailed uid can restore it", linked, info.Mode().Perm())
+	}
+}
+
 func TestPrepareChrootForVMRefusesEscapingPath(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")

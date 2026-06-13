@@ -374,6 +374,22 @@ is expected here (the snapshot is on the read-only node mount), so the husk jail
 config does NOT require the chroot base and the snapshot to share a filesystem,
 unlike the forkd builder.
 
+Snapshot readability under the jail uid: the jailed Firecracker runs as the
+unprivileged per-VM uid and must READ the snapshot mem/vmstate to restore. The
+launch-time `chownIntoJail` only chowns `cfg.ChrootFiles` (the kernel) and the run
+dir, and it runs at the dormant launch (Prepare); the per-activate snapshot files
+are placed into the chroot LATER, at Activate, so that chown never covers them. We
+therefore do NOT rely on the snapshot's source mode (a snapshot written `0600` on
+the node disk would otherwise be unreadable by the jailed uid and the restore would
+fail with an opaque permission error). `firecracker.PrepareChrootForVM` explicitly
+chmods the in-chroot snapshot copy to `0644`. That copy is a private throwaway in
+the pod's `emptyDir` (the read-only snapshot mount is a different filesystem, so the
+link always falls back to an independent-inode copy), so widening it to
+world-readable exposes nothing the jailed uid could not already reach. The unit
+test `TestPrepareChrootForVMMakesFilesReadableByJailedUID` asserts the resulting
+mode; the jailed VMM actually opening and restoring the file is verified only on
+KVM (pending the green run on #16).
+
 This needs exactly one capability beyond what the device plugin grants:
 `CAP_SYS_ADMIN`, for the `mount(2)` above and for the jailer's own jail
 construction (cgroup + namespace + chroot). The jailer then drops to the

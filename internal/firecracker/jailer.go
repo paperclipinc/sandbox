@@ -124,9 +124,31 @@ func jailerArgs(cfg VMConfig, id string, uid, gid uint32) []string {
 // the files to the jailed uid: the jailer launch path chowns the chroot file set
 // (chownIntoJail) after it allocates the uid, and these files are prepared just
 // before that launch.
+//
+// It DOES make the in-chroot files world-readable (0o644). The jailed Firecracker
+// runs as the unprivileged per-VM uid and must READ the snapshot mem/vmstate to
+// restore. In the husk path these per-activate files are placed AFTER the dormant
+// jailed VMM was already launched (the husk stub launches the jailer at Prepare
+// and links the snapshot in at Activate), so chownIntoJail (which runs at launch
+// over cfg.ChrootFiles only) never sees them. Relying on the snapshot's source
+// mode is not safe: a snapshot written 0o600 on the node disk would be unreadable
+// by the jailed uid and the restore would fail with an opaque permission error.
+// The chroot copy is a private throwaway under the pod's emptyDir (husk's chroot
+// base is a different filesystem from the read-only snapshot mount, so the link
+// always falls back to an EXDEV copy of an independent inode), so widening it to
+// world-readable exposes nothing the jailed uid could not already reach. Verified
+// end to end only on KVM (the jailed VMM actually opening the file); the unit test
+// asserts the resulting mode.
 func PrepareChrootForVM(cfg VMConfig, vmID string, files []string) error {
-	if _, err := prepareChroot(cfg, vmID, files); err != nil {
+	mapping, err := prepareChroot(cfg, vmID, files)
+	if err != nil {
 		return err
+	}
+	for f := range mapping {
+		dst := chrootPath(cfg.Jailer.ChrootBaseDir, vmID, f)
+		if err := os.Chmod(dst, 0o644); err != nil {
+			return fmt.Errorf("make jailer chroot file readable by the jailed uid: %w", err)
+		}
 	}
 	return nil
 }
