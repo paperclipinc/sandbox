@@ -37,6 +37,33 @@ func TestLocalKEKWrapUnwrapRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalKEKWrapUsesDistinctNonces(t *testing.T) {
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	w, err := NewLocalKEK(kek)
+	if err != nil {
+		t.Fatalf("NewLocalKEK: %v", err)
+	}
+	dek := []byte("0123456789abcdef0123456789abcdef")
+	// Wrapping the same DEK twice MUST yield different ciphertexts: a fresh
+	// random GCM nonce per Wrap is mandatory (nonce reuse under one key breaks
+	// GCM confidentiality and integrity). The nonce is prefixed to the
+	// ciphertext, so distinct output proves distinct nonces.
+	a, err := w.Wrap(context.Background(), dek)
+	if err != nil {
+		t.Fatalf("Wrap a: %v", err)
+	}
+	b, err := w.Wrap(context.Background(), dek)
+	if err != nil {
+		t.Fatalf("Wrap b: %v", err)
+	}
+	if bytes.Equal(a.Ciphertext, b.Ciphertext) {
+		t.Fatal("two Wrap calls produced identical ciphertext: nonce reuse")
+	}
+}
+
 func TestLocalKEKRejectsWrongKEKLength(t *testing.T) {
 	if _, err := NewLocalKEK(make([]byte, 16)); err == nil {
 		t.Fatal("expected error for 16-byte KEK")
