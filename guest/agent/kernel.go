@@ -79,7 +79,7 @@ func errorFrames(emit func(vsock.ExecStreamFrame), msg string) {
 // ending with a terminal exit frame. Returns a non-nil error only for an
 // unexpected transport failure mid-stream; an absent kernel or a guest-code
 // exception is reported via frames (and run returns nil).
-func (k *kernelManager) run(code, language string, _ int, emit func(vsock.ExecStreamFrame)) error {
+func (k *kernelManager) run(code, language string, timeout int, emit func(vsock.ExecStreamFrame)) error {
 	if language != "" && language != "python" {
 		errorFrames(emit, fmt.Sprintf("unsupported language %q: this base image provides only a python kernel", language))
 		return nil
@@ -94,7 +94,16 @@ func (k *kernelManager) run(code, language string, _ int, emit func(vsock.ExecSt
 	}
 
 	execID := "e"
-	reqLine, err := json.Marshal(map[string]string{"id": execID, "code": code})
+	// driverRequest mirrors the line protocol kernel_driver.py reads on stdin.
+	// timeout is the per-run wall-clock budget in seconds; the driver applies
+	// its own default when it is <= 0. Omitted (zero) leaves the default to the
+	// driver.
+	type driverRequest struct {
+		ID      string `json:"id"`
+		Code    string `json:"code"`
+		Timeout int    `json:"timeout,omitempty"`
+	}
+	reqLine, err := json.Marshal(driverRequest{ID: execID, Code: code, Timeout: timeout})
 	if err != nil {
 		errorFrames(emit, fmt.Sprintf("encode request: %v", err))
 		return nil

@@ -62,8 +62,10 @@ type Request struct {
 // first RunCode and persists for the sandbox lifetime, so Code observes state
 // left by prior RunCode calls. Language defaults to "python"; any other value
 // is refused with a KernelUnavailable error frame. Timeout bounds one
-// execution in seconds (0 means a default applied by the agent). Code is not a
-// secret value and is safe to truncate-log.
+// execution in seconds; on the deadline the kernel is interrupted and a
+// TimeoutError frame is returned, leaving the kernel usable. A value <= 0 means
+// the agent applies its 60s default. Code is not a secret value and is safe to
+// truncate-log.
 type RunCodeRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language,omitempty"`

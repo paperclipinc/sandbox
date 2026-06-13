@@ -125,6 +125,47 @@ func TestKernelManagerUnavailable(t *testing.T) {
 	}
 }
 
+// TestKernelManagerPlumbsTimeout proves the per-run timeout reaches the driver
+// on the stdin request line. The fake driver echoes the request it read back as
+// a stdout frame, so the test can assert the timeout field was sent verbatim.
+func TestKernelManagerPlumbsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "echo_driver.sh")
+	// Read each request line and emit it back as the text of a stdout frame so
+	// the Go side can inspect the JSON it was handed (including timeout).
+	script := `#!/bin/sh
+printf '%s\n' '{"id":"","kind":"ready"}'
+while IFS= read -r line; do
+  esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
+  printf '%s\n' "{\"id\":\"x\",\"kind\":\"stdout\",\"text\":\"$esc\"}"
+  printf '%s\n' '{"id":"x","kind":"done","status":"ok"}'
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write echo driver: %v", err)
+	}
+
+	km := newKernelManager(kernelConfig{python: "/bin/sh", driverPath: path})
+	defer km.shutdown()
+
+	var frames []vsock.ExecStreamFrame
+	if err := km.run("print(1)", "python", 7, func(fr vsock.ExecStreamFrame) {
+		frames = append(frames, fr)
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(frames) < 1 || frames[0].Kind != vsock.FrameChunk {
+		t.Fatalf("want echoed request as first stdout frame, got %+v", frames)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(frames[0].Data, &req); err != nil {
+		t.Fatalf("decode echoed request %q: %v", frames[0].Data, err)
+	}
+	if got, ok := req["timeout"].(float64); !ok || int(got) != 7 {
+		t.Fatalf("timeout not plumbed into driver request: %v", req["timeout"])
+	}
+}
+
 func TestKernelManagerRejectsNonPython(t *testing.T) {
 	dir := t.TempDir()
 	driver := writeFakeDriver(t, dir)
