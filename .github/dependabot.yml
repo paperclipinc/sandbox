@@ -44,3 +44,25 @@ updates:
         update-types:
           - minor
           - patch
+  - package-ecosystem: npm
+    directory: /sdk/typescript
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      typescript-sdk-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      docker-minor-patch:
+        update-types:
+          - minor
+          - patch
