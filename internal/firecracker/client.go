@@ -498,6 +498,26 @@ func (c *Client) PID() int {
 	return 0
 }
 
+// JailerState exposes the per-VM jailer artifacts a crash-recovery journal must
+// record so a restarted forkd can reap a dead VM's leaked chroot and return its
+// jailed uid. The values are zero for a direct-exec (non-jailed) client. They
+// carry host paths and a uid only, no secrets.
+type JailerState struct {
+	ChrootDir   string
+	JailerVMDir string
+	JailedUID   uint32
+}
+
+// JailerState returns this client's jailer artifacts (chroot root, per-VM
+// jailer workspace, and dedicated uid). All zero for direct-exec clients.
+func (c *Client) JailerState() JailerState {
+	return JailerState{
+		ChrootDir:   c.chrootDir,
+		JailerVMDir: c.jailerVMDir,
+		JailedUID:   c.jailedUID,
+	}
+}
+
 // --- HTTP helpers ---
 
 func (c *Client) put(path string, body interface{}) error {

@@ -488,11 +488,16 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 Every component gets a defined answer to: crash, node death, slow etcd,
 out of capacity. Chaos suite in CI.
 
-- ⬜ forkd crash policy: running VMs reaped deterministically on restart
+- 🔨 forkd crash policy: running VMs reaped deterministically on restart
   (forkd is the VM supervisor; orphan FC processes are killed and claims
-  failed with a typed condition). Open: needs forkd-local state so a
-  restarted forkd can recognize and reap its own pre-crash VMs; tracked in
-  epic #12.
+  failed with a typed condition). Done: forkd-local state via an on-disk
+  sandbox journal (`<dataDir>/sandboxes/<id>.json`) that NewEngine reconciles
+  before serving. A still-running pre-crash VM (PID-recycle-guarded against a
+  recycled, unrelated pid) is re-adopted so `ListSandboxes` reports it and the
+  GC reconciles it; a dead VM's leaked artifacts (jailer chroot, rootfs CoW
+  clone, fork network, jailer uid) are reaped and its record dropped. Open:
+  surfacing a typed claim condition when the GC terminates a re-adopted orphan;
+  real-VM reap is KVM-cluster/firecracker-test verified. Tracked in epic #12.
 - 🔨 Node loss: claims reach `NodeLost` within the GC interval (done); pools
   rebuild replicas elsewhere is still open (tracked in #12).
 - ✅ Controller restart: the GC pass rebuilds the desired set from CRD state

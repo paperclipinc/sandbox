@@ -163,3 +163,79 @@ func TestTapForGuestIP(t *testing.T) {
 		t.Errorf("TapForGuestIP after release = %q, want empty", got)
 	}
 }
+
+// TestMarkInUseReservesExactBlock checks crash re-adoption: after a forkd
+// restart the allocator is empty, but a live VM still holds a specific /30
+// block derived from its recorded guest IP. MarkInUse must reserve THAT exact
+// block (not the first free one), so a later Acquire never hands the same /30
+// to a fresh fork, TapForGuestIP resolves the recorded VM, and Release frees
+// the right block.
+func TestMarkInUseReservesExactBlock(t *testing.T) {
+	a, err := NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	// The recorded identity of a VM that survived the crash. Its guest IP is in
+	// block index 5 (10.200.0.0 + 4*5 + 2 = 10.200.0.22), which is NOT the first
+	// free block an empty allocator would hand out (that would be block 0).
+	rec := Identity{
+		TapName: "sbtap-recorded",
+		HostIP:  net.ParseIP("10.200.0.21").To4(),
+		GuestIP: net.ParseIP("10.200.0.22").To4(),
+	}
+	if err := a.MarkInUse("recorded-vm", rec); err != nil {
+		t.Fatalf("MarkInUse: %v", err)
+	}
+
+	// The reserved identity is reported exactly as recorded.
+	if got := a.TapForGuestIP(rec.GuestIP); got != rec.TapName {
+		t.Fatalf("TapForGuestIP(%v) = %q, want %q", rec.GuestIP, got, rec.TapName)
+	}
+
+	// A fresh Acquire must NOT collide with the reserved block: its guest IP must
+	// differ from the recorded VM's.
+	fresh, err := a.Acquire("fresh-fork")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if fresh.GuestIP.Equal(rec.GuestIP) {
+		t.Fatalf("fresh fork was handed the reserved block %v", fresh.GuestIP)
+	}
+
+	// Release frees exactly the reserved block.
+	a.Release("recorded-vm")
+	if got := a.TapForGuestIP(rec.GuestIP); got != "" {
+		t.Fatalf("reserved block not freed by Release: tap %q", got)
+	}
+}
+
+// TestMarkInUseIdempotentAndAcquireConsistent checks that marking an id in use
+// then Acquiring the SAME id returns the reserved identity (so adoption then a
+// later idempotent Acquire agree), and that a guest IP outside the subnet is
+// rejected rather than silently mis-reserved.
+func TestMarkInUseIdempotentAndAcquireConsistent(t *testing.T) {
+	a, err := NewAllocator("10.200.0.0/16", "sb")
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	rec := Identity{
+		TapName: "sbtap-x",
+		GuestIP: net.ParseIP("10.200.0.6").To4(), // block 1
+	}
+	if err := a.MarkInUse("vm-x", rec); err != nil {
+		t.Fatalf("MarkInUse: %v", err)
+	}
+	got, err := a.Acquire("vm-x")
+	if err != nil {
+		t.Fatalf("Acquire same id: %v", err)
+	}
+	if !got.GuestIP.Equal(rec.GuestIP) {
+		t.Fatalf("Acquire(vm-x) = %v, want reserved %v", got.GuestIP, rec.GuestIP)
+	}
+
+	// A guest IP outside the configured subnet must error, not corrupt state.
+	if err := a.MarkInUse("vm-bad", Identity{GuestIP: net.ParseIP("10.99.0.6").To4()}); err == nil {
+		t.Fatalf("MarkInUse accepted an out-of-subnet guest IP")
+	}
+}

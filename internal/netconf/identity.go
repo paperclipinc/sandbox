@@ -122,6 +122,46 @@ func (a *Allocator) Acquire(sandboxID string) (Identity, error) {
 	return Identity{}, &ErrSubnetExhausted{CIDR: a.cidr}
 }
 
+// MarkInUse reserves the EXACT /30 block a live, already-running sandbox holds,
+// keyed by sandboxID, deriving the block index from the recorded identity's
+// guest IP. It exists for crash re-adoption: after a forkd restart the
+// in-memory allocator is empty, so calling Acquire would hand out the FIRST
+// free block, almost never the one the surviving VM actually uses (the guest IP
+// derives from the block index). That divergence lets a later fresh fork get
+// the same /30 (ambiguous host routes) and makes Release free the wrong block.
+// MarkInUse pins the recorded block instead so Acquire, TapForGuestIP, and
+// Release all agree with the live VM. It returns an error when the guest IP is
+// missing or falls outside the configured subnet, and is idempotent per
+// sandboxID. The stored identity is the recorded one verbatim (its TapName and
+// MAC, which derive from the original sandboxID, not from id alone).
+func (a *Allocator) MarkInUse(sandboxID string, id Identity) error {
+	guest := id.GuestIP.To4()
+	if guest == nil {
+		return fmt.Errorf("mark sandbox %s in use: identity has no IPv4 guest IP", sandboxID)
+	}
+	guestU := ipToUint32(guest)
+	// Within block N the guest side is base + 4*N + 2, so recover N and validate
+	// that the IP lands exactly on a guest-side address inside the subnet.
+	if guestU < a.base+2 {
+		return fmt.Errorf("mark sandbox %s in use: guest IP %v is below subnet %s", sandboxID, guest, a.cidr)
+	}
+	offset := guestU - a.base
+	block := (offset - 2) / 4
+	if (offset-2)%4 != 0 || block >= a.count {
+		return fmt.Errorf("mark sandbox %s in use: guest IP %v is not a valid guest address in subnet %s", sandboxID, guest, a.cidr)
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.byID[sandboxID]; ok {
+		return nil // idempotent: already reserved for this id
+	}
+	a.inUse[block] = true
+	a.byID[sandboxID] = id
+	a.idIndex[sandboxID] = block
+	return nil
+}
+
 // TapForGuestIP returns the tap device name of the live sandbox whose guest IP
 // matches ip, or "" when no live sandbox holds that guest IP. The DNS proxy
 // uses it to find the nftables set to pin into, given the source IP of a query.
