@@ -24,10 +24,12 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@kubernetes/client-node": "1.0.0"
+    "@kubernetes/client-node": "1.0.0",
+    "ws": "8.18.0"
   },
   "devDependencies": {
     "@types/node": "22.10.5",
+    "@types/ws": "8.5.13",
     "typescript": "5.7.3",
     "vitest": "3.2.6"
   },

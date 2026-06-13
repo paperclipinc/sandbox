@@ -20,6 +20,8 @@ export { HttpClient, validSandboxId } from "./http.js";
 
 export { Sandbox, SandboxFiles, toBaseUrl, parseRunCodeStream } from "./sandbox.js";
 export type { SandboxOptions, Terminator, RunCodeCallbacks } from "./sandbox.js";
+export { Pty, createPty } from "./pty.js";
+export type { CreatePtyOptions } from "./pty.js";
 
 export { SandboxServer } from "./server.js";
 export type { Template, ServerSandbox } from "./server.js";

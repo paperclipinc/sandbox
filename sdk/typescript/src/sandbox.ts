@@ -4,6 +4,7 @@
 
 import { AgentRunError } from "./errors.js";
 import { HttpClient, validSandboxId } from "./http.js";
+import { Pty, createPty } from "./pty.js";
 import type {
   BackgroundProcess,
   Execution,
@@ -114,6 +115,10 @@ export class Sandbox {
 
   private readonly http: HttpClient;
   private readonly terminator?: Terminator;
+  // Retained so createPty can authenticate the WebSocket upgrade; the PTY
+  // endpoint is gated by the same per-sandbox bearer token as the HTTP API.
+  // Never logged.
+  private readonly token?: string;
 
   constructor(opts: SandboxOptions) {
     if (!validSandboxId(opts.id)) {
@@ -126,9 +131,28 @@ export class Sandbox {
     }
     this.id = opts.id;
     this.endpoint = opts.endpoint;
+    this.token = opts.token;
     this.http = opts.http ?? new HttpClient(toBaseUrl(opts.endpoint), opts.token);
     this.terminator = opts.terminator;
     this.files = new SandboxFiles(this, this.http);
+  }
+
+  /**
+   * Open an interactive PTY (a shell) in the sandbox over a WebSocket. Output
+   * bytes arrive via onData; the returned Pty has sendInput, resize, kill, and
+   * wait() -> exitCode. Gated by the per-sandbox bearer token.
+   */
+  async createPty(
+    onData: (data: Uint8Array) => void,
+    opts?: { cols?: number; rows?: number },
+  ): Promise<Pty> {
+    const cols = opts?.cols ?? 80;
+    const rows = opts?.rows ?? 24;
+    const wsBase = toBaseUrl(this.endpoint)
+      .replace(/^http:\/\//, "ws://")
+      .replace(/^https:\/\//, "wss://");
+    const url = `${wsBase}/v1/pty?sandbox=${this.id}&cols=${cols}&rows=${rows}`;
+    return createPty({ url, token: this.token, onData });
   }
 
   /**
