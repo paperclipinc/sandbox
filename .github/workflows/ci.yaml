@@ -187,23 +187,25 @@ jobs:
       # BLOCKING vulnerability gate today is govulncheck (our Go code + deps,
       # which is clean). Making this image scan blocking is the follow-up once
       # the base images are remediated. Accepted CVEs live in .trivyignore.
-      - name: Install Trivy (pinned)
+      - name: Trivy image scan (advisory)
+        # Fully tolerant: ADVISORY today, so neither a Trivy install hiccup nor a
+        # findings hit may gate the job. Install via the official script (it
+        # resolves the right asset and arch); on any failure log a warning and
+        # continue. The BLOCKING vulnerability gate is govulncheck.
         run: |
-          TRIVY_VERSION=0.58.1
-          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin trivy
-          trivy --version
-      - name: Trivy scan built images (advisory)
-        run: |
-          status=0
+          set +e
+          if ! curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.58.1; then
+            echo "::warning::Trivy install failed; skipping advisory image scan"
+            exit 0
+          fi
+          trivy --version || { echo "::warning::Trivy not runnable; skipping advisory image scan"; exit 0; }
           for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci; do
             echo "=== Trivy scan ${img} (HIGH,CRITICAL, fixable) ==="
             trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
-              --ignorefile .trivyignore --exit-code 1 "${img}" || status=1
+              --ignorefile .trivyignore "${img}" \
+              || echo "::warning::Trivy reported findings or errored for ${img} (advisory; tracked for base-image remediation before this gate becomes blocking)"
           done
-          if [ "${status}" -ne 0 ]; then
-            echo "::warning::Trivy reported fixable HIGH/CRITICAL findings (advisory; see log). Tracked for base-image remediation before this gate becomes blocking."
-          fi
+          exit 0
 
   kind-e2e:
     runs-on: ubuntu-latest
