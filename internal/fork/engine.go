@@ -155,6 +155,16 @@ type Engine struct {
 	// number but Fork never enforced it). GetCapacity surfaces it to the
 	// controller so the cap is visible in the NodeRegistry.
 	maxSandboxes int32
+	// reserved counts forks that have passed admission (admitFork) but have not
+	// yet entered the sandboxes map: they are mid-boot, in flight. It is guarded
+	// by e.mu and admission tests len(sandboxes)+reserved against maxSandboxes so
+	// the check and the slot grab are one atomic step. This closes the TOCTOU
+	// where N concurrent Forks at len==max-1 all read n<max and all boot,
+	// overshooting the ceiling: a reserved slot counts immediately, so only one
+	// fork can claim the last slot. commitReservation swaps a reservation for a
+	// live sandbox under one lock (count unchanged); releaseReservation rolls a
+	// reservation back on any Fork failure so the cap never permanently shrinks.
+	reserved int32
 	// memReserveBytes is the OS/forkd reserve withheld from the reported node
 	// memory budget: GetCapacity reports MemoryTotal = max(0, MemTotal-reserve).
 	memReserveBytes int64
@@ -821,21 +831,65 @@ func validateKVM() error {
 	return nil
 }
 
-// admitFork enforces the per-node host-DoS ceiling: it refuses with
-// ErrAtCapacity when the live sandbox count has reached maxSandboxes. It is the
-// O(1) admission check Fork runs first, under the engine lock, before any
-// allocation or boot. maxSandboxes<=0 disables the ceiling (a no-op fast path).
+// admitFork enforces the per-node host-DoS ceiling and atomically reserves a
+// slot for the admitted fork. Under a single e.mu.Lock() it tests
+// len(sandboxes)+reserved against maxSandboxes and, on success, increments
+// reserved before releasing the lock. Coupling the check and the reservation in
+// one critical section is what closes the admission TOCTOU: a reserved-but-not-
+// yet-booted fork counts against the ceiling immediately, so N concurrent Forks
+// arriving at len==max-1 cannot all pass: exactly one claims the last slot and
+// the rest get ErrAtCapacity. It is O(1) (one map-length read plus an int
+// increment under the lock) and runs before any allocation or boot.
+// maxSandboxes<=0 disables the ceiling (a no-op fast path: no reservation, so no
+// release is owed). On success the caller MUST eventually call either
+// commitReservation (insert succeeded) or releaseReservation (any failure), or
+// the slot leaks and the cap shrinks permanently.
 func (e *Engine) admitFork() error {
 	if e.maxSandboxes <= 0 {
 		return nil
 	}
-	e.mu.RLock()
-	n := int32(len(e.sandboxes))
-	e.mu.RUnlock()
-	if n >= e.maxSandboxes {
-		return fmt.Errorf("%w (%d/%d)", ErrAtCapacity, n, e.maxSandboxes)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	inFlight := int32(len(e.sandboxes)) + e.reserved
+	if inFlight >= e.maxSandboxes {
+		return fmt.Errorf("%w (%d/%d)", ErrAtCapacity, inFlight, e.maxSandboxes)
 	}
+	e.reserved++
 	return nil
+}
+
+// commitReservation swaps a reservation granted by admitFork for a live
+// sandbox: under one lock it inserts the sandbox into the map and decrements
+// reserved, so len(sandboxes)+reserved is unchanged across the commit and the
+// ceiling is never transiently miscounted. It is a no-op on the reserved
+// counter when maxSandboxes<=0 (admitFork reserved nothing), but it always
+// performs the insert. This is the single point where an admitted, booted fork
+// becomes a tracked sandbox.
+func (e *Engine) commitReservation(sandboxID string, sandbox *Sandbox) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sandboxes[sandboxID] = sandbox
+	if e.maxSandboxes > 0 && e.reserved > 0 {
+		e.reserved--
+	}
+}
+
+// releaseReservation rolls back a reservation granted by admitFork when the
+// fork fails before it can commit (boot error, network error, volume error, any
+// return path after a successful admitFork that does not insert). It decrements
+// reserved under the lock so the freed slot is immediately admittable again and
+// the cap never permanently shrinks. It is a no-op when maxSandboxes<=0
+// (nothing was reserved) and is guarded against going negative so a defer that
+// fires after a commit cannot double-release.
+func (e *Engine) releaseReservation() {
+	if e.maxSandboxes <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.reserved > 0 {
+		e.reserved--
+	}
 }
 
 // Fork creates a new sandbox from a snapshot.
@@ -844,15 +898,29 @@ func (e *Engine) admitFork() error {
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
 // This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
-	// Host-DoS ceiling (production-blocker #2): refuse a new fork once the node
-	// holds MaxSandboxes live sandboxes, BEFORE any verify, allocation, or
-	// Firecracker boot. This is an O(1) count check under the engine lock; an
-	// admitted fork (the common case) pays only one map-length read, so the
+	// Host-DoS ceiling (production-blocker #2): atomically check the ceiling and
+	// reserve a slot BEFORE any verify, allocation, or Firecracker boot. This is
+	// an O(1) check-and-increment under the engine lock; an admitted fork (the
+	// common case) pays only one map-length read plus an int increment, so the
 	// warm-claim activate/fork hot path is unchanged. A runaway tenant hits the
-	// ceiling here and creates nothing.
+	// ceiling here and creates nothing. The reservation counts against the cap
+	// immediately, so concurrent Forks cannot overshoot (admission TOCTOU fix).
 	if err := e.admitFork(); err != nil {
 		return nil, err
 	}
+	// Leak-proof rollback for the verify/compat/decrypt gates below: any refusal
+	// here returns before fork() runs, so it must release the reservation. Once
+	// control reaches fork(), ownership of the reservation transfers to fork()
+	// (reserved=true), which either commits it (success: inserts the sandbox and
+	// consumes the reservation under one lock) or releases it on its own failure
+	// paths. handedOff flips true the instant we call fork(), so this defer never
+	// double-releases a slot fork() already owns.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			e.releaseReservation()
+		}
+	}()
 	// Verify-on-load gate (issue #9): cheap marker check, with a one-time
 	// lazy verify for templates this process did not build. Refuses on
 	// mismatch unless the development escape hatch is set.
@@ -883,12 +951,38 @@ func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult,
 	if _, err := os.Stat(rootfsPath); err != nil {
 		rootfsPath = ""
 	}
-	return e.fork(snapshotID, sandboxID, rootfsPath, opts)
+	// Hand the reservation off to fork(): it now owns the commit/release.
+	handedOff = true
+	return e.fork(snapshotID, sandboxID, rootfsPath, opts, true)
 }
 
 // fork is Fork with the backing rootfs path made explicit so ForkRunning
 // can thread the original template rootfs through live-fork checkpoints.
-func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (*ForkResult, error) {
+//
+// reserved reports whether the caller already holds a slot reservation from
+// admitFork (Fork does; ForkRunning does not). fork is the single insert point
+// for both paths, so it owns the reservation lifecycle from here: on success it
+// calls commitReservation (insert + consume the reservation under one lock); on
+// every failure path it releases the reservation it holds. When reserved is
+// false (ForkRunning), fork takes its own reservation first so the live-fork
+// path is also bounded by MaxSandboxes; when true, it must not reserve again.
+func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, reserved bool) (*ForkResult, error) {
+	if !reserved {
+		if aerr := e.admitFork(); aerr != nil {
+			return nil, aerr
+		}
+	}
+	// One leak-proof rollback for the whole function: every early return below is
+	// a failure (it never sets committed), so the reservation is released exactly
+	// once. The success path sets committed=true after commitReservation has
+	// already consumed the reservation under the insert lock, so this defer is a
+	// no-op there (and releaseReservation is guarded against going negative).
+	committed := false
+	defer func() {
+		if !committed {
+			e.releaseReservation()
+		}
+	}()
 	start := time.Now()
 
 	snapshotDir := filepath.Join(e.dataDir, "templates", snapshotID, "snapshot")
@@ -1027,9 +1121,12 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts) (
 
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
 
-	e.mu.Lock()
-	e.sandboxes[sandboxID] = sandbox
-	e.mu.Unlock()
+	// Commit: insert the sandbox and consume the reservation atomically under one
+	// lock, so len(sandboxes)+reserved is unchanged across the swap and the
+	// ceiling is never miscounted. Setting committed cancels the deferred
+	// rollback (the slot is now a live sandbox, not an in-flight reservation).
+	e.commitReservation(sandboxID, sandbox)
+	committed = true
 
 	return &ForkResult{
 		SandboxID:    sandboxID,
@@ -1109,7 +1206,7 @@ func (e *Engine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSource b
 	// Thread the original template rootfs through: the checkpoint's
 	// embedded drive path still points at it, and the new VM's chroot
 	// needs it linked in.
-	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{})
+	return e.fork(sourceSandboxID+"-live", newSandboxID, source.rootfsPath, ForkOpts{}, false)
 }
 
 // Terminate kills a sandbox and releases its resources.
