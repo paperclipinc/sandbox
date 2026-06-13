@@ -111,8 +111,8 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("Capabilities.Drop = %+v, want [ALL]", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 0 {
-		t.Errorf("Capabilities.Add = %+v, want none (networking caps come with the networking slice)", sc.Capabilities.Add)
+	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "SYS_ADMIN" {
+		t.Errorf("Capabilities.Add = %+v, want [SYS_ADMIN] (the in-pod jailer + chroot-base mount)", sc.Capabilities.Add)
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("SeccompProfile = %+v, want RuntimeDefault", sc.SeccompProfile)
@@ -125,13 +125,17 @@ func TestBuildHuskPodSpec(t *testing.T) {
 // privileged on, allows escalation, or stops dropping ALL capabilities) is caught
 // here. It also pins the DOCUMENTED EXCEPTIONS so they cannot drift silently: the
 // husk pod is admitted into a baseline/restricted namespace only EXCEPT the
-// read-only snapshot hostPath (forbidden under both baseline and restricted) and
+// read-only snapshot hostPath (forbidden under both baseline and restricted),
 // runAsNonRoot=false (forbidden under restricted, the /dev/kvm device exception),
+// and the single added CAP_SYS_ADMIN (restricted permits only NET_BIND_SERVICE to
+// be added; the husk pod needs SYS_ADMIN for the in-pod jailer + the chroot-base
+// mount that makes pivot_root work in a pod, documented in docs/threat-model.md),
 // plus the mitos.run/kvm device-plugin resource. The empirical PSA finding (a
-// restricted namespace rejects the husk pod on exactly hostPath + runAsNonRoot,
-// and the SAME securityContext minus those two is admitted into restricted) is
-// proven object-level on kind in the conformance job; this unit test pins the
-// spec fields those exceptions and the satisfied controls correspond to.
+// restricted namespace rejects the husk pod on exactly hostPath + runAsNonRoot +
+// the added capability, and the SAME securityContext minus those is admitted into
+// restricted) is proven object-level on kind in the conformance job; this unit
+// test pins the spec fields those exceptions and the satisfied controls
+// correspond to.
 func TestBuildHuskPodPSARestricted(t *testing.T) {
 	pool := &v1alpha1.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "psa-pool", Namespace: "default", UID: "pool-uid-psa"},
@@ -183,8 +187,8 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("container Capabilities.Drop = %+v, want [ALL] (restricted control)", sc.Capabilities)
 	}
-	if len(sc.Capabilities.Add) != 0 {
-		t.Errorf("container Capabilities.Add = %+v, want none (restricted forbids adding back)", sc.Capabilities.Add)
+	if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != "SYS_ADMIN" {
+		t.Errorf("container Capabilities.Add = %+v, want [SYS_ADMIN] (the in-pod jailer + chroot-base mount; the one documented PSA-restricted exception beyond the existing hostPath + runAsNonRoot ones)", sc.Capabilities.Add)
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("container SeccompProfile = %+v, want RuntimeDefault (restricted control)", sc.SeccompProfile)
@@ -584,5 +588,69 @@ func TestReconcileHuskPodsFlagOffCreatesNone(t *testing.T) {
 			t.Fatalf("husk pods created with flag off: %d", n)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestHuskPodRunsJailed pins the jailed-in-pod surface: the stub launches every
+// VM through the jailer (jailer flags present), the chroot base is a pod-writable
+// emptyDir mounted writable, and exactly CAP_SYS_ADMIN is added back (ALL dropped)
+// for the in-pod jailer + the chroot-base mount. A regression that drops the
+// jailer or widens the capability set is caught here.
+func TestHuskPodRunsJailed(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	template := &v1alpha1.SandboxTemplate{}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{StubImage: "img", SnapshotID: "t1"})
+
+	c := pod.Spec.Containers[0]
+
+	// The jailer flags must be present so the stub launches jailed.
+	joined := strings.Join(c.Args, " ")
+	for _, want := range []string{
+		"--jailer /usr/local/bin/jailer",
+		"--chroot-base /run/husk/jail",
+		"--uid-range 64000-64999",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("husk pod args missing %q; got: %s", want, joined)
+		}
+	}
+
+	// A pod-writable chroot-base emptyDir volume must be mounted at the chroot base.
+	foundVol := false
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "jailer-chroot" {
+			if v.EmptyDir == nil {
+				t.Error("jailer-chroot volume must be an emptyDir (pod-writable)")
+			}
+			foundVol = true
+		}
+	}
+	if !foundVol {
+		t.Error("husk pod missing the jailer-chroot emptyDir volume")
+	}
+	foundMount := false
+	for _, m := range c.VolumeMounts {
+		if m.Name == "jailer-chroot" {
+			if m.MountPath != "/run/husk/jail" {
+				t.Errorf("jailer-chroot mount path = %q, want /run/husk/jail", m.MountPath)
+			}
+			if m.ReadOnly {
+				t.Error("jailer-chroot mount must be writable")
+			}
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Error("husk pod missing the jailer-chroot volume mount")
+	}
+
+	// Exactly CAP_SYS_ADMIN is added back (for mount(2) + the jailer); ALL dropped.
+	caps := c.SecurityContext.Capabilities
+	if len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
+		t.Errorf("capabilities.drop = %v, want [ALL]", caps.Drop)
+	}
+	if len(caps.Add) != 1 || caps.Add[0] != "SYS_ADMIN" {
+		t.Errorf("capabilities.add = %v, want [SYS_ADMIN]", caps.Add)
 	}
 }

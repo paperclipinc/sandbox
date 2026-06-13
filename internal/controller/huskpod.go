@@ -49,6 +49,20 @@ const (
 	// huskWorkdir is the per-VM working directory the stub uses.
 	huskWorkdir = "/run/husk/vm"
 
+	// huskJailerBin is the in-image path of the Firecracker jailer binary
+	// (Dockerfile.husk-stub installs it next to firecracker). The husk stub
+	// launches every VM through it so tenant VMs run jailed.
+	huskJailerBin = "/usr/local/bin/jailer"
+	// huskChrootBase is the pod-WRITABLE jailer chroot base. It is an emptyDir
+	// (not the read-only snapshot hostPath): the jailer pivot_roots into a per-VM
+	// dir under it and hard-links/copies the snapshot files in, both of which need
+	// a writable filesystem. The stub bind-mounts + privatizes it so pivot_root
+	// works inside the pod.
+	huskChrootBase = "/run/husk/jail"
+	// huskUIDRange is the inclusive uid/gid range the in-pod jailer allocates a
+	// dedicated per-VM uid from (uid 0 refused). It matches forkd's default.
+	huskUIDRange = "64000-64999"
+
 	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
 	// Selection skips any pod carrying it: one claim activates one husk pod.
 	huskClaimLabel = "mitos.run/claim"
@@ -217,12 +231,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	//     privileged: true; KVM access comes from the device plugin slot, not
 	//     from a privileged container.
 	//   - AllowPrivilegeEscalation: false. No setuid path can regain privilege.
-	//   - Capabilities Drop ALL, add NONE. The dormant stub only Prepares a
-	//     Firecracker VMM (open /dev/kvm via the device plugin, create files
-	//     under the pod-local workdir, bind a unix socket); none of that needs a
-	//     Linux capability. Networking capabilities (e.g. NET_ADMIN for tap
-	//     setup) arrive with the networking slice, not here; we add back none so
-	//     this slice stays minimal.
+	//   - Capabilities Drop ALL, add EXACTLY CAP_SYS_ADMIN. The stub launches
+	//     each VM through the jailer, which needs CAP_SYS_ADMIN to build the jail
+	//     (cgroup + mount namespace + chroot); the stub itself needs it for the
+	//     one mount(2) that bind-mounts and privatizes the chroot base so the
+	//     jailer can pivot_root inside the pod (a pod's rootfs is commonly a shared
+	//     mount, which pivot_root refuses). This is the SINGLE capability the
+	//     jailed-in-pod model adds; the jailer then drops to an unprivileged per-VM
+	//     uid inside the jail, so a guest that escapes the microVM lands as a
+	//     throwaway uid in an empty chroot, NOT with CAP_SYS_ADMIN. Networking
+	//     capabilities (e.g. NET_ADMIN for tap setup) arrive with the networking
+	//     slice, not here.
 	//   - SeccompProfile RuntimeDefault, set at BOTH the pod and the container
 	//     securityContext level. restricted checks the profile at the pod OR the
 	//     container level; setting both keeps the pod-level control satisfied even
@@ -258,6 +277,18 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		"--tls-ca", filepath.Join(huskCAMountPath, "ca.crt"),
 	}
 
+	// Launch every VM through the jailer: a per-VM uid/gid from --uid-range, a
+	// chroot (pivot_root) under --chroot-base, and a cgroup the jailer nests under
+	// the pod's own cgroup (it creates a child, it does not override the pod's
+	// memory.max). This is what makes a microVM escape land as a throwaway uid in
+	// an empty chroot instead of the pod's uid 0. The stub privatizes --chroot-base
+	// so pivot_root works inside the pod (cmd/husk-stub prepareChrootMount).
+	args = append(args,
+		"--jailer", huskJailerBin,
+		"--chroot-base", huskChrootBase,
+		"--uid-range", huskUIDRange,
+	)
+
 	// Snapshot verify gate (fail-closed): when the pool has a recorded template
 	// digest, mount the recorded CAS manifest and point the stub at it so it
 	// re-verifies the snapshot (digest + snapcompat) before loading. Without a
@@ -287,6 +318,19 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// hostPath dependency; documented as a follow-up.
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
+
+	// The jailer chroot base must be a pod-WRITABLE filesystem (an emptyDir),
+	// separate from the read-only snapshot hostPath: the jailer creates per-VM
+	// chroot dirs here and the stub links/copies the snapshot into them. emptyDir
+	// is pod-scoped and torn down with the pod, so no per-VM jail outlives it.
+	volumes = append(volumes, corev1.Volume{
+		Name: "jailer-chroot",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+	mounts = append(mounts, corev1.VolumeMount{Name: "jailer-chroot", MountPath: huskChrootBase})
+
 	if opts.TLSSecretName != "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "husk-tls",
@@ -492,7 +536,19 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 						AllowPrivilegeEscalation: ptrBool(false),
 						RunAsNonRoot:             ptrBool(runAsNonRoot),
 						Capabilities: &corev1.Capabilities{
+							// Drop everything, then add back EXACTLY CAP_SYS_ADMIN.
+							// The stub needs it for two things, both inside the pod's
+							// own mount namespace: (1) mount(2) to bind + privatize
+							// the jailer chroot base so the jailer can pivot_root in a
+							// pod; (2) the jailer's own jail construction (cgroup +
+							// namespace + chroot). This is the SINGLE capability the
+							// jailed-in-pod model adds; the jailer then drops to an
+							// unprivileged per-VM uid inside the jail, so a VMM escape
+							// does NOT inherit CAP_SYS_ADMIN. Without it the VM would
+							// run UNJAILED as the pod uid, which is unacceptable for
+							// untrusted tenants. Documented in docs/threat-model.md.
 							Drop: []corev1.Capability{"ALL"},
+							Add:  []corev1.Capability{"SYS_ADMIN"},
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
