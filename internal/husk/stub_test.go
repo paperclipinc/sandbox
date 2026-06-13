@@ -573,6 +573,90 @@ func TestActivateNeverLogsEntropyOrSecrets(t *testing.T) {
 	}
 }
 
+func TestPrepareClonesRootfsWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "templates", "tmpl", "rootfs.ext4")
+	if err := os.MkdirAll(filepath.Dir(tmplRootfs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmplRootfs, []byte("ROOTFS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+
+	var gotSrc, gotDst string
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink: func(src, dst string) error {
+			gotSrc, gotDst = src, dst
+			return os.WriteFile(dst, []byte("CLONE"), 0o644)
+		},
+	})
+
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if gotSrc != tmplRootfs {
+		t.Errorf("reflink src = %q, want template rootfs %q", gotSrc, tmplRootfs)
+	}
+	wantDst := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if gotDst != wantDst {
+		t.Errorf("reflink dst = %q, want per-activation path %q", gotDst, wantDst)
+	}
+	if _, err := os.Stat(wantDst); err != nil {
+		t.Errorf("clone not written: %v", err)
+	}
+}
+
+func TestPrepareSkipsCloneWhenUnconfigured(t *testing.T) {
+	called := false
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		Reflink: func(src, dst string) error { called = true; return nil },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if called {
+		t.Error("reflink must not run when RootfsTemplatePath/RootfsCoWDir are empty")
+	}
+}
+
+func TestPrepareCloneFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vm := &fakeVMM{}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       filepath.Join(dir, "husk-rootfs"),
+		Reflink:            func(src, dst string) error { return errors.New("no space") },
+	})
+	if err := s.Prepare(context.Background()); err == nil {
+		t.Fatal("expected Prepare to fail closed on clone error")
+	}
+	if s.State() == StateDormant {
+		t.Error("state must not be dormant after a failed clone")
+	}
+	if !vm.closed {
+		t.Error("the dormant VMM must be torn down when Prepare fails closed")
+	}
+}
+
 // TestFakeVMMSatisfiesInterface fails to compile if the vmm interface gains a
 // method fakeVMM does not implement, keeping the fake in lockstep with the seam.
 func TestFakeVMMSatisfiesInterface(t *testing.T) {
