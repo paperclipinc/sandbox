@@ -1,0 +1,4 @@
+# Accepted CVEs for the mitos container images (issue #35).
+# Each entry MUST carry a CVE id and a one-line reason it is accepted
+# (unreachable in our usage, or no fix yet and mitigated elsewhere).
+# Format: one CVE id per line, comments with #. Empty for now.
