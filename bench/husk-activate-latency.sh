@@ -92,6 +92,19 @@ echo "measuring warm-claim activate latency: pool=$POOL ns=$NAMESPACE iterations
 for i in $(seq 1 "$ITERATIONS"); do
   claim="bench-activate-${RUN_ID}-${i}"
 
+  # Wait for a warm dormant pod (a Running husk pod that no claim has taken yet)
+  # before claiming, so each sample is a real warm activation and not blocked on
+  # warm-pool refill after the previous claim released its pod. A dormant pod is
+  # husk=true, Running, and does NOT carry the mitos.run/claim label.
+  warmdeadline=$(( $(date +%s) + READY_TIMEOUT ))
+  while [ "$(date +%s)" -lt "$warmdeadline" ]; do
+    dormant="$(kubectl get pods -n "$NAMESPACE" \
+      -l 'mitos.run/husk=true,!mitos.run/claim' \
+      --field-selector=status.phase=Running -o name 2>/dev/null | head -1 || true)"
+    [ -n "$dormant" ] && break
+    sleep "$POLL_INTERVAL"
+  done
+
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<EOF
 apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim

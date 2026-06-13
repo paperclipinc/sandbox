@@ -151,3 +151,14 @@ warm pool with dormant pods available.
   the run.
 - The restore samples come from the forkd / husk-stub logs for the same
   activations; the CoW marginal-memory basis is the husk-probe CI proof.
+
+## Reproduction confirmed (committed script)
+
+`bench/husk-activate-latency.sh` was run against the live bare-metal cluster and
+reproduced the activate figure independently: P50 27.46 ms (N=6 valid; min 25.13,
+max 35.89; raw 25.13 25.71 27.46 31.39 31.49 35.89). A second, earlier run gave
+P50 24.48 ms (N=6). All three runs (incl. the N=11 reference above) land at P50
+~24 to 27 ms. The skipped iterations are warm-pool refill throughput, not activate
+latency: the pool refills roughly one dormant pod per ~10 to 14 s, so claims issued
+faster than that wait for a warm slot. The script paces by waiting for a dormant
+pod before each claim and honestly reports only the warm activations it measured.
