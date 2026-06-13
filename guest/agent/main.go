@@ -31,6 +31,13 @@ var startTime = time.Now()
 
 // configuredEnv holds claim-time env+secrets delivered via the configure
 // message. Values are never logged. Guarded by configuredMu.
+// guestKernel is the single per-sandbox code-interpreter kernel. It is started
+// lazily on the first run_code and persists for the VM lifetime so the Python
+// namespace survives across calls (and across the dedicated per-call vsock
+// connections). A base image without ipykernel/the driver yields a
+// KernelUnavailable frame; exec is unaffected.
+var guestKernel = newKernelManager(kernelConfig{})
+
 var (
 	configuredMu  sync.Mutex
 	configuredEnv = map[string]string{}
