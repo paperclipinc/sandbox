@@ -19,6 +19,7 @@ const (
 	TypeUntarDir     RequestType = "untar_dir"
 	TypeExecStream   RequestType = "exec_stream"
 	TypeRunCode      RequestType = "run_code"
+	TypePty          RequestType = "pty"
 )
 
 // MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
@@ -54,6 +55,7 @@ type Request struct {
 	UntarDir     *UntarDirRequest     `json:"untar_dir,omitempty"`
 	ExecStream   *ExecRequest         `json:"exec_stream,omitempty"`
 	RunCode      *RunCodeRequest      `json:"run_code,omitempty"`
+	Pty          *PtyRequest          `json:"pty,omitempty"`
 }
 
 // RunCodeRequest asks the guest agent to run a code snippet in the stateful
@@ -310,6 +312,48 @@ type ListDirResponse struct {
 
 type PingResponse struct {
 	Uptime float64 `json:"uptime_seconds"`
+}
+
+// PtyRequest opens an interactive pseudo-terminal in the guest and starts a
+// shell attached to it. Command is the shell to run (default /bin/sh when
+// empty); WorkingDir defaults to /workspace. Cols and Rows are the initial
+// window size in characters (each defaulting to a sane minimum when zero). The
+// reply is a stream of PtyFrame lines on the same DEDICATED connection, which
+// the host also writes input and resize frames to: a PTY is bidirectional,
+// unlike exec_stream. Env is merged like exec. None of these fields are secret
+// values, but a PTY is a live shell into the VM and is gated by the per-sandbox
+// bearer token at the forkd edge.
+type PtyRequest struct {
+	Command    string            `json:"command,omitempty"`
+	WorkingDir string            `json:"working_dir,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Cols       int               `json:"cols,omitempty"`
+	Rows       int               `json:"rows,omitempty"`
+}
+
+// PtyFrameKind tags a PtyFrame. input/resize flow client->guest; output/exit
+// flow guest->client.
+type PtyFrameKind string
+
+const (
+	PtyInput  PtyFrameKind = "input"
+	PtyResize PtyFrameKind = "resize"
+	PtyOutput PtyFrameKind = "output"
+	PtyExit   PtyFrameKind = "exit"
+)
+
+// PtyFrame is one newline-delimited JSON line on the dedicated PTY connection
+// (and one WebSocket text frame at the forkd edge). Data is a []byte so the
+// JSON encoder base64s it: raw terminal bytes (control sequences) survive and
+// no embedded newline is mistaken for a frame boundary. Cols/Rows are set only
+// on a resize frame; ExitCode and Error only on the terminal exit frame.
+type PtyFrame struct {
+	Kind     PtyFrameKind `json:"kind"`
+	Data     []byte       `json:"data,omitempty"`
+	Cols     int          `json:"cols,omitempty"`
+	Rows     int          `json:"rows,omitempty"`
+	ExitCode int          `json:"exit_code,omitempty"`
+	Error    string       `json:"error,omitempty"`
 }
 
 const (

@@ -254,7 +254,15 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
 	mux.HandleFunc("POST /v1/files/mkdir", api.handleMkdir)
 	mux.HandleFunc("POST /v1/files/remove", api.handleRemove)
-	return api.requireBearer(mux)
+
+	// The PTY WebSocket upgrade is a bodyless GET, so it cannot go through the
+	// body-peeking requireBearer middleware; it authenticates itself in
+	// handlePty (ptyAuth: ?sandbox= + Authorization: Bearer). It is mounted on
+	// a separate outer mux that is NOT wrapped.
+	outer := http.NewServeMux()
+	outer.HandleFunc("GET /v1/pty", api.handlePty)
+	outer.Handle("/", api.requireBearer(mux))
+	return outer
 }
 
 // maxAuthBodyBytes bounds how much request body the auth middleware buffers.

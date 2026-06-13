@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -246,6 +247,33 @@ func (c *Client) UntarDir(path string, tar []byte) error {
 type StreamConn struct {
 	conn    net.Conn
 	scanner *bufio.Scanner
+	// writeMu guards all host->guest writes on a bidirectional PTY stream so
+	// concurrent input/resize frames never interleave mid-line on the wire.
+	writeMu sync.Mutex
+	// ptyReady is closed by Pty once the open request is on the wire. SendInput
+	// and Resize block on it so an input/resize frame can never reach the guest
+	// before the request line that the guest's first read consumes; without this
+	// a caller that fires Resize concurrently with Pty could have the guest mistake
+	// the resize frame for the request line. Created lazily under initOnce.
+	initOnce  sync.Once
+	readyOnce sync.Once
+	ptyReady  chan struct{}
+}
+
+// ptyReadyCh lazily creates and returns the ptyReady channel so both Pty and the
+// frame writers observe the same instance.
+func (s *StreamConn) ptyReadyCh() chan struct{} {
+	s.initOnce.Do(func() {
+		s.ptyReady = make(chan struct{})
+	})
+	return s.ptyReady
+}
+
+// signalPtyReady marks the open request as written so blocked input/resize
+// writers may proceed. Idempotent.
+func (s *StreamConn) signalPtyReady() {
+	ch := s.ptyReadyCh()
+	s.readyOnce.Do(func() { close(ch) })
 }
 
 // DialStream opens a fresh vsock connection to the guest agent for one
@@ -430,4 +458,93 @@ func (s *StreamConn) Exec(command, workingDir string, env map[string]string, tim
 		Stderr:     errb.String(),
 		ExecTimeMs: exit.ExecTimeMs,
 	}, nil
+}
+
+// OutputFunc receives one slice of raw PTY output bytes as it arrives.
+// Returning a non-nil error stops the stream early.
+type OutputFunc func(data []byte) error
+
+// Pty opens an interactive pseudo-terminal in the guest and streams its output
+// to onOutput, returning the terminal PtyFrame (exit code, and any spawn
+// error). Unlike ExecStream this connection is BIDIRECTIONAL: the caller writes
+// input and resize frames concurrently via SendInput and Resize while Pty reads
+// output frames. If ctx is cancelled the connection is closed, which the guest
+// observes and uses to kill the shell process group.
+func (s *StreamConn) Pty(ctx context.Context, req *PtyRequest, onOutput OutputFunc) (*PtyFrame, error) {
+	data, err := json.Marshal(&Request{Type: TypePty, Pty: req})
+	if err != nil {
+		return nil, err
+	}
+	s.writeMu.Lock()
+	_, werr := s.conn.Write(append(data, '\n'))
+	s.writeMu.Unlock()
+	// Unblock any SendInput/Resize callers now that the open request is on the
+	// wire (even on error: a blocked writer should observe the closed conn, not
+	// hang forever).
+	s.signalPtyReady()
+	if werr != nil {
+		return nil, fmt.Errorf("send pty: %w", werr)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.conn.Close()
+		case <-done:
+		}
+	}()
+
+	for s.scanner.Scan() {
+		var f PtyFrame
+		if err := json.Unmarshal(s.scanner.Bytes(), &f); err != nil {
+			return nil, fmt.Errorf("decode pty frame: %w", err)
+		}
+		switch f.Kind {
+		case PtyOutput:
+			if err := onOutput(f.Data); err != nil {
+				return nil, err
+			}
+		case PtyExit:
+			return &f, nil
+		default:
+			return nil, fmt.Errorf("unexpected pty frame kind: %q", f.Kind)
+		}
+	}
+	if err := s.scanner.Err(); err != nil {
+		return nil, fmt.Errorf("recv pty: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, fmt.Errorf("pty: connection closed before exit frame")
+}
+
+// SendInput writes one input frame (raw keystroke bytes) to the guest PTY. Safe
+// to call concurrently with Pty; the write is mutex-guarded.
+func (s *StreamConn) SendInput(data []byte) error {
+	return s.writeFrame(PtyFrame{Kind: PtyInput, Data: data})
+}
+
+// Resize writes one resize frame; the guest applies it to the PTY master with
+// TIOCSWINSZ, and the kernel delivers SIGWINCH to the foreground group.
+func (s *StreamConn) Resize(cols, rows int) error {
+	return s.writeFrame(PtyFrame{Kind: PtyResize, Cols: cols, Rows: rows})
+}
+
+func (s *StreamConn) writeFrame(f PtyFrame) error {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	// Wait until Pty has put the open request on the wire so this frame cannot
+	// be mistaken for the request by the guest's first read.
+	<-s.ptyReadyCh()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.conn.Write(append(b, '\n')); err != nil {
+		return fmt.Errorf("write pty frame: %w", err)
+	}
+	return nil
 }

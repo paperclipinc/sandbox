@@ -111,6 +111,23 @@ class AsyncSandbox:
             return {"Authorization": f"Bearer {self._token}"}
         return {}
 
+    def pty_url(self, cols: int = 80, rows: int = 24) -> str:
+        base = self._base_url  # http(s)://<endpoint>/v1
+        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return f"{ws_base}/pty?sandbox={self.id}&cols={cols}&rows={rows}"
+
+    async def create_pty(self, on_data, cols: int = 80, rows: int = 24):
+        """Open an interactive PTY over a WebSocket and return an
+        AsyncPtyHandle (send_input, resize, kill, wait -> exit_code). Gated by
+        the per-sandbox bearer token, sent in the Authorization header."""
+        from mitos.pty import AsyncPtyHandle
+
+        return await AsyncPtyHandle.connect(
+            url=self.pty_url(cols, rows),
+            token=self._token,
+            on_data=on_data,
+        )
+
     async def exec(
         self,
         command: str,

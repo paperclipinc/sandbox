@@ -5,6 +5,7 @@ go 1.26.2
 toolchain go1.26.4
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/cyphar/filepath-securejoin v0.6.1
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-containerregistry v0.20.6

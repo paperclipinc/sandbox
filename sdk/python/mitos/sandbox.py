@@ -13,6 +13,7 @@ from kubernetes.client.rest import ApiException
 
 from mitos._envelope import raise_for_status, raise_for_status_stream
 from mitos.errors import AgentRunError
+from mitos.pty import PtyHandle
 from mitos.types import (
     BackgroundProcess,
     ExecResult,
@@ -185,6 +186,32 @@ class SandboxFiles:
         raise_for_status(resp, token=self._sandbox._token)
 
 
+class SandboxPty:
+    """PTY operations on a sandbox: create an interactive terminal."""
+
+    def __init__(self, sandbox: "Sandbox"):
+        self._sandbox = sandbox
+
+    def create(
+        self,
+        on_data: Callable[[bytes], None],
+        cols: int = 80,
+        rows: int = 24,
+    ) -> PtyHandle:
+        """Open an interactive PTY (a shell) in the sandbox. Output bytes are
+        delivered to on_data on a background thread. Returns a PtyHandle with
+        send_input(bytes), resize(cols, rows), kill(), and wait() -> exit_code.
+
+        The transport is a WebSocket to the sandbox API's /v1/pty, gated by the
+        per-sandbox bearer token (sent in the Authorization header, never
+        logged)."""
+        base = self._sandbox._base_url  # http://<endpoint>/v1
+        ws_base = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        ref = self._sandbox._sandbox_ref
+        url = f"{ws_base}/pty?sandbox={ref}&cols={cols}&rows={rows}"
+        return PtyHandle(url=url, token=self._sandbox._token, on_data=on_data)
+
+
 class Sandbox:
     """A running sandbox instance."""
 
@@ -211,6 +238,7 @@ class Sandbox:
         self._token: Optional[str] = None
         self._http = httpx.Client(timeout=30.0)
         self.files = SandboxFiles(self)
+        self.pty = SandboxPty(self)
 
     @property
     def _base_url(self) -> str:
