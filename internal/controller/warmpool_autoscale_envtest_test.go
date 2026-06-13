@@ -162,4 +162,72 @@ func TestWarmPoolAutoscaleUpDown(t *testing.T) {
 	if fresh.Status.LastScaleDownTime == nil {
 		t.Fatal("Status.LastScaleDownTime should be set after a scale-down")
 	}
+
+	// Phase 4: a claimed/in-use husk pod MUST survive a scale-down whose desired
+	// drops below inUse. This locks in the safety property that reconcileHuskPods
+	// only ever deletes SURPLUS DORMANT pods, never a claimed one. We are at 2
+	// dormant, 0 in-use here. Mark BOTH dormant pods claimed so inUse=2, dormant=0,
+	// then reconcile to refill the spare (desired = clamp(2+2,1,8)=4 -> 4 dormant).
+	demand.RecordArrival("default/"+pool.Name, frozen)
+	r.Now = func() time.Time { return frozen }
+	markClaimed(2)
+	reconcile()
+	if got := countDormant(); got != 4 {
+		t.Fatalf("phase 4 setup dormant = %d, want 4", got)
+	}
+
+	// Capture the names of the two claimed pods so we can prove they still exist
+	// after the scale-down (not merely that the claimed COUNT held).
+	claimedNames := func() map[string]bool {
+		var cps corev1.PodList
+		if err := k8sClient.List(ctx, &cps, client.InNamespace("default"),
+			client.MatchingLabels{"mitos.run/pool": pool.Name, "mitos.run/husk": "true", "mitos.run/claim": "claim-sim"}); err != nil {
+			t.Fatalf("list claimed pods: %v", err)
+		}
+		names := map[string]bool{}
+		for i := range cps.Items {
+			if cps.Items[i].DeletionTimestamp != nil {
+				continue
+			}
+			names[cps.Items[i].Name] = true
+		}
+		return names
+	}
+	before := claimedNames()
+	if len(before) != 2 {
+		t.Fatalf("phase 4 expected 2 claimed pods before scale-down, got %d", len(before))
+	}
+
+	// Drive an idle+cooldown scale-down to a desired BELOW inUse: clear demand and
+	// advance past the cooldown so desired = clamp(inUse(2)+spare? no, idle) ... the
+	// floor is MinWarm=1, so desired = clamp(2+2,1,8)=4 still includes inUse. To get
+	// desired strictly below inUse we shrink the autoscale window so the ceiling
+	// MaxWarm forces desired under inUse: with inUse=2 set MaxWarm=1 so
+	// desired = clamp(2+2,1,1)=1 < inUse=2. The scale-down must remove dormant pods
+	// only and leave BOTH claimed pods intact.
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, pool); err != nil {
+		t.Fatalf("get pool to shrink window: %v", err)
+	}
+	pool.Spec.Autoscale.MaxWarm = 1
+	pool.Spec.Autoscale.MinWarm = 1
+	if err := k8sClient.Update(ctx, pool); err != nil {
+		t.Fatalf("shrink autoscale window: %v", err)
+	}
+	r.Now = func() time.Time { return frozen.Add(10 * time.Minute) } // well past the 60 s cooldown
+	reconcile()
+
+	// The claimed pods must all still be present, undeleted.
+	after := claimedNames()
+	for name := range before {
+		if !after[name] {
+			t.Fatalf("claimed husk pod %q was deleted by scale-down; claimed pods must survive (desired below inUse)", name)
+		}
+	}
+	if len(after) != 2 {
+		t.Fatalf("phase 4 claimed pods after scale-down = %d, want 2 (claimed pods are never reaped)", len(after))
+	}
+	// And the dormant set was driven down to the ceiling (only dormant pods removed).
+	if got := countDormant(); got > 1 {
+		t.Fatalf("phase 4 dormant after scale-down = %d, want <= 1 (surplus dormant removed)", got)
+	}
 }
