@@ -416,6 +416,15 @@ Until the above are closed, treat the whole cluster as one trust domain.
   say so until one has.
 - Side-channel resistance between forks of the same snapshot is not claimed.
 
+## Supply chain and artifact provenance (issue #35)
+
+| Boundary | Status | Mechanism |
+|---|---|---|
+| Image provenance (controller, forkd, husk-stub) | mitigated for published releases | cosign keyless signing + SPDX SBOM attestation, bound to the image digest, produced by `.github/workflows/publish.yaml`; consumer verification in docs/supply-chain.md. |
+| Image CVEs | partial | Trivy scans the built images on every PR for HIGH/CRITICAL fixable findings (ADVISORY today: reported, not yet gating, pending base-image remediation); govulncheck is the BLOCKING gate for Go call-graph-reachable vulnerabilities; base-image and dependency bumps arrive via dependabot. Runtime re-scan of long-lived published tags is not yet automated. |
+| Guest kernel currency | partial | The shipped vmlinux is pinned to an exact version (docs/kernel-cve.md) and validated end to end by the KVM workflow; CVE watch is a documented manual process, not an automated feed. |
+| Admission-time signature enforcement | open | The project ships signatures; requiring them at admission (policy-controller/Kyverno) is a documented operator choice, not a default. |
+
 ## Review gate
 
 An external security review is required before any 1.0 (or "production-ready")

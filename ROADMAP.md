@@ -404,6 +404,16 @@ Format-freeze blockers:
 With #32 (mechanism done), #33 (mechanism done), and #31 (mechanism + custody
 both done, CI-proven), all three format-freeze blockers are now fully addressed.
 
+Process foundations status:
+
+- Security operations (#35): cosign keyless signing + SBOM attestation of the
+  published images, govulncheck + Trivy as CVE gates, a kernel-CVE tracking doc
+  with an exact pinned vmlinux, a CODEOWNERS-backed security-review-required-
+  paths policy, and a SECURITY.md gap-fill are DONE (engineering). OPEN
+  (human-gated): the monitored disclosure mailbox, the real reviewer org
+  membership behind CODEOWNERS, the published response-SLA commitment, an
+  automated kernel-CVE feed, and admission-time signature enforcement defaults.
+
 ## 0. Make the claimed system real (in progress)
 
 The README previously described an end-to-end system; parts of it were stubs.

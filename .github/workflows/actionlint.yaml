@@ -1,0 +1,33 @@
+name: Lint workflows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    # Lint every GitHub Actions workflow. A malformed supply-chain job (signing,
+    # SBOM, Trivy, govulncheck) would otherwise silently disable a security
+    # control; actionlint fails the PR instead. Issue #35.
+    #
+    # The external shellcheck plugin is disabled (-shellcheck=). The long-
+    # standing kvm-test.yaml and ci.yaml run-steps carry many pre-existing
+    # SC2086 quoting and unused-variable style findings that are out of scope
+    # for this gate; this job enforces actionlint's NATIVE checks (workflow
+    # syntax, job/matrix structure, permissions like id-token, action refs,
+    # expression typing), which is what catches a malformed signing or scan
+    # job. Tightening the shell scripts to re-enable shellcheck is tracked
+    # separately, not gated here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck=

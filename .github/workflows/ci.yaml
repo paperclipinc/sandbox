@@ -39,6 +39,23 @@ jobs:
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
           "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
 
+  govulncheck:
+    # Go-native vulnerability scan. govulncheck reports only vulnerabilities
+    # reachable from this module's call graph, so it is low-noise and a
+    # required gate. CVE/dependency pipeline, issue #35. A new finding fails
+    # the job; the fix is a dependency bump (dependabot opens most of these)
+    # or, only for a provably unreachable advisory, a documented exclusion.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
   manifests:
     # Validate the production deploy manifests: kubeconform schema-checks every
     # YAML under deploy/ and kubectl proves the kustomize base resolves. Core
@@ -161,6 +178,34 @@ jobs:
       # pod-native default, issue #18). It is referenced by the controller
       # Deployment's --husk-stub-image, so it must build cleanly here.
       - run: docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
+      # Trivy scans each locally built image for known OS/library CVEs (CVE
+      # pipeline, issue #35). Installed directly from a pinned release (the
+      # marketplace action's binary installer proved flaky in CI). Phased in as
+      # ADVISORY: fixable HIGH/CRITICAL findings are printed for visibility but
+      # do not gate yet, because the ubuntu/distroless bases carry pre-existing
+      # fixable CVEs whose remediation (base bumps) is tracked separately. The
+      # BLOCKING vulnerability gate today is govulncheck (our Go code + deps,
+      # which is clean). Making this image scan blocking is the follow-up once
+      # the base images are remediated. Accepted CVEs live in .trivyignore.
+      - name: Trivy image scan (advisory)
+        # Fully tolerant: ADVISORY today, so neither a Trivy install hiccup nor a
+        # findings hit may gate the job. Install via the official script (it
+        # resolves the right asset and arch); on any failure log a warning and
+        # continue. The BLOCKING vulnerability gate is govulncheck.
+        run: |
+          set +e
+          if ! curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin v0.58.1; then
+            echo "::warning::Trivy install failed; skipping advisory image scan"
+            exit 0
+          fi
+          trivy --version || { echo "::warning::Trivy not runnable; skipping advisory image scan"; exit 0; }
+          for img in mitos-controller:ci mitos-forkd:ci mitos-husk-stub:ci; do
+            echo "=== Trivy scan ${img} (HIGH,CRITICAL, fixable) ==="
+            trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --ignorefile .trivyignore "${img}" \
+              || echo "::warning::Trivy reported findings or errored for ${img} (advisory; tracked for base-image remediation before this gate becomes blocking)"
+          done
+          exit 0
 
   kind-e2e:
     runs-on: ubuntu-latest
@@ -569,12 +614,12 @@ jobs:
         run: |
           set -euo pipefail
           ARCH=$(uname -m)
-          FC_VERSION=v1.15.0
-          CI_VERSION=$(echo $FC_VERSION | sed 's/v//' | cut -d. -f1-2)
-          KERNEL_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-" \
-            | grep -oP "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]+" \
-            | sort -V | tail -1)
-          echo "Staging kernel: $KERNEL_KEY"
+          # Pinned guest kernel. The exact version we ship is recorded in
+          # docs/kernel-cve.md; a bump is a reviewed diff to this line and the
+          # matching line in kvm-test.yaml, never a floating "latest" resolve.
+          KERNEL_VERSION=6.1.155
+          KERNEL_KEY="firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
+          echo "Staging pinned kernel: $KERNEL_KEY"
           curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
           # The kind worker node is a docker container named mitos-husk-worker;
           # copy the kernel into its /var/lib/mitos (the forkd/husk hostPath).
