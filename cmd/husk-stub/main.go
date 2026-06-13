@@ -159,6 +159,8 @@ func run() error {
 		manifest        = flag.String("manifest", "", "path to the recorded CAS manifest for the template snapshot. When set, the stub re-verifies the snapshot (digest integrity + snapcompat) against it BEFORE loading, fail-closed (the husk mirror of forkd's verify-on-load gate, issues #9 and #32). The manifest is a content address, not a secret")
 		allowUnverified = flag.Bool("allow-unverified-snapshots", false, "DEVELOPMENT ONLY: skip the activate-time snapshot integrity + compatibility verification, mirroring forkd's --allow-unverified-snapshots. Default false keeps verify enforced; a missing manifest/digest or a failed check then refuses the activate (fail-closed)")
 		expectedDigest  = flag.String("expected-digest", "", "activate client mode: the template's recorded CAS manifest digest, threaded into the ActivateRequest so the serving stub verifies the snapshot against it (a content address, not a secret)")
+		rootfsCoWDir    = flag.String("rootfs-cow-dir", "", "directory on the SAME node filesystem as the template rootfs where this activation's copy-on-write rootfs clone is written (reflink where supported, full copy otherwise). Empty keeps the prior behavior of writing the shared template rootfs in place. A content address, not a secret")
+		templateRootfs  = flag.String("template-rootfs", "", "host path of the template rootfs.ext4 to clone per activation. Empty (with --rootfs-cow-dir) disables the per-activation clone")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -277,6 +279,13 @@ func run() error {
 		// so the claim's Activate is just the load + handshake, not the re-hash.
 		PrepareSnapshotDir:    *snapshotDir,
 		PrepareExpectedDigest: *expectedDigest,
+		// Per-activation rootfs CoW: clone the template rootfs to a per-pod file
+		// on a writable co-located volume at Prepare and rebind the rootfs drive
+		// to it at Activate, so concurrent activations of one template never
+		// share or corrupt a single rootfs. Both empty keeps the prior in-place
+		// shared-rootfs behavior.
+		RootfsTemplatePath: *templateRootfs,
+		RootfsCoWDir:       *rootfsCoWDir,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")
