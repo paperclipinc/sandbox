@@ -70,6 +70,36 @@ const rev = await sb.terminate({ outputs: ['/workspace/dist'] });
 
 **Compatibility shims** (separate packages, same engine): `mitos-e2b` (drop-in `Sandbox` class) and an OpenAI code-interpreter-shaped HTTP endpoint, so LangChain/LlamaIndex/Vercel-AI users swap one import.
 
+### 1.2.1 Code interpreter (`run_code`)
+
+`run_code` runs a code snippet in a STATEFUL in-guest Python kernel (ipykernel),
+distinct from `exec` (a shell command). State persists across calls for the
+sandbox lifetime: a variable set in one `run_code` is visible in the next. It is
+the E2B-shaped code-interpreter surface.
+
+- Endpoint: `POST /v1/run_code/stream` on the sandbox API (forkd :9091 or
+  sandbox-server), gated by the same per-sandbox bearer token as `/v1/exec`.
+  Request body: `{sandbox, code, language?="python", timeout?}`.
+- Transport: chunked NDJSON, one `ExecStreamFrame` per line, each tagged with a
+  `kind`:
+  - `{"kind":"stdout","stdout":<base64>}` and `{"kind":"stderr","stderr":<base64>}`: buffered logs.
+  - `{"kind":"result","result":{"text":<str>,"data":{<mime>:<payload>}}}`: one rich
+    display artifact. `data` maps a MIME type to its payload (base64 for
+    `image/png`/`image/jpeg`, raw text for `text/html`, `image/svg+xml`,
+    `text/markdown`, `text/latex`, `application/json`, `text/plain`). `text` is
+    the REPL last-expression value (the main result).
+  - `{"kind":"error","error":{"name","value","traceback":[...]}}`: a structured
+    exception.
+  - `{"kind":"exit","exit_code":<int>}`: terminal frame (0 ok, 1 on a guest-code
+    exception, 127 when the kernel is unavailable).
+- SDKs return an `Execution` (`{text, logs:{stdout[],stderr[]}, results[],
+  error}`) and fire `on_stdout`/`on_stderr`/`on_result` (Python) /
+  `onStdout`/`onStderr`/`onResult` (TypeScript) live as frames arrive.
+- Requires a base image with the kernel baked in (`FULL_ROOTFS=1`, which
+  installs ipykernel + jupyter_client + matplotlib + pandas and
+  `/opt/mitos/kernel_driver.py`). A minimal image without the kernel returns a
+  `KernelUnavailable` error frame and exit 127; `exec` is unaffected.
+
 ### 1.3 CLI verbs (flyctl-grade; kubectl never required)
 
 ```
