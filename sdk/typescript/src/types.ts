@@ -29,6 +29,30 @@ export interface ExecResult {
   execTimeMs?: number;
 }
 
+/** One rich display artifact from runCode (mirrors E2B's Result). data maps a
+ * MIME type to its payload (base64 for image/png, raw text otherwise). */
+export interface Result {
+  data: Record<string, string>;
+  isMainResult: boolean;
+}
+
+/** A structured exception from runCode (mirrors E2B's error). */
+export interface ExecutionError {
+  name: string;
+  value: string;
+  traceback: string[];
+}
+
+/** The full result of a runCode call (mirrors E2B's Execution). text is the
+ * REPL last-expression value; logs holds buffered stdout/stderr; results are
+ * the rich artifacts in order; error is the structured exception or null. */
+export interface Execution {
+  text: string | null;
+  logs: { stdout: string[]; stderr: string[] };
+  results: Result[];
+  error: ExecutionError | null;
+}
+
 /**
  * A directory entry returned by files.list. Mirrors the guest agent file
  * listing shape ({name, is_dir, size, mode, modified_at}).
