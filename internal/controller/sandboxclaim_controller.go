@@ -16,6 +16,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/vsock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -795,6 +796,11 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 	waited := now.Sub(pendingSince)
 	maxWait := r.maxPendingDuration()
 
+	// Derive an accurate, cause-specific condition and remediation (issue #28).
+	// reconcileNoCapacity now fronts three distinct re-pend causes, and the
+	// memory-overcommit wording is only correct for one of them.
+	causeClause, remediation := noCapacityCauseText(cause)
+
 	// Bounded fail: capacity never freed within the allowed wait. Surface an
 	// actionable terminal error and stamp FinishedAt so the GC TTL pass reaps it.
 	if waited >= maxWait {
@@ -808,8 +814,8 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 			LastTransitionTime: finished,
 			Reason:             "CapacityExhausted",
 			Message: fmt.Sprintf(
-				"no node had memory capacity under the overcommit policy for %s (waited past the %s bound); scale out forkd nodes or raise the overcommit factor, then recreate the claim",
-				waited.Round(time.Second), maxWait,
+				"%s for %s (waited past the %s bound); %s, then recreate the claim",
+				causeClause, waited.Round(time.Second), maxWait, remediation,
 			),
 		})
 		_ = r.Status().Update(ctx, claim)
@@ -826,13 +832,38 @@ func (r *SandboxClaimReconciler) reconcileNoCapacity(ctx context.Context, claim 
 		LastTransitionTime: metav1.NewTime(now),
 		Reason:             "NoCapacity",
 		Message: fmt.Sprintf(
-			"no node has memory capacity under the overcommit policy; the claim will retry (waited %s of %s), scale out nodes or raise the overcommit factor",
-			waited.Round(time.Second), maxWait,
+			"%s; the claim will retry (waited %s of %s), %s",
+			causeClause, waited.Round(time.Second), maxWait, remediation,
 		),
 	})
 	// Best-effort status write; the return below requeues regardless.
 	_ = r.Status().Update(ctx, claim)
 	return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+}
+
+// noCapacityCauseText maps a re-pend cause to an accurate condition clause and
+// an actionable remediation (issue #28: LLM-legible errors). reconcileNoCapacity
+// fronts three distinct causes, only one of which is the memory-overcommit
+// shortage; surfacing the memory wording for the count-ceiling or
+// node-unreachable causes would be misleading. The returned clause carries no
+// secret values.
+func noCapacityCauseText(cause error) (clause, remediation string) {
+	switch {
+	case hasGRPCCode(cause, codes.ResourceExhausted):
+		// The selected node hit its per-node MaxSandboxes count ceiling between
+		// placement and the Fork RPC (the --max-sandbox cap, a schedule-time race).
+		return "the selected node reached its per-node sandbox-count limit (--max-sandbox)",
+			"add forkd nodes or raise the per-node --max-sandbox limit"
+	case hasGRPCCode(cause, codes.Unavailable):
+		// The selected node went unreachable between placement and the Fork RPC.
+		return "the selected node is unreachable (it left or died mid-fork)",
+			"the claim retries on a healthy node; add forkd nodes if the cluster is down"
+	default:
+		// scheduler ErrNoCapacity: no node admits the fork under the memory
+		// overcommit policy. This is the original wording.
+		return "no node has memory capacity under the overcommit policy",
+			"scale out forkd nodes or raise the overcommit factor"
+	}
 }
 
 // clearPendingSince removes the capacity-pending stamp from the claim's

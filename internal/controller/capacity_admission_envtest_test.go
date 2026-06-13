@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +212,14 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	if pending.Status.Phase == v1alpha1.SandboxFailed {
 		t.Fatal("claim must NOT be Failed on a forkd ResourceExhausted reject")
 	}
+	// The message must reflect the count-ceiling cause, NOT the memory-overcommit
+	// cause (issue #28: accurate, actionable remediation per cause).
+	if strings.Contains(cond.Message, "memory capacity") {
+		t.Fatalf("count-ceiling re-pend message must not claim memory capacity: %q", cond.Message)
+	}
+	if !strings.Contains(cond.Message, "sandbox-count") {
+		t.Fatalf("count-ceiling re-pend message must name the per-node sandbox-count limit: %q", cond.Message)
+	}
 
 	// Clearing the reject lets a later reconcile place the claim and go Ready,
 	// proving the re-pend was recoverable (not a dead end).
@@ -244,6 +253,14 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 	}
 	if pending.Status.Phase == v1alpha1.SandboxFailed {
 		t.Fatal("claim must NOT be Failed on a forkd Unavailable reject")
+	}
+	// The message must reflect the node-unreachable cause, NOT the
+	// memory-overcommit cause (issue #28).
+	if strings.Contains(cond.Message, "memory capacity") {
+		t.Fatalf("node-unreachable re-pend message must not claim memory capacity: %q", cond.Message)
+	}
+	if !strings.Contains(cond.Message, "unreachable") {
+		t.Fatalf("node-unreachable re-pend message must name the unreachable node: %q", cond.Message)
 	}
 }
 
