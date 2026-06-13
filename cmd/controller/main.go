@@ -99,6 +99,14 @@ func main() {
 			BindAddress: metricsAddr,
 		},
 		HealthProbeBindAddress: probeAddr,
+		// Leader election: the Deployment runs multiple replicas for HA, so EXACTLY
+		// ONE may run the reconcilers at a time. Without it every replica reconciles
+		// every object, racing on status writes (optimistic-lock "object has been
+		// modified") AND each independently selecting + claiming dormant husk pods
+		// for the same claim, which under a refilling warm pool becomes a runaway
+		// that drains the pool. The lease lives in the controller's own namespace.
+		LeaderElection:   true,
+		LeaderElectionID: "mitos-controller-leader",
 	})
 	if err != nil {
 		logger.Error(err, "unable to create manager")

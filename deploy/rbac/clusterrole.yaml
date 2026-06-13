@@ -134,3 +134,17 @@ rules:
       - patch
       - update
       - watch
+  # Leader election: the controller Deployment runs multiple replicas for HA but
+  # exactly one may reconcile at a time. controller-runtime coordinates that with
+  # a Lease in the controller's namespace, so it needs leases create/get/update
+  # (+ events, already granted above, to record leader transitions).
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
