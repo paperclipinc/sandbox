@@ -26,9 +26,14 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
         "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" && \
     tar -xzf /tmp/fc.tgz -C /tmp && \
     mv "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker && \
-    chmod +x /usr/local/bin/firecracker && \
+    mv "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer && \
+    chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer && \
     rm -rf /tmp/fc.tgz /tmp/release-* && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Fail the build if either binary is missing: the husk stub launches the VMM
+# through the jailer, so the image must carry both.
+RUN test -x /usr/local/bin/firecracker && test -x /usr/local/bin/jailer
 
 COPY --from=builder /build/husk-stub /usr/local/bin/husk-stub
 
