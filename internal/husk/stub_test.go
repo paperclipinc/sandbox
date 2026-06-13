@@ -657,6 +657,94 @@ func TestPrepareCloneFailureFailsClosed(t *testing.T) {
 	}
 }
 
+func TestActivateRebindsRootfsDriveToClone(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+	vm := &fakeVMM{}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: filepath.Join(dir, "snap")})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("activate not OK: %s", res.Error)
+	}
+	if len(vm.patchCalls) != 1 {
+		t.Fatalf("expected exactly 1 PatchDrive call, got %d: %v", len(vm.patchCalls), vm.patchCalls)
+	}
+	if vm.patchCalls[0].driveID != "rootfs" {
+		t.Errorf("rebind drive id = %q, want \"rootfs\"", vm.patchCalls[0].driveID)
+	}
+	wantPath := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if vm.patchCalls[0].path != wantPath {
+		t.Errorf("rebind path = %q, want clone %q", vm.patchCalls[0].path, wantPath)
+	}
+}
+
+func TestActivateNoRebindWhenNoClone(t *testing.T) {
+	vm := &fakeVMM{}
+	s := newTestStub(t, vm, readyOK)
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap"})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("activate not OK: %s", res.Error)
+	}
+	if len(vm.patchCalls) != 0 {
+		t.Errorf("no rootfs clone configured, so no PatchDrive expected, got %v", vm.patchCalls)
+	}
+}
+
+func TestActivateRebindFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vm := &fakeVMM{patchErr: errors.New("drive busy")}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       filepath.Join(dir, "husk-rootfs"),
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: filepath.Join(dir, "snap")})
+	if err == nil {
+		t.Fatal("expected activate to fail closed on rebind error")
+	}
+	if res.OK {
+		t.Fatal("fail closed: result must not be OK")
+	}
+	if s.State() == StateActive {
+		t.Errorf("state must not be active after a failed rebind, got %s", s.State())
+	}
+}
+
 // TestFakeVMMSatisfiesInterface fails to compile if the vmm interface gains a
 // method fakeVMM does not implement, keeping the fake in lockstep with the seam.
 func TestFakeVMMSatisfiesInterface(t *testing.T) {

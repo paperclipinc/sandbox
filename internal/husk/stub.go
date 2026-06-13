@@ -457,6 +457,22 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 
+	// Rebind the baked "rootfs" drive to THIS activation's CoW clone now that the
+	// snapshot is loaded and resumed, before the guest writes anything. This is the
+	// husk analog of the fork engine's per-fork volume drive rebind: the snapshot
+	// bakes the rootfs block device at path_on_host, and Firecracker supports
+	// updating a drive's path_on_host on a restored+resumed VM (PATCH /drives).
+	// Skipped when no per-activation clone was prepared (the prior shared-rootfs
+	// behavior). Fail closed: a rebind failure means the VM is still pointed at the
+	// shared template rootfs, which is exactly the corruption hazard this prevents,
+	// so do NOT mark active. The drive id and path carry no secrets.
+	if s.rootfsClonePath != "" {
+		if err := s.vm.PatchDrive("rootfs", s.rootfsClonePath); err != nil {
+			werr := fmt.Errorf("husk: rebind rootfs drive to per-activation clone: %w", err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
 	vsockPath := s.vm.VsockHostPath(firecracker.VsockRelPath)
 	if err := s.ready(vsockPath, s.readyTimeout); err != nil {
 		// Fail closed: the snapshot loaded but the guest never answered, so we
