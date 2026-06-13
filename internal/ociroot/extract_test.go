@@ -146,27 +146,37 @@ func TestExtractImageRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
-func TestExtractImageRejectsEscapingSymlink(t *testing.T) {
-	// mutate.Extract drops "../" symlink targets itself, but absolute targets
-	// survive flattening, so an absolute symlink is the case our guard must
-	// catch end to end.
+func TestExtractImageAcceptsAbsoluteSymlink(t *testing.T) {
+	// An absolute symlink target is ROOTFS-RELATIVE: it resolves against the
+	// rootfs root inside the guest (e.g. ca-certificates' /etc/ssl/certs/X.pem
+	// -> /usr/share/...), not the host. It is stored as-is and accepted; rejecting
+	// it would break nearly every real base image. Safety on the host comes from
+	// SecureJoin clamping any write THROUGH it (see the containment test below).
 	img := imageFromEntries(t, []tarEntry{
-		{name: "evil", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+		{name: "link", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
 	})
 
 	dest := t.TempDir()
-	if err := ExtractImage(img, dest); err == nil {
-		t.Fatal("ExtractImage accepted a symlink escaping destDir, want error")
+	if err := ExtractImage(img, dest); err != nil {
+		t.Fatalf("ExtractImage rejected an absolute (rootfs-relative) symlink: %v", err)
+	}
+	got, err := os.Readlink(filepath.Join(dest, "link"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if got != "/etc/passwd" {
+		t.Errorf("symlink stored as %q, want /etc/passwd (verbatim, rootfs-relative)", got)
 	}
 }
 
-func TestExtractImageBlocksWriteThroughSymlinkedParent(t *testing.T) {
-	// Classic parent-symlink-traversal: an earlier entry creates a directory
-	// symlink that points outside destDir, then a later entry writes a file
-	// "through" that symlink (a/x). A lexical join would happily write to
-	// a/x and follow the symlink at extraction time, landing outside destDir.
-	// SecureJoin resolves the symlinked parent on disk and must keep the write
-	// inside destDir (or reject it), never touching the escape target.
+func TestExtractImageContainsWriteThroughAbsoluteSymlinkedParent(t *testing.T) {
+	// An earlier entry creates a directory symlink with an ABSOLUTE target
+	// pointing outside destDir, then a later entry writes a file "through" it
+	// (a/x). The symlink is accepted (rootfs-relative), but SecureJoin must clamp
+	// the write to destDir: the symlink's absolute target resolves against destDir
+	// as the root, so a/x lands INSIDE destDir and NOTHING is written to the real
+	// outside path. This is the load-bearing security property, not rejecting the
+	// symlink.
 	outside := t.TempDir()
 	escapeDir := filepath.Join(outside, "escape")
 
@@ -176,13 +186,11 @@ func TestExtractImageBlocksWriteThroughSymlinkedParent(t *testing.T) {
 	})
 
 	dest := t.TempDir()
-	// The symlink entry itself must be rejected (absolute target), so the
-	// write-through never gets a symlinked parent to follow.
-	if err := ExtractImage(img, dest); err == nil {
-		t.Fatal("ExtractImage accepted a symlinked-parent write-through, want error")
+	if err := ExtractImage(img, dest); err != nil {
+		t.Fatalf("ExtractImage: %v", err)
 	}
 
-	// Nothing may be written through the escaping symlink.
+	// Nothing may be written through the symlink to the REAL outside path.
 	if _, err := os.Stat(filepath.Join(escapeDir, "x")); !os.IsNotExist(err) {
 		t.Fatalf("write-through symlink landed outside destDir at %s (err=%v)", filepath.Join(escapeDir, "x"), err)
 	}
@@ -263,9 +271,14 @@ func TestSymlinkTargetStaysInside(t *testing.T) {
 	if !symlinkTargetStaysInside(dest, filepath.Join(dest, "a/b/link"), "../c/file") {
 		t.Error("relative target that stays inside rejected")
 	}
-	if symlinkTargetStaysInside(dest, filepath.Join(dest, "evil"), "/etc/passwd") {
-		t.Error("absolute symlink target accepted")
+	// Absolute targets are rootfs-relative: resolved against destDir (the rootfs
+	// root), exactly as the kernel resolves them when the rootfs is mounted as
+	// "/", so they stay inside and are accepted (ca-certificates etc.). A write
+	// THROUGH such a symlink is still clamped to destDir by SecureJoin.
+	if !symlinkTargetStaysInside(dest, filepath.Join(dest, "evil"), "/etc/passwd") {
+		t.Error("absolute (rootfs-relative) symlink target rejected")
 	}
+	// A relative target that climbs ABOVE destDir is a real escape, still rejected.
 	if symlinkTargetStaysInside(dest, filepath.Join(dest, "evil"), "../../etc/passwd") {
 		t.Error("relative target escaping dest accepted")
 	}
