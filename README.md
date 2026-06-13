@@ -16,17 +16,24 @@ kubectl apply -f examples/fork.yaml
 ```
 
 ```python
-from mitos import Sandbox
+from mitos import AgentRun
 
-sandbox = Sandbox.create("python-agent-pool")
-result = sandbox.exec("import numpy as np; print(np.mean([1,2,3,4,5]))")
-print(result.stdout)  # 3.0
+c = AgentRun()                                   # kubeconfig or in-cluster; autodetected
 
-# Fork the sandbox to try two approaches in parallel
-fork_a, fork_b = sandbox.fork(2)
-fork_a.exec("open('plan_a.txt', 'w').write('conservative approach')")
-fork_b.exec("open('plan_b.txt', 'w').write('aggressive approach')")
+# One-liner: a lazy default pool is created for the image if you have none.
+sb = c.sandbox("python", ready=True)             # claims a warm sandbox, waits Ready
+result = sb.exec("python -c 'import numpy as np; print(np.mean([1,2,3,4,5]))'")
+print(result.stdout)                             # 3.0
+
+# Fork the running sandbox to try two approaches against shared warmed state.
+fork_a, fork_b = sb.fork(2)
+fork_a.exec("python -c \"open('/workspace/plan_a.txt','w').write('conservative')\"")
+fork_b.exec("python -c \"open('/workspace/plan_b.txt','w').write('aggressive')\"")
+
+sb.terminate()
 ```
+
+`c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxTemplate plus a SandboxPool) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
 
 ## Why
 
@@ -212,8 +219,8 @@ spec:
 
 Two SDKs ship today, both speaking the same `forkd` / `sandbox-server` HTTP wire protocol:
 
-- **Python** (`sdk/python`, pre-PyPI: `pip install -e .`): direct mode against a standalone `sandbox-server` and cluster mode over the CRDs.
-- **TypeScript** (`sdk/typescript`, `@mitos/sdk`): the same direct and cluster modes for Node 18+. The wire protocol is exercised against a mock server by 31 conformance tests and the package is type-checked and packed in CI (`typescript-sdk` job); real in-VM exec is proven by the KVM CI of the underlying API; npm publication is a release follow-up. Parity table in [sdk/typescript/README.md](sdk/typescript/README.md).
+- **Python** (`sdk/python`, pre-PyPI: `pip install -e .`): direct mode against a standalone `sandbox-server`, cluster mode over the CRDs, a one-liner `AgentRun().sandbox("python")` with a lazy default pool, `fork()` of a running sandbox, `from_name()` reconnect, `wait_until_ready()`, streaming exec callbacks, and an `AsyncAgentRun` for the hot paths; structured `AgentRunError` carrying `code`/`cause`/`remediation` parsed from the server envelope.
+- **TypeScript** (`sdk/typescript`, `@mitos/sdk`): the same direct and cluster modes for Node 18+, the same one-liner `sandbox(image)` and `fromName` reconnect, and a server-envelope-aware `AgentRunError`. The wire protocol is exercised against a mock server by the conformance tests and the package is type-checked and packed in CI (`typescript-sdk` job); real in-VM exec is proven by the KVM CI of the underlying API; npm publication is a release follow-up. Parity table in [sdk/typescript/README.md](sdk/typescript/README.md).
 
 Beyond the SDKs:
 
