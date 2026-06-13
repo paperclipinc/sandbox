@@ -751,6 +751,37 @@ func TestFakeVMMSatisfiesInterface(t *testing.T) {
 	var _ vmm = (*fakeVMM)(nil)
 }
 
+func TestCloseRemovesRootfsClone(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cowDir := filepath.Join(dir, "husk-rootfs")
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		RootfsCoWDir:       cowDir,
+		Reflink:            func(src, dst string) error { return os.WriteFile(dst, []byte("c"), 0o644) },
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	clonePath := filepath.Join(cowDir, "husk-test", "rootfs.ext4")
+	if _, err := os.Stat(clonePath); err != nil {
+		t.Fatalf("clone should exist after Prepare: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(clonePath); !os.IsNotExist(err) {
+		t.Errorf("clone should be removed after Close, stat err = %v", err)
+	}
+}
+
 func TestCloseTearsDownVMM(t *testing.T) {
 	vm := &fakeVMM{}
 	s := newTestStub(t, vm, readyOK)

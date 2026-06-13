@@ -593,6 +593,19 @@ func (s *Stub) State() State {
 func (s *Stub) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Best effort: remove this activation's rootfs CoW clone so it does not
+	// outlive the pod. A reflink clone shares extents with the template until
+	// written, so removing it frees only the activation's own divergent blocks.
+	// Path only is logged on failure; the clone carries no secrets. Done before
+	// the vm == nil early return so a clone is reaped even when no VMM is held.
+	if s.rootfsClonePath != "" {
+		if rmErr := os.Remove(s.rootfsClonePath); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(os.Stderr, "husk: remove per-activation rootfs clone %s: %v\n", s.rootfsClonePath, rmErr)
+		}
+		s.rootfsClonePath = ""
+	}
+
 	if s.vm == nil {
 		return nil
 	}
