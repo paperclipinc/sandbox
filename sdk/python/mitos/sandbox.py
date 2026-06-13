@@ -263,6 +263,16 @@ class Sandbox:
         if token_b64:
             self._token = base64.b64decode(token_b64).decode()
 
+    def wait_until_ready(self, timeout: float = 30.0) -> "Sandbox":
+        """Block until the sandbox is Ready (Modal-style), then return self so it
+        chains: sb = c.sandbox("python").wait_until_ready(). Raises AgentRunError
+        with code sandbox_failed or ready_timeout otherwise. Idempotent: returns
+        immediately if already Ready with an endpoint."""
+        if self._phase == SandboxPhase.READY and self._endpoint:
+            return self
+        self._wait_ready(timeout=timeout)
+        return self
+
     def _wait_ready(self, timeout: float = 30.0) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -282,11 +292,21 @@ class Sandbox:
                 self._load_token()
                 return
             if self._phase == SandboxPhase.FAILED:
-                raise RuntimeError(f"sandbox {self.name} failed")
+                raise AgentRunError(
+                    f"sandbox {self.name} failed",
+                    code="sandbox_failed",
+                    cause=f"claim {self.name} reached the Failed phase",
+                    remediation="Inspect the SandboxClaim status conditions and the pool capacity.",
+                )
 
             time.sleep(POLL_INTERVAL)
 
-        raise TimeoutError(f"sandbox {self.name} not ready after {timeout}s")
+        raise AgentRunError(
+            f"sandbox {self.name} not ready after {timeout}s",
+            code="ready_timeout",
+            cause=f"claim {self.name} did not reach Ready within {timeout}s",
+            remediation="Raise the timeout, or check the controller is reconciling and the pool has capacity.",
+        )
 
     def exec(
         self,
@@ -596,7 +616,12 @@ class Sandbox:
 
             time.sleep(POLL_INTERVAL)
 
-        raise TimeoutError(f"forks not ready after {timeout}s")
+        raise AgentRunError(
+            f"forks not ready after {timeout}s",
+            code="ready_timeout",
+            cause=f"fork {fork_name} did not produce {expected} Ready children within {timeout}s",
+            remediation="Raise the timeout, or check the source is Ready and the pool/node has capacity.",
+        )
 
     def info(self) -> SandboxInfo:
         """Get current sandbox info from the cluster."""
