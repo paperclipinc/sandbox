@@ -57,6 +57,11 @@ type vmm interface {
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
+	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
+	// file via PATCH /drives, after the snapshot is loaded and resumed. The husk
+	// activate path uses it to point the rootfs drive at this activation's CoW
+	// clone, the same rebind the fork engine applies to volume drives.
+	PatchDrive(driveID, pathOnHost string) error
 	// Close tears the VMM down.
 	Close() error
 }

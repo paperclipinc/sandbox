@@ -29,6 +29,12 @@ type fakeVMM struct {
 	gotResume bool
 	gotOverr  []firecracker.NetworkOverride
 	closed    bool
+
+	patchCalls []struct {
+		driveID string
+		path    string
+	}
+	patchErr error
 }
 
 func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error {
@@ -44,6 +50,16 @@ func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, o
 
 func (f *fakeVMM) VsockHostPath(rel string) string {
 	return filepath.Join("/run/husk", rel)
+}
+
+func (f *fakeVMM) PatchDrive(driveID, pathOnHost string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.patchCalls = append(f.patchCalls, struct {
+		driveID string
+		path    string
+	}{driveID, pathOnHost})
+	return f.patchErr
 }
 
 func (f *fakeVMM) Close() error {
@@ -555,6 +571,12 @@ func TestActivateNeverLogsEntropyOrSecrets(t *testing.T) {
 			t.Fatalf("entropy bytes leaked to stderr (%d-byte form)", len(enc))
 		}
 	}
+}
+
+// TestFakeVMMSatisfiesInterface fails to compile if the vmm interface gains a
+// method fakeVMM does not implement, keeping the fake in lockstep with the seam.
+func TestFakeVMMSatisfiesInterface(t *testing.T) {
+	var _ vmm = (*fakeVMM)(nil)
 }
 
 func TestCloseTearsDownVMM(t *testing.T) {
