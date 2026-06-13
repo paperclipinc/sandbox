@@ -384,6 +384,15 @@ arbitrary code at sandbox privilege.
 | Live-fork secret inheritance | **mitigated (default-deny)** | Forks of secret-holding sandboxes are rejected by the fork controller without explicit `allowSecretInheritance: true`; opt-ins are recorded as an audit condition (`sandboxfork_controller.go`). Per-fork credential reissue remains the end state (open). See `docs/fork-correctness.md` §3. |
 | Controller RBAC for Secrets | **partial** | ClusterRole grants cluster-wide `get,list` on all Secrets. Must be narrowed (label-selected or per-namespace Role aggregation) before multi-tenant use. |
 
+- Cross-namespace secret replication. The controller copies mitos-ca (ca.crt
+  only) and mitos-forkd-tls from its namespace into every pool namespace where
+  it creates husk pods (ReplicateHuskSecrets). The CA private key (ca.key) is
+  never copied. Scope: the cluster-wide secrets grant is the enabling
+  privilege; mitigation is that only the two named control plane Secrets are
+  projected and only ca.crt of the CA, so a pool namespace never holds the CA
+  signing key. Status: accepted; a namespaced grant scoped to pool namespaces
+  is a follow-up once pool namespaces are enumerable at install time.
+
 ## 7. Multi-tenancy statement
 
 What a namespace boundary buys you **today**: RBAC on the CRDs, and nothing
