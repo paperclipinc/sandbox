@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 
+	"github.com/paperclipinc/mitos/internal/fork"
 	"github.com/paperclipinc/mitos/internal/observability"
 	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
@@ -214,6 +216,13 @@ func validateIDs(ids ...string) error {
 func grpcError(err error) error {
 	if _, ok := status.FromError(err); ok && status.Code(err) != codes.Unknown {
 		return err
+	}
+	// Host-DoS ceiling (production-blocker #2): the engine refuses a fork past
+	// MaxSandboxes with fork.ErrAtCapacity. Surface it as RESOURCE_EXHAUSTED, the
+	// capacity-refusal class the controller already treats as "this node is full"
+	// (the same handling as a NoCapacity selection), not a flattened Internal.
+	if errors.Is(err, fork.ErrAtCapacity) {
+		return status.Error(codes.ResourceExhausted, err.Error())
 	}
 	if strings.Contains(err.Error(), "not found") {
 		return status.Error(codes.NotFound, err.Error())

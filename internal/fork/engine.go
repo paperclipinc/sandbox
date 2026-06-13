@@ -2,6 +2,7 @@ package fork
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,6 +24,15 @@ import (
 	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
+
+// ErrAtCapacity is returned by Fork when the engine already holds MaxSandboxes
+// live sandboxes. It is the per-node host-DoS ceiling (production-blocker #2): a
+// runaway tenant cannot exhaust a node by opening forks past the configured cap.
+// The check is O(1) under the engine lock and runs BEFORE any allocation or
+// Firecracker boot, so it never touches the warm-claim activate/fork hot path
+// for an admitted fork. The daemon maps it to gRPC RESOURCE_EXHAUSTED so the
+// controller treats it as a capacity refusal (the same class as NoCapacity).
+var ErrAtCapacity = errors.New("forkd at sandbox capacity: MaxSandboxes reached")
 
 type Engine struct {
 	mu             sync.RWMutex
@@ -137,6 +147,14 @@ type Engine struct {
 	// Firecracker. The default delegates to the firecracker TemplateManager.
 	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string) error
 
+	// maxSandboxes is the per-node host-DoS ceiling (production-blocker #2): the
+	// maximum number of live sandboxes this engine admits. Fork refuses with
+	// ErrAtCapacity once len(sandboxes) reaches it, BEFORE allocating or booting
+	// anything (an O(1) admission check under e.mu, off the hot path). Zero or
+	// negative disables the ceiling (the prior behavior: GetCapacity reported the
+	// number but Fork never enforced it). GetCapacity surfaces it to the
+	// controller so the cap is visible in the NodeRegistry.
+	maxSandboxes int32
 	// memReserveBytes is the OS/forkd reserve withheld from the reported node
 	// memory budget: GetCapacity reports MemoryTotal = max(0, MemTotal-reserve).
 	memReserveBytes int64
@@ -461,6 +479,12 @@ type EngineOpts struct {
 	// CryptManager is the container manager seam. Nil with EnableEncryption true
 	// makes NewEngine build the real storecrypt.Manager; tests inject a fake.
 	CryptManager containerManager
+	// MaxSandboxes is the per-node host-DoS ceiling: the maximum number of live
+	// sandboxes the engine admits. Fork refuses with ErrAtCapacity once the live
+	// count reaches it, BEFORE allocating or booting anything (O(1) admission
+	// check, off the hot path). Zero or negative disables the ceiling (prior
+	// behavior). GetCapacity surfaces it to the controller.
+	MaxSandboxes int32
 	// MemoryReserveBytes is the OS/forkd reserve withheld from the reported node
 	// memory budget. Zero means the safe default (defaultMemoryReserveBytes,
 	// 2 GiB). GetCapacity reports MemoryTotal = max(0, host MemTotal - reserve).
@@ -645,6 +669,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		keyProvider:          keyProvider,
 		encOpen:              make(map[string]struct{}),
 		buildRootfsFromImage: buildRootfsFromImage,
+		maxSandboxes:         opts.MaxSandboxes,
 		memReserveBytes:      opts.MemoryReserveBytes,
 		meminfoReader:        opts.MeminfoReader,
 	}
@@ -796,12 +821,38 @@ func validateKVM() error {
 	return nil
 }
 
+// admitFork enforces the per-node host-DoS ceiling: it refuses with
+// ErrAtCapacity when the live sandbox count has reached maxSandboxes. It is the
+// O(1) admission check Fork runs first, under the engine lock, before any
+// allocation or boot. maxSandboxes<=0 disables the ceiling (a no-op fast path).
+func (e *Engine) admitFork() error {
+	if e.maxSandboxes <= 0 {
+		return nil
+	}
+	e.mu.RLock()
+	n := int32(len(e.sandboxes))
+	e.mu.RUnlock()
+	if n >= e.maxSandboxes {
+		return fmt.Errorf("%w (%d/%d)", ErrAtCapacity, n, e.maxSandboxes)
+	}
+	return nil
+}
+
 // Fork creates a new sandbox from a snapshot.
 //
 // Firecracker loads the snapshot memory lazily via mmap; pages are faulted in
 // on demand and shared (CoW) across all VMs restored from the same snapshot.
 // This is the hot path; target is <10ms including FC process start.
 func (e *Engine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
+	// Host-DoS ceiling (production-blocker #2): refuse a new fork once the node
+	// holds MaxSandboxes live sandboxes, BEFORE any verify, allocation, or
+	// Firecracker boot. This is an O(1) count check under the engine lock; an
+	// admitted fork (the common case) pays only one map-length read, so the
+	// warm-claim activate/fork hot path is unchanged. A runaway tenant hits the
+	// ceiling here and creates nothing.
+	if err := e.admitFork(); err != nil {
+		return nil, err
+	}
 	// Verify-on-load gate (issue #9): cheap marker check, with a one-time
 	// lazy verify for templates this process did not build. Refuses on
 	// mismatch unless the development escape hatch is set.
@@ -1178,6 +1229,7 @@ func (e *Engine) GetCapacity() Capacity {
 
 	return Capacity{
 		ActiveSandboxes: activeSandboxes,
+		MaxSandboxes:    e.maxSandboxes,
 		MemoryTotal:     memoryTotal,
 		// MemoryUsed is the CoW-aware resident total (per-fork unique plus each
 		// template's shared set counted once), NOT the naive per-fork sum.

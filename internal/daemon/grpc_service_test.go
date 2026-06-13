@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -107,6 +108,17 @@ func TestGRPCForkUnknownSnapshot(t *testing.T) {
 	})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("code = %v, want NotFound", status.Code(err))
+	}
+}
+
+// TestGRPCErrorMapsAtCapacity covers production-blocker #2: the engine's
+// host-DoS ceiling (fork.ErrAtCapacity) is surfaced to the controller as
+// RESOURCE_EXHAUSTED, the same capacity-refusal class the controller already
+// understands, rather than being flattened to Internal.
+func TestGRPCErrorMapsAtCapacity(t *testing.T) {
+	wrapped := fmt.Errorf("forkd fork: %w", fork.ErrAtCapacity)
+	if got := status.Code(grpcError(wrapped)); got != codes.ResourceExhausted {
+		t.Fatalf("grpcError(ErrAtCapacity) code = %v, want ResourceExhausted", got)
 	}
 }
 

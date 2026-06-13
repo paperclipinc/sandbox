@@ -59,6 +59,7 @@ func main() {
 		auditLog          string
 		otlpEndpoint      string
 		memReserveBytes   int64
+		maxSandboxes      int
 		casListen         string
 	)
 	// peerToken is read from the environment, NOT a flag: a flag is visible in
@@ -95,6 +96,7 @@ func main() {
 	flag.StringVar(&auditLog, "audit-log", "", "Structured audit log of exec and file operations. A file path, or '-'/'stderr' for stderr. Empty disables auditing. Records command strings, paths, and byte counts only; never file content or secret values")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.Int64Var(&memReserveBytes, "memory-reserve-bytes", 2*1024*1024*1024, "Bytes of host memory withheld from the schedulable budget for the OS and forkd itself. GetCapacity reports MemoryTotal = max(0, /proc/meminfo MemTotal - this reserve), the budget the controller bin-packs forks against. Default 2 GiB")
+	flag.IntVar(&maxSandboxes, "max-sandboxes", 0, "Per-node host-DoS ceiling (production-blocker #2): the maximum number of live sandboxes this forkd admits. Fork refuses with RESOURCE_EXHAUSTED once the live count reaches this, BEFORE allocating or booting anything (an O(1) admission check off the fork hot path), so a runaway tenant cannot exhaust the node by opening forks. 0 disables the ceiling (the prior behavior). GetCapacity reports it so the controller sees the cap.")
 	flag.StringVar(&casListen, "cas-listen", ":9092", "Listen address for the DEDICATED token-gated TLS CAS listener used for peer template distribution. The CAS surface is served here, on its OWN port, NOT on the sandbox HTTP port (--http): the sandbox exec/files/metrics/healthz API keeps its existing scheme so SDK clients are unaffected. Effective only when CAS distribution is enabled (FORKD_PEER_TOKEN set together with mTLS). The controller derives this port to build each holder's CAS source URL")
 	// peerToken (FORKD_PEER_TOKEN env) is the shared bearer token a peer forkd
 	// (driven by the controller) must present to pull templates from this node's
@@ -175,6 +177,7 @@ func main() {
 			AgentBinPath:       agentBin,
 			BusyboxPath:        busyboxBin,
 			EnableVolumes:      enableVolumes,
+			MaxSandboxes:       int32(maxSandboxes),
 			MemoryReserveBytes: memReserveBytes,
 		}
 		// Template distribution: when mTLS and a peer token are configured, build
