@@ -195,6 +195,63 @@ func TestSelectNodeNoNodesDistinctFromNoCapacity(t *testing.T) {
 	}
 }
 
+// TestSelectNodeRejectsNodeAtSandboxCeiling asserts a node that has reached its
+// MaxSandboxes count ceiling is NOT selected, even when it has ample memory.
+// The count ceiling is the forkd-side cap (PR #110): enforcing it at schedule
+// time makes the node-side ResourceExhausted a rare race, not the primary path.
+func TestSelectNodeRejectsNodeAtSandboxCeiling(t *testing.T) {
+	r := NewNodeRegistry()
+	// Plenty of memory, but already at the sandbox-count ceiling.
+	full := warmNode("full", 64*gib, 1*gib, "py", 256*1024*1024, 8*1024*1024, 5)
+	full.MaxSandboxes = 5
+	full.ActiveSandboxes = 5
+	r.Register(full)
+
+	if _, err := r.SelectNode("py", ""); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected ErrNoCapacity (node at sandbox ceiling), got %v", err)
+	}
+}
+
+// TestSelectNodeSpillsOffSandboxCeilingNode asserts the scheduler spills to a
+// node with count headroom when the densest warm holder is at its ceiling.
+func TestSelectNodeSpillsOffSandboxCeilingNode(t *testing.T) {
+	r := NewNodeRegistry()
+	dense := warmNode("dense", 64*gib, 1*gib, "py", 256*1024*1024, 8*1024*1024, 10)
+	dense.MaxSandboxes = 10
+	dense.ActiveSandboxes = 10 // at ceiling
+	sparse := warmNode("sparse", 64*gib, 1*gib, "py", 256*1024*1024, 8*1024*1024, 2)
+	sparse.MaxSandboxes = 10
+	sparse.ActiveSandboxes = 2 // has headroom
+	r.Register(dense)
+	r.Register(sparse)
+
+	node, err := r.SelectNode("py", "")
+	if err != nil {
+		t.Fatalf("SelectNode: %v", err)
+	}
+	if node.Name != "sparse" {
+		t.Fatalf("got %q want sparse (dense is at the sandbox ceiling)", node.Name)
+	}
+}
+
+// TestSelectNodeZeroMaxSandboxesMeansNoCountCeiling asserts MaxSandboxes 0 (the
+// cap is unset/unlimited, e.g. mock engine) never blocks scheduling on count.
+func TestSelectNodeZeroMaxSandboxesMeansNoCountCeiling(t *testing.T) {
+	r := NewNodeRegistry()
+	n := warmNode("n1", 64*gib, 1*gib, "py", 256*1024*1024, 8*1024*1024, 100)
+	n.MaxSandboxes = 0
+	n.ActiveSandboxes = 100
+	r.Register(n)
+
+	node, err := r.SelectNode("py", "")
+	if err != nil {
+		t.Fatalf("SelectNode: %v", err)
+	}
+	if node.Name != "n1" {
+		t.Fatalf("got %q want n1 (MaxSandboxes 0 means no count ceiling)", node.Name)
+	}
+}
+
 func TestSelectNodeUnknownBudgetTreatedUnlimited(t *testing.T) {
 	r := NewNodeRegistry()
 	// A node reporting MemoryTotal 0 (meminfo unavailable, e.g. darwin/dev)

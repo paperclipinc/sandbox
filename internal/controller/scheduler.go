@@ -100,10 +100,25 @@ func (r *NodeRegistry) projectedCost(node *NodeInfo, templateID string) int64 {
 	return shared + unique
 }
 
-// admits reports whether node can take a fork of templateID: its known budget
-// has room for the projected cost. Nodes with an unknown budget (MemoryTotal 0)
-// always admit (dev/mock). Caller must hold at least the read lock.
+// atSandboxCeiling reports whether the node has reached its forkd-side sandbox
+// COUNT cap (MaxSandboxes, PR #110): MaxSandboxes > 0 AND ActiveSandboxes is at
+// or above it. MaxSandboxes 0 means the cap is unset/unlimited (e.g. the mock
+// engine) and never blocks scheduling. Enforcing this at schedule time keeps the
+// node-side ResourceExhausted reject a rare race, not the primary path to the
+// cap.
+func (n *NodeInfo) atSandboxCeiling() bool {
+	return n.MaxSandboxes > 0 && n.ActiveSandboxes >= n.MaxSandboxes
+}
+
+// admits reports whether node can take a fork of templateID: it is below its
+// sandbox-count ceiling AND its known memory budget has room for the projected
+// cost. Nodes with an unknown budget (MemoryTotal 0) admit on memory (dev/mock)
+// but are still subject to the count ceiling. Caller must hold at least the read
+// lock.
 func (r *NodeRegistry) admits(node *NodeInfo, templateID string) bool {
+	if node.atSandboxCeiling() {
+		return false
+	}
 	avail, known := r.available(node)
 	if !known {
 		return true
