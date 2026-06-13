@@ -54,6 +54,13 @@ type SandboxPoolReconciler struct {
 	// mounted into each husk pod so the stub verifies the controller client cert.
 	// Only used when EnableHuskPods is true.
 	HuskCASecretName string
+	// ControllerNamespace is the namespace EnsurePKI materialized the control
+	// plane PKI Secrets in (the controller's own namespace, default "mitos").
+	// reconcileHuskPods replicates mitos-ca + mitos-forkd-tls FROM here INTO the
+	// pool namespace so husk pods, which run in the pool namespace, can mount
+	// them. Empty disables replication (the husk pods then require the secrets
+	// to already exist in their namespace). Only used when EnableHuskPods.
+	ControllerNamespace string
 }
 
 // SandboxPool ownership: get/list/watch to reconcile, status to write warmed

@@ -25,6 +25,9 @@ spec:
         prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
+      # ghcr-pull so the kubelet can pull ghcr.io/paperclipinc/mitos-forkd.
+      imagePullSecrets:
+        - name: ghcr-pull
       nodeSelector:
         mitos.run/kvm: "true"
 
@@ -53,14 +56,14 @@ spec:
             - --tls-cert=/etc/forkd/tls/tls.crt
             - --tls-key=/etc/forkd/tls/tls.key
             - --tls-ca=/etc/forkd/ca/ca.crt
-            # Every VM runs through the jailer: per-VM uid/gid, chroot,
-            # cgroup. The chroot base lives inside the data volume so
-            # snapshot and rootfs files hard-link into each chroot
-            # (forkd refuses to start if they are on different
-            # filesystems).
-            - --jailer=/usr/local/bin/jailer
-            - --chroot-base=/var/lib/mitos/jailer
-            - --uid-range=64000-64999
+            # Guest agent injected as /init for OCI image template builds. The
+            # binary ships in the forkd image at this path (Dockerfile.forkd).
+            - --agent-bin=/usr/local/bin/agent
+            # JAILER FOLLOW-UP: the per-VM jailer (uid/gid, chroot, cgroup) is
+            # disabled here. forkd runs privileged: true (below) on the husk
+            # path until jailer-in-pod lands. Re-add --jailer / --chroot-base /
+            # --uid-range and drop privileged once the jailer runs inside the
+            # forkd pod. Tracked as the jailer-in-pod follow-up.
           # FORKD_PEER_TOKEN is the shared bearer credential a peer
           # forkd must present to pull templates from this node's CAS.
           # It is read from the ENVIRONMENT, not a flag, so it is never
@@ -74,6 +77,12 @@ spec:
           #       secretKeyRef:
           #         name: mitos-peer-token
           #         key: token
+          env:
+            # forkd authenticates to ghcr/private registries when pulling OCI
+            # template images. DOCKER_CONFIG points at the mounted docker-config
+            # secret (the docker-config volume below). Unset = anonymous pulls.
+            - name: DOCKER_CONFIG
+              value: /etc/forkd/docker
           ports:
             - name: grpc
               containerPort: 9090
@@ -83,49 +92,14 @@ spec:
             # peer template distribution; separate from the sandbox API.
             - name: cas
               containerPort: 9092
-          # forkd runs as root with an explicit capability list instead
-          # of privileged: true. Each retained capability is annotated
-          # with why the jailer (or forkd itself) needs it; everything
-          # else is dropped. The set is pending proof in the KVM CI
-          # jailer run (issue #2 Task 5) and may still be trimmed.
+          # PRIVILEGED until jailer-in-pod lands (see the --agent-bin block).
+          # Without the jailer, forkd needs unrestricted access to /dev/kvm,
+          # /dev/net/tun, cgroups, and chroot to launch each VM; the trimmed
+          # capability set only worked WITH the jailer mediating. The honest
+          # regression is documented in docs/threat-model.md. Re-narrow to the
+          # capability list once the jailer runs inside the pod.
           securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: true
-            capabilities:
-              drop:
-                - ALL
-              add:
-                # Jailer: cgroup attachment and namespace setup for each
-                # VM's jail.
-                - SYS_ADMIN
-                # Jailer: chroot(2) into the per-VM jail; SYS_ADMIN does
-                # NOT cover chroot, so without this the jailer fails with
-                # EPERM at launch.
-                - SYS_CHROOT
-                # Jailer: hands the per-VM chroot and API socket to the
-                # dedicated uid.
-                - CHOWN
-                # Jailer/forkd: traverse and modify the jail tree after
-                # files have been chowned to per-VM uids. Pending KVM CI
-                # confirmation (issue #2 Task 5); may be trimmed.
-                - DAC_OVERRIDE
-                # Jailer/forkd: file-owner operations on jail files owned
-                # by per-VM uids. Pending KVM CI confirmation (issue #2
-                # Task 5); may be trimmed.
-                - FOWNER
-                # Jailer: drops the Firecracker process to the per-VM
-                # uid (--uid-range).
-                - SETUID
-                # Jailer: drops the Firecracker process to the per-VM
-                # gid.
-                - SETGID
-                # Jailer: creates /dev/kvm and /dev/net/tun device nodes
-                # inside each chroot.
-                - MKNOD
-                # forkd: tap device creation when guest networking lands
-                # (threat model section 4); listed now so the manifest
-                # does not silently re-broaden later.
-                - NET_ADMIN
+            privileged: true
           resources:
             requests:
               memory: "1Gi"
@@ -143,6 +117,9 @@ spec:
               readOnly: true
             - name: ca
               mountPath: /etc/forkd/ca
+              readOnly: true
+            - name: docker-config
+              mountPath: /etc/forkd/docker
               readOnly: true
           readinessProbe:
             httpGet:
@@ -178,3 +155,12 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        # forkd's registry credentials for OCI template pulls. Reuses the
+        # ghcr-pull dockerconfigjson secret, projected to the config.json name
+        # the docker/containerd auth resolver reads under DOCKER_CONFIG.
+        - name: docker-config
+          secret:
+            secretName: ghcr-pull
+            items:
+              - key: .dockerconfigjson
+                path: config.json

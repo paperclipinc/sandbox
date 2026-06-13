@@ -95,6 +95,10 @@ rules:
   # never logged. delete crypto-shreds a template's at-rest encryption key
   # Secret on teardown (DeleteEncKey); owned Secrets are otherwise reaped by
   # owner-reference GC.
+  # create/update ALSO replicate the husk PKI Secrets (mitos-ca ca.crt only,
+  # mitos-forkd-tls) FROM the controller namespace INTO each pool namespace
+  # where husk pods run (ReplicateHuskSecrets); the CA private key is never
+  # replicated. This is why the grant is cluster-wide rather than namespaced.
   - apiGroups:
       - ""
     resources:

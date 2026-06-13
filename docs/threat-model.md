@@ -53,6 +53,13 @@ privileged process and RUN many times by unprivileged pods.
   KVM nodes (and the `--enable-raw-forkd` fork-per-claim engine). The privileged
   surface is now confined to the BUILD path, run once per node per template,
   rather than every sandbox execution.
+- forkd `privileged: true` (deploy/daemon/daemonset.yaml), REGRESSION pending
+  jailer-in-pod. Without the per-VM jailer mediating, forkd needs unrestricted
+  /dev/kvm, /dev/net/tun, cgroup, and chroot access, so the trimmed capability
+  set is replaced by privileged until the jailer runs inside the forkd pod.
+  Status: accepted, time-boxed to the jailer-in-pod follow-up. Mitigation: the
+  forkd pod runs only on labelled KVM nodes (mitos.run/kvm) and is not exposed
+  to tenant traffic; husk pods, not forkd, are the tenant execution surface.
 
 ### Unprivileged-stub escape surface (issue #18 re-derivation)
 
@@ -376,6 +383,15 @@ arbitrary code at sandbox privilege.
 | Claim-time injection (not baked into snapshots) | **partial** | The design is right: pools snapshot before secrets exist; the controller resolves Secret refs at claim time (`sandboxclaim_controller.go:resolveSecrets`). Delivery into the guest is implemented over vsock post-restore (`internal/daemon/server.go:deliverConfig`); never via boot args, never via the FC API socket. Strict on real engines: if secrets cannot be delivered, the fork fails and the VM is reaped (a sandbox that reports Ready without its secrets is a lie). The mock engine skips delivery entirely; no guest exists. The same post-restore handshake also sends `NotifyForked` (32 bytes of host `crypto/rand` entropy plus a fork generation) before config; on a real engine a notify failure fails the fork and reaps the VM regardless of whether secrets were requested, because a guest that did not reseed shares CRNG state with its siblings. Entropy bytes are never logged by host or guest. Resolved secret values (`ForkRequest.Secrets`) now transit the mTLS-protected controller→forkd channel when deployed as shipped (§3); they remain plaintext on the wire only in flag-less dev deployments, where forkd warns loudly. |
 | Live-fork secret inheritance | **mitigated (default-deny)** | Forks of secret-holding sandboxes are rejected by the fork controller without explicit `allowSecretInheritance: true`; opt-ins are recorded as an audit condition (`sandboxfork_controller.go`). Per-fork credential reissue remains the end state (open). See `docs/fork-correctness.md` §3. |
 | Controller RBAC for Secrets | **partial** | ClusterRole grants cluster-wide `get,list` on all Secrets. Must be narrowed (label-selected or per-namespace Role aggregation) before multi-tenant use. |
+
+- Cross-namespace secret replication. The controller copies mitos-ca (ca.crt
+  only) and mitos-forkd-tls from its namespace into every pool namespace where
+  it creates husk pods (ReplicateHuskSecrets). The CA private key (ca.key) is
+  never copied. Scope: the cluster-wide secrets grant is the enabling
+  privilege; mitigation is that only the two named control plane Secrets are
+  projected and only ca.crt of the CA, so a pool namespace never holds the CA
+  signing key. Status: accepted; a namespaced grant scoped to pool namespaces
+  is a follow-up once pool namespaces are enumerable at install time.
 
 ## 7. Multi-tenancy statement
 

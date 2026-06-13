@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mitos-kernel-stage
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: kernel-stage
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mitos
+      app.kubernetes.io/component: kernel-stage
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mitos
+        app.kubernetes.io/component: kernel-stage
+    spec:
+      # Stage the guest kernel only on KVM nodes; that is exactly where forkd
+      # and husk pods read /var/lib/mitos/vmlinux.
+      nodeSelector:
+        mitos.run/kvm: "true"
+      tolerations:
+        - key: mitos.run/dedicated
+          operator: Exists
+          effect: NoSchedule
+      # An init container downloads the kernel into the node hostPath ONCE
+      # (idempotent: skip if the file already exists), then the main container
+      # idles so the DaemonSet stays Ready and re-stages on a node rejoin.
+      initContainers:
+        - name: stage-kernel
+          image: curlimages/curl:8.11.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              dest=/var/lib/mitos/vmlinux
+              if [ -s "$dest" ]; then
+                echo "kernel already staged at $dest; skipping download"
+                exit 0
+              fi
+              echo "staging guest kernel to $dest"
+              curl -fsSL -o "$dest.tmp" "$KERNEL_URL"
+              mv "$dest.tmp" "$dest"
+              echo "kernel staged"
+          env:
+            # The guest kernel image URL. Override per cluster with a kustomize
+            # patch if you host your own kernel. This is the Firecracker CI
+            # x86_64 5.10 guest kernel used by the bench/ runs.
+            - name: KERNEL_URL
+              value: https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mitos
+      containers:
+        - name: idle
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              memory: "8Mi"
+              cpu: "10m"
+            limits:
+              memory: "16Mi"
+              cpu: "50m"
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/mitos
+            type: DirectoryOrCreate

@@ -4,3 +4,12 @@ metadata:
   name: mitos
   labels:
     app.kubernetes.io/name: mitos
+    # PodSecurity admission (v1.31). forkd and the kvm-device-plugin run with
+    # hostPath volumes and host devices, and forkd runs privileged; none is
+    # admissible under baseline or restricted. enforce=privileged so the
+    # DaemonSets are admitted without a manual namespace patch. The husk pods
+    # themselves are restricted-except-two-exceptions, but they run in the POOL
+    # namespace (e.g. default), labelled separately in deploy/dev/namespace.yaml.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

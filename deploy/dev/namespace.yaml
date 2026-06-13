@@ -1,6 +1,17 @@
+# Pool namespace PodSecurity. Husk pods run in the POOL namespace, not the
+# controller namespace. The dev overlay's own namespace is labelled below. For
+# a bare-metal pool in `default`, label it once (it is not a deploy/ resource):
+#   kubectl label --overwrite namespace default \
+#     pod-security.kubernetes.io/enforce=privileged \
+#     pod-security.kubernetes.io/audit=privileged \
+#     pod-security.kubernetes.io/warn=privileged
+# Any dedicated pool namespace you create needs the same enforce=privileged.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: mitos
   labels:
     app.kubernetes.io/name: mitos
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

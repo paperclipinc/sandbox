@@ -572,6 +572,17 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 	case existing < desired:
 		deficit := desired - existing
 		logger.Info("husk pod deficit", "dormant", existing, "desired", desired, "creating", deficit)
+		// Replicate the husk PKI secrets into this pool's namespace before
+		// creating pods: husk pods run here, not in the controller namespace,
+		// and mount mitos-ca + mitos-forkd-tls. ControllerNamespace empty (or
+		// equal to the pool namespace) makes this a noop. A replication error
+		// is returned so the deficit is retried on requeue rather than creating
+		// pods that would fail to mount their secrets.
+		if r.ControllerNamespace != "" {
+			if err := ReplicateHuskSecrets(ctx, r.Client, r.ControllerNamespace, pool.Namespace); err != nil {
+				return existing, fmt.Errorf("replicate husk secrets into %s: %w", pool.Namespace, err)
+			}
+		}
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
 			KVMResourceName: r.KVMResourceName,
