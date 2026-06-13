@@ -54,15 +54,25 @@ func (s State) String() string {
 // real Firecracker process or KVM.
 type vmm interface {
 	// LoadSnapshotWithOverrides loads the snapshot mem+vmstate files and (when
-	// resume is true) resumes the VM, remapping NICs per overrides.
+	// resume is true) resumes the VM, remapping NICs per overrides. The husk
+	// activate path loads with resume=false so it can rebind the rootfs drive
+	// (PatchDrive) while the VM is PAUSED, before the guest can write anything,
+	// then resumes explicitly via Resume.
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
 	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
-	// file via PATCH /drives, after the snapshot is loaded and resumed. The husk
-	// activate path uses it to point the rootfs drive at this activation's CoW
+	// file via PATCH /drives, on the loaded-but-PAUSED restored VM (before Resume)
+	// so the guest never touches the shared template backing. Firecracker's runtime
+	// API controller accepts a drive path_on_host PATCH in the Paused state with no
+	// root-device restriction (verified against the pinned v1.15 rpc_interface). The
+	// husk activate path uses it to point the rootfs drive at this activation's CoW
 	// clone, the same rebind the fork engine applies to volume drives.
 	PatchDrive(driveID, pathOnHost string) error
+	// Resume transitions the loaded VM from Paused to Running (PATCH /vm Resumed).
+	// The husk activate path calls it AFTER the rootfs drive rebind so the guest
+	// resumes already bound to its own per-activation rootfs clone.
+	Resume() error
 	// Close tears the VMM down.
 	Close() error
 }
@@ -450,27 +460,43 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		}
 	}
 
-	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, true, req.NetworkOverrides); err != nil {
+	// Load the snapshot PAUSED (resume=false). The rootfs drive rebind below MUST
+	// happen before the guest runs, and PATCH /drives on the ROOT device of an
+	// already-RESUMED VM both leaves a write window (any writeback between resume
+	// and the rebind hits the SHARED template rootfs) and may be rejected by
+	// Firecracker. Loading paused lets us rebind while the guest is frozen, then
+	// resume explicitly. nil overrides restores exactly as before.
+	if err := s.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, req.NetworkOverrides); err != nil {
 		// Fail closed: the snapshot did not load; the VM is not usable. Leave
 		// state dormant so a retry (or teardown) can decide what to do.
 		werr := fmt.Errorf("husk: load snapshot from %s: %w", req.SnapshotDir, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 
-	// Rebind the baked "rootfs" drive to THIS activation's CoW clone now that the
-	// snapshot is loaded and resumed, before the guest writes anything. This is the
-	// husk analog of the fork engine's per-fork volume drive rebind: the snapshot
-	// bakes the rootfs block device at path_on_host, and Firecracker supports
-	// updating a drive's path_on_host on a restored+resumed VM (PATCH /drives).
+	// Rebind the baked "rootfs" drive to THIS activation's CoW clone while the VM
+	// is still PAUSED (loaded, not yet resumed), so the guest never writes a single
+	// block through the shared template rootfs. This is the husk analog of the fork
+	// engine's per-fork volume drive rebind: the snapshot bakes the rootfs block
+	// device at path_on_host, and Firecracker's runtime API controller accepts a
+	// drive path_on_host PATCH in the Paused state with no root-device restriction.
 	// Skipped when no per-activation clone was prepared (the prior shared-rootfs
 	// behavior). Fail closed: a rebind failure means the VM is still pointed at the
 	// shared template rootfs, which is exactly the corruption hazard this prevents,
-	// so do NOT mark active. The drive id and path carry no secrets.
+	// so do NOT resume or mark active. The drive id and path carry no secrets.
 	if s.rootfsClonePath != "" {
 		if err := s.vm.PatchDrive("rootfs", s.rootfsClonePath); err != nil {
 			werr := fmt.Errorf("husk: rebind rootfs drive to per-activation clone: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
+	}
+
+	// Resume the VM only AFTER the rootfs drive is rebound, so the guest comes up
+	// already bound to its own per-activation rootfs clone, never the shared
+	// template. Fail closed: if the resume is rejected the VM never runs, so do NOT
+	// mark active.
+	if err := s.vm.Resume(); err != nil {
+		werr := fmt.Errorf("husk: resume VM after rootfs rebind: %w", err)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 
 	vsockPath := s.vm.VsockHostPath(firecracker.VsockRelPath)

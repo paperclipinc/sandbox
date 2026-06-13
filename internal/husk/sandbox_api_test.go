@@ -90,6 +90,7 @@ func (m *pathVMM) LoadSnapshotWithOverrides(_, _ string, _ bool, _ []firecracker
 }
 func (m *pathVMM) VsockHostPath(string) string  { return m.vsockPath }
 func (m *pathVMM) PatchDrive(_, _ string) error { return nil }
+func (m *pathVMM) Resume() error                { return nil }
 func (m *pathVMM) Close() error                 { return nil }
 
 func postHuskExec(t *testing.T, url, sandbox, bearer string) (int, string) {
