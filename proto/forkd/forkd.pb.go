@@ -79,12 +79,17 @@ type CreateTemplateRequest struct {
 	// its own backing; the fork's ForkRequest.volumes must match this set by
 	// name. Empty means the template has no volumes.
 	Volumes []*VolumeMount `protobuf:"bytes,6,rep,name=volumes,proto3" json:"volumes,omitempty"`
-	// encryption_key is the per-template at-rest encryption key, a SECRET VALUE
-	// carried only over the mTLS RPC. The controller owns key custody (a
-	// Kubernetes Secret); the node never generates or persists it. It must NEVER
-	// be logged, placed in an error message, or written to the node data disk.
+	// encryption_key is the per-template at-rest DEK, WRAPPED by the KMS KEK
+	// (envelope encryption). It is opaque ciphertext, not the plaintext key, but
+	// is still a SECRET-adjacent value carried only over the mTLS RPC and MUST
+	// NEVER be logged or written to the node data disk. The node unwraps it via
+	// its KMS at container open/build time and zeroizes the plaintext after.
 	// Empty means the template is not encrypted.
 	EncryptionKey []byte `protobuf:"bytes,7,opt,name=encryption_key,json=encryptionKey,proto3" json:"encryption_key,omitempty"`
+	// kek_id identifies the KMS KEK that wrapped encryption_key, so the node can
+	// select the matching KEK to unwrap. It is NOT secret and may be logged.
+	// Empty when the template is not encrypted.
+	KekId         string `protobuf:"bytes,8,opt,name=kek_id,json=kekId,proto3" json:"kek_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -166,6 +171,13 @@ func (x *CreateTemplateRequest) GetEncryptionKey() []byte {
 		return x.EncryptionKey
 	}
 	return nil
+}
+
+func (x *CreateTemplateRequest) GetKekId() string {
+	if x != nil {
+		return x.KekId
+	}
+	return ""
 }
 
 type CreateTemplateResponse struct {
@@ -823,13 +835,18 @@ type ForkRequest struct {
 	// source for Snapshot/Share/Clone policies; the controller passes the policy
 	// and spec.
 	Volumes []*VolumeMount `protobuf:"bytes,7,rep,name=volumes,proto3" json:"volumes,omitempty"`
-	// encryption_key is the source template's at-rest encryption key, a SECRET
-	// VALUE carried only over the mTLS RPC, so the node can open the encrypted
-	// container before restoring the snapshot. The controller owns key custody (a
-	// Kubernetes Secret); the node never generates or persists it. It must NEVER
-	// be logged, placed in an error message, or written to the node data disk.
-	// Empty means the source template is not encrypted.
+	// encryption_key is the source template's at-rest DEK, WRAPPED by the KMS KEK
+	// (envelope encryption), carried only over the mTLS RPC so the node can open
+	// the encrypted container before restoring the snapshot. It is opaque
+	// ciphertext, not the plaintext key, but is still a SECRET-adjacent value and
+	// MUST NEVER be logged or written to the node data disk. The node unwraps it
+	// via its KMS and zeroizes the plaintext after. Empty means the source
+	// template is not encrypted.
 	EncryptionKey []byte `protobuf:"bytes,8,opt,name=encryption_key,json=encryptionKey,proto3" json:"encryption_key,omitempty"`
+	// kek_id identifies the KMS KEK that wrapped encryption_key, so the node can
+	// select the matching KEK to unwrap. It is NOT secret and may be logged.
+	// Empty when the source template is not encrypted.
+	KekId         string `protobuf:"bytes,9,opt,name=kek_id,json=kekId,proto3" json:"kek_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -918,6 +935,13 @@ func (x *ForkRequest) GetEncryptionKey() []byte {
 		return x.EncryptionKey
 	}
 	return nil
+}
+
+func (x *ForkRequest) GetKekId() string {
+	if x != nil {
+		return x.KekId
+	}
+	return ""
 }
 
 type VolumeMount struct {
@@ -2580,7 +2604,7 @@ var File_proto_forkd_proto protoreflect.FileDescriptor
 
 const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/forkd.proto\x12\x05forkd\"\x9c\x02\n" +
+	"\x11proto/forkd.proto\x12\x05forkd\"\xb3\x02\n" +
 	"\x15CreateTemplateRequest\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12\x14\n" +
@@ -2590,7 +2614,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"kernelPath\x121\n" +
 	"\tresources\x18\x05 \x01(\v2\x13.forkd.ResourceSpecR\tresources\x12,\n" +
 	"\avolumes\x18\x06 \x03(\v2\x12.forkd.VolumeMountR\avolumes\x12%\n" +
-	"\x0eencryption_key\x18\a \x01(\fR\rencryptionKey\"\x8c\x01\n" +
+	"\x0eencryption_key\x18\a \x01(\fR\rencryptionKey\x12\x15\n" +
+	"\x06kek_id\x18\b \x01(\tR\x05kekId\"\x8c\x01\n" +
 	"\x16CreateTemplateResponse\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12(\n" +
@@ -2637,7 +2662,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x15DeleteSnapshotRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\"\x18\n" +
-	"\x16DeleteSnapshotResponse\"\xbc\x02\n" +
+	"\x16DeleteSnapshotResponse\"\xd3\x02\n" +
 	"\vForkRequest\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12\x1d\n" +
@@ -2648,7 +2673,8 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\anetwork\x18\x05 \x01(\v2\x14.forkd.NetworkConfigR\anetwork\x12\x1b\n" +
 	"\tapi_token\x18\x06 \x01(\tR\bapiToken\x12,\n" +
 	"\avolumes\x18\a \x03(\v2\x12.forkd.VolumeMountR\avolumes\x12%\n" +
-	"\x0eencryption_key\x18\b \x01(\fR\rencryptionKey\"\x92\x01\n" +
+	"\x0eencryption_key\x18\b \x01(\fR\rencryptionKey\x12\x15\n" +
+	"\x06kek_id\x18\t \x01(\tR\x05kekId\"\x92\x01\n" +
 	"\vVolumeMount\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +

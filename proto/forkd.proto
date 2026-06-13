@@ -51,12 +51,17 @@ message CreateTemplateRequest {
   // its own backing; the fork's ForkRequest.volumes must match this set by
   // name. Empty means the template has no volumes.
   repeated VolumeMount volumes = 6;
-  // encryption_key is the per-template at-rest encryption key, a SECRET VALUE
-  // carried only over the mTLS RPC. The controller owns key custody (a
-  // Kubernetes Secret); the node never generates or persists it. It must NEVER
-  // be logged, placed in an error message, or written to the node data disk.
+  // encryption_key is the per-template at-rest DEK, WRAPPED by the KMS KEK
+  // (envelope encryption). It is opaque ciphertext, not the plaintext key, but
+  // is still a SECRET-adjacent value carried only over the mTLS RPC and MUST
+  // NEVER be logged or written to the node data disk. The node unwraps it via
+  // its KMS at container open/build time and zeroizes the plaintext after.
   // Empty means the template is not encrypted.
   bytes encryption_key = 7;
+  // kek_id identifies the KMS KEK that wrapped encryption_key, so the node can
+  // select the matching KEK to unwrap. It is NOT secret and may be logged.
+  // Empty when the template is not encrypted.
+  string kek_id = 8;
 }
 
 message CreateTemplateResponse {
@@ -150,13 +155,18 @@ message ForkRequest {
   // source for Snapshot/Share/Clone policies; the controller passes the policy
   // and spec.
   repeated VolumeMount volumes = 7;
-  // encryption_key is the source template's at-rest encryption key, a SECRET
-  // VALUE carried only over the mTLS RPC, so the node can open the encrypted
-  // container before restoring the snapshot. The controller owns key custody (a
-  // Kubernetes Secret); the node never generates or persists it. It must NEVER
-  // be logged, placed in an error message, or written to the node data disk.
-  // Empty means the source template is not encrypted.
+  // encryption_key is the source template's at-rest DEK, WRAPPED by the KMS KEK
+  // (envelope encryption), carried only over the mTLS RPC so the node can open
+  // the encrypted container before restoring the snapshot. It is opaque
+  // ciphertext, not the plaintext key, but is still a SECRET-adjacent value and
+  // MUST NEVER be logged or written to the node data disk. The node unwraps it
+  // via its KMS and zeroizes the plaintext after. Empty means the source
+  // template is not encrypted.
   bytes encryption_key = 8;
+  // kek_id identifies the KMS KEK that wrapped encryption_key, so the node can
+  // select the matching KEK to unwrap. It is NOT secret and may be logged.
+  // Empty when the source template is not encrypted.
+  string kek_id = 9;
 }
 
 message VolumeMount {
