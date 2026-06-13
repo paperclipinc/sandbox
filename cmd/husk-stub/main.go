@@ -130,6 +130,54 @@ func loadSecretFile(path string, m map[string]string) (map[string]string, error)
 	return m, nil
 }
 
+// huskVMParams carries the inputs huskVMConfig needs to assemble the stub's
+// VMConfig. euid is injected so the jailer root requirement is testable off-root.
+type huskVMParams struct {
+	firecrackerBin string
+	kernel         string
+	workdir        string
+	vcpus          int
+	memMiB         int
+	jailerBin      string
+	chrootBase     string
+	uidRange       string
+	euid           int
+}
+
+// huskVMConfig builds the firecracker.VMConfig the stub launches. When a jailer
+// binary is configured it attaches a fail-closed JailerConfig (per-VM uid/gid,
+// chroot, nested cgroup) and lists the kernel as a chroot file so the jailed
+// Firecracker can open it inside the jail; the snapshot mem/vmstate are added per
+// activate (internal/husk Activate). With no jailer binary it returns the prior
+// direct-exec config unchanged (development only; the threat model flags it).
+func huskVMConfig(p huskVMParams) (firecracker.VMConfig, error) {
+	cfg := firecracker.VMConfig{
+		ID:             huskSandboxID,
+		FirecrackerBin: p.firecrackerBin,
+		WorkDir:        p.workdir,
+		KernelPath:     p.kernel,
+		SocketPath:     filepath.Join(p.workdir, "firecracker.sock"),
+		VcpuCount:      p.vcpus,
+		MemSizeMib:     p.memMiB,
+	}
+	jailerCfg, err := buildHuskJailerConfig(p.jailerBin, p.chrootBase, p.uidRange, p.euid)
+	if err != nil {
+		return firecracker.VMConfig{}, err
+	}
+	cfg.Jailer = jailerCfg
+	if jailerCfg.Enabled() {
+		// DataDir bounds which host files may be exposed in the chroot; the husk
+		// kernel and snapshot live under the node data dir mount. The engine sets
+		// this from its data dir; here the stub's allowed root is the kernel's and
+		// snapshot's mount root.
+		cfg.Jailer.DataDir = "/var/lib/mitos"
+		if p.kernel != "" {
+			cfg.ChrootFiles = []string{p.kernel}
+		}
+	}
+	return cfg, nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "husk-stub: %v\n", err)
@@ -150,6 +198,9 @@ func run() error {
 		tlsCA           = flag.String("tls-ca", "", "path to the control plane CA certificate PEM (mTLS); used to verify the controller client certificate")
 		vcpus           = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB          = flag.Int("mem-mib", 512, "guest memory in MiB")
+		jailerBin       = flag.String("jailer", "", "path to the Firecracker jailer binary; every VM is launched through it with a per-VM uid, chroot (pivot_root), and a cgroup nested under the pod's. Empty disables the jailer (development only; the VM then runs unjailed as the pod uid, flagged in the threat model)")
+		chrootBase      = flag.String("chroot-base", "/run/husk/jail", "jailer chroot base directory; must be on a pod-WRITABLE volume (an emptyDir), distinct from the read-only snapshot mount. The stub bind-mounts and privatizes it so the jailer can pivot_root inside the pod")
+		uidRange        = flag.String("uid-range", "64000-64999", "inclusive low-high uid/gid range the jailer allocates a dedicated per-VM uid from; uid 0 is refused")
 		activate        = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket (or --control-addr over mTLS), send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
 		controlAddr     = flag.String("control-addr", "", "activate client mode: TCP address (host:port) of a husk pod's mTLS NETWORK control to activate over; uses ActivateHuskPod and requires --tls-cert/--tls-key/--tls-ca. Mutually exclusive with --control-socket")
 		snapshotDir     = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
@@ -226,14 +277,37 @@ func run() error {
 		return fmt.Errorf("create workdir: %w", err)
 	}
 
-	cfg := firecracker.VMConfig{
-		ID:             "husk",
-		FirecrackerBin: *firecrackerBin,
-		WorkDir:        *workdir,
-		KernelPath:     *kernel,
-		SocketPath:     filepath.Join(*workdir, "firecracker.sock"),
-		VcpuCount:      *vcpus,
-		MemSizeMib:     *memMiB,
+	// Jailer setup MUST happen before the dormant VMM is prepared: the jailer
+	// pivot_roots into the per-VM chroot under --chroot-base, which inside a pod
+	// requires the chroot base to be a PRIVATE MOUNT POINT (a pod's rootfs is
+	// commonly shared, and pivot_root refuses a new root whose parent mount is
+	// shared). Make the base a private self-bind mount once, here, in the pod's
+	// own mount namespace. This is a no-op on the development direct-exec path
+	// (empty --jailer) and on non-linux (mount_other.go).
+	if *jailerBin != "" {
+		if err := os.MkdirAll(*chrootBase, 0o755); err != nil {
+			return fmt.Errorf("create jailer chroot base %s: %w", *chrootBase, err)
+		}
+		if err := prepareChrootMount(*chrootBase); err != nil {
+			return fmt.Errorf("prepare jailer chroot base mount: %w", err)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "husk-stub: WARNING running UNJAILED (no --jailer): the VM runs as the pod uid with no chroot or per-VM uid; development only, do not use for untrusted tenants")
+	}
+
+	cfg, err := huskVMConfig(huskVMParams{
+		firecrackerBin: *firecrackerBin,
+		kernel:         *kernel,
+		workdir:        *workdir,
+		vcpus:          *vcpus,
+		memMiB:         *memMiB,
+		jailerBin:      *jailerBin,
+		chrootBase:     *chrootBase,
+		uidRange:       *uidRange,
+		euid:           os.Geteuid(),
+	})
+	if err != nil {
+		return fmt.Errorf("build husk VM config: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
