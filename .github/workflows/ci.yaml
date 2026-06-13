@@ -1203,31 +1203,86 @@ jobs:
         # the nested-VMM boundary). We drive a claim to point at a husk pod at the
         # object level: stamp a husk pod with mitos.run/claim and set the
         # claim's Status.Node/Endpoint/SandboxID, then delete that pod and assert
-        # the claim goes Pending (re-pend) and the pool recreates a replacement
-        # husk pod. The Watches(pod)->claim mapping + checkHuskPodLost drive this.
-        # The full re-activate onto a Ready replacement completes where the VMM
-        # runs (kvm-test.yaml / bare metal), documented in docs/husk-pods.md.
+        # the claim goes Pending (re-pend) and the warm pool recreates a
+        # replacement husk pod. The Watches(pod)->claim mapping + checkHuskPodLost
+        # drive this. The full re-activate onto a Ready replacement completes where
+        # the VMM runs (kvm-test.yaml / bare metal), documented in docs/husk-pods.md.
+        #
+        # RACE-FREE BY CONSTRUCTION (why this used to flake): the controller's own
+        # husk-activation path (reconcileHuskClaim) reconciles a freshly created
+        # claim and independently picks a dormant husk pod via selectDormantHuskPod,
+        # stamps mitos.run/claim on it, and writes the claim status. If the probe
+        # claim referenced the husk-e2e pool, that controller-chosen pod could be a
+        # DIFFERENT pod than the one this step stamps, and the controller status
+        # write would race this step's manual status patch. So when we deleted our
+        # stamped pod, the claim's real backing could be another pod and no re-pend
+        # happened: a spurious failure. We also cannot just "wait for the controller
+        # to drive the claim Ready on its own", because a real husk activation needs
+        # the nested dormant VMM, which is the documented HUSK-KIND-VMM best-effort
+        # boundary on this shared kind runner and may never reach Ready.
+        #
+        # The fix removes the competition: the probe claim references a SEPARATE
+        # pool (repend-probe-pool) with replicas: 0. selectDormantHuskPod lists
+        # dormant pods by the claim's OWN pool, finds none (the pool creates zero
+        # husk pods), and the controller pends the claim with NoHuskPod. It can
+        # therefore NEVER select or stamp any husk pod for this claim. This step's
+        # object-level stamp (label a BORROWED husk-e2e dormant pod with the claim,
+        # then patch the claim status Ready onto it) is the single, authoritative
+        # source of truth for what backs the claim. checkHuskPodLost keys off the
+        # claim's Status.SandboxID and the pod's mitos.run/claim label (pool
+        # independent), so the borrowed pod is a valid backing. We confirm the
+        # controller has SETTLED on our stamp (it observed the claim Ready on our
+        # exact pod) before deleting, so the delete-then-re-pend chain is
+        # deterministic. The warm-pool refill assertion holds because the pool
+        # counts only DORMANT (unclaimed) pods toward Replicas: stamping the
+        # borrowed husk-e2e pod claimed drops husk-e2e's dormant count below 2 and
+        # the pool reconciler refills it.
         run: |
           set -euo pipefail
           dump() {
             echo "=== re-pend diagnostics ==="
             kubectl -n default get sandboxclaim.mitos.run repend-probe -o yaml 2>/dev/null || true
+            kubectl -n default get sandboxpool repend-probe-pool -o yaml 2>/dev/null || true
             kubectl get pods -n default -l mitos.run/husk=true -o wide || true
             kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
           }
           trap dump ERR
 
-          # Pick a husk pod to back the probe claim.
-          backing=$(kubectl get pods -n default -l mitos.run/husk=true \
-            --field-selector=status.phase!=Failed -o jsonpath='{.items[0].metadata.name}')
-          [ -n "$backing" ] || { echo "EVICTION-FAILED: no husk pod to back the re-pend probe"; exit 1; }
+          # A SEPARATE pool with replicas: 0 so the controller can NEVER select a
+          # dormant pod for the probe claim (it lists dormant pods by the claim's
+          # own pool, and this pool has none). It reuses the husk-e2e template so
+          # the claim reconcile's template lookup succeeds. This is what makes the
+          # object-level stamp below the single source of truth, with no controller
+          # re-pick to race.
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: mitos.run/v1alpha1
+          kind: SandboxPool
+          metadata:
+            name: repend-probe-pool
+            namespace: default
+          spec:
+            templateRef:
+              name: husk-e2e
+            replicas: 0
+          YAML
+
+          # Borrow a husk-e2e dormant pod (unclaimed, non-Failed) to back the probe
+          # claim at the object level. It must NOT already carry a claim label.
+          backing=$(kubectl get pods -n default -l mitos.run/husk=true,mitos.run/pool=husk-e2e \
+            --field-selector=status.phase!=Failed \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.mitos\.run/claim}{"\n"}{end}' \
+            | awk '$2=="" {print $1; exit}')
+          [ -n "$backing" ] || { echo "EVICTION-FAILED: no unclaimed husk-e2e pod to back the re-pend probe"; exit 1; }
           podip=$(kubectl -n default get pod "$backing" -o jsonpath='{.status.podIP}')
           podnode=$(kubectl -n default get pod "$backing" -o jsonpath='{.spec.nodeName}')
           echo "backing husk pod $backing on node '${podnode}' ip '${podip}'"
 
-          # Create the probe claim, then stamp it active on the backing pod at the
-          # object level (label the pod claimed; set the claim status). This is the
-          # object-level stand-in for a real husk activation (which needs the VMM).
+          # Create the probe claim against the empty pool, then stamp it active on
+          # the borrowed pod at the object level (label the pod claimed; set the
+          # claim status). This is the object-level stand-in for a real husk
+          # activation (which needs the VMM). The controller cannot compete: its
+          # reconcile of this claim pends with NoHuskPod (no dormant pod in the
+          # empty pool) and never touches a husk pod.
           cat <<'YAML' | kubectl apply -f -
           apiVersion: mitos.run/v1alpha1
           kind: SandboxClaim
@@ -1236,7 +1291,7 @@ jobs:
             namespace: default
           spec:
             poolRef:
-              name: husk-e2e
+              name: repend-probe-pool
           YAML
           kubectl -n default label pod "$backing" mitos.run/claim=repend-probe --overwrite
           # Patch the claim status to "active on the backing pod" via the status
@@ -1244,8 +1299,23 @@ jobs:
           kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
             -p "{\"status\":{\"phase\":\"Ready\",\"node\":\"${podnode}\",\"endpoint\":\"${podip}:9091\",\"sandboxID\":\"${backing}\"}}"
 
+          # Confirm the controller has SETTLED on our stamp before deleting: it must
+          # observe the claim Ready on our exact pod (a healthy backing is never
+          # re-pended, so this proves the stamp is authoritative and stable). Since
+          # the empty pool gives the controller no pod to pick, this state only ever
+          # comes from our object-level stamp, never a controller re-pick.
+          settled=0
+          for i in $(seq 1 24); do
+            phase=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            sid=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.sandboxID}' 2>/dev/null || true)
+            echo "  [${i}/24] repend-probe phase: '${phase}' sandboxID: '${sid}'"
+            if [ "$phase" = "Ready" ] && [ "$sid" = "$backing" ]; then settled=1; break; fi
+            sleep 5
+          done
+          [ "$settled" -eq 1 ] || { echo "EVICTION-FAILED: the probe claim did not settle Ready on the stamped backing pod $backing"; exit 1; }
+
           # Delete the backing pod: the claim must re-pend (Phase Pending) and the
-          # pool must recreate a replacement husk pod.
+          # warm pool must recreate a replacement husk pod.
           kubectl -n default delete pod "$backing" --wait=false
 
           repended=0
@@ -1262,17 +1332,20 @@ jobs:
           # Endpoint/Node cleared on re-pend.
           ep=$(kubectl -n default get sandboxclaim.mitos.run repend-probe -o jsonpath='{.status.endpoint}' 2>/dev/null || true)
           [ -z "$ep" ] || { echo "EVICTION-FAILED: re-pended claim still advertises endpoint '${ep}'"; exit 1; }
-          # The pool recreates a replacement husk pod (warm pool restored).
+          # The husk-e2e warm pool recreates a replacement dormant husk pod (it
+          # counts only DORMANT pods toward Replicas, so the borrowed-then-deleted
+          # slot is refilled back to its 2 dormant pods).
           poolcount=0
           for i in $(seq 1 24); do
-            n=$(kubectl get pods -n default -l mitos.run/husk=true --field-selector=status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
-            echo "  [${i}/24] husk pod count after re-pend: $n"
+            n=$(kubectl get pods -n default -l mitos.run/husk=true,mitos.run/pool=husk-e2e --field-selector=status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            echo "  [${i}/24] husk-e2e pod count after re-pend: $n"
             if [ "$n" -ge 2 ]; then poolcount=1; break; fi
             sleep 5
           done
           [ "$poolcount" -eq 1 ] || { echo "EVICTION-FAILED: the pool did not recreate a replacement husk pod after the re-pend"; exit 1; }
           echo "PASS: the claim re-pended (Pending, endpoint cleared) on husk pod loss and the pool recreated a replacement. The full re-activate onto a Ready dormant pod completes where the VMM runs (kvm-test.yaml / bare metal)."
           kubectl -n default delete sandboxclaim.mitos.run repend-probe --ignore-not-found=true --wait=false || true
+          kubectl -n default delete sandboxpool repend-probe-pool --ignore-not-found=true --wait=false || true
       - name: Eviction 4, an over-allocatable husk-shaped pod is Unschedulable (autoscaler signal)
         # The native cluster-autoscaler pending signal: a husk-shaped pod whose
         # requests exceed node allocatable stays Pending with an Unschedulable
