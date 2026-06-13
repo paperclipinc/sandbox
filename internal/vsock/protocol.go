@@ -17,6 +17,7 @@ const (
 	TypeNotifyForked RequestType = "notify_forked"
 	TypeTarDir       RequestType = "tar_dir"
 	TypeUntarDir     RequestType = "untar_dir"
+	TypeExecStream   RequestType = "exec_stream"
 )
 
 // MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
@@ -50,6 +51,7 @@ type Request struct {
 	NotifyForked *NotifyForkedRequest `json:"notify_forked,omitempty"`
 	TarDir       *TarDirRequest       `json:"tar_dir,omitempty"`
 	UntarDir     *UntarDirRequest     `json:"untar_dir,omitempty"`
+	ExecStream   *ExecRequest         `json:"exec_stream,omitempty"`
 }
 
 // NotifyForkedRequest tells the guest a restore just happened so it can repair
@@ -200,6 +202,38 @@ type ExecResponse struct {
 	Stdout     string  `json:"stdout"`
 	Stderr     string  `json:"stderr"`
 	ExecTimeMs float64 `json:"exec_time_ms"`
+}
+
+// FrameKind tags an ExecStreamFrame as a data chunk or the terminal exit.
+type FrameKind string
+
+const (
+	FrameChunk FrameKind = "chunk"
+	FrameExit  FrameKind = "exit"
+)
+
+// StreamName identifies which standard stream a chunk came from.
+type StreamName string
+
+const (
+	StreamStdout StreamName = "stdout"
+	StreamStderr StreamName = "stderr"
+)
+
+// ExecStreamFrame is one newline-delimited JSON line in a streaming exec reply.
+// The guest emits zero or more FrameChunk frames (each carrying a slice of one
+// stream's bytes) followed by exactly one FrameExit frame. Data is a []byte so
+// the JSON encoder base64s it: binary output survives and no embedded newline
+// is mistaken for a frame boundary. The stream uses a dedicated vsock
+// connection, so these multi-line replies never interleave with the shared
+// connection's one-shot Response calls.
+type ExecStreamFrame struct {
+	Kind       FrameKind  `json:"kind"`
+	Stream     StreamName `json:"stream,omitempty"`
+	Data       []byte     `json:"data,omitempty"`
+	ExitCode   int        `json:"exit_code,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	ExecTimeMs float64    `json:"exec_time_ms,omitempty"`
 }
 
 type ReadFileResponse struct {
