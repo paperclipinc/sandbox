@@ -339,6 +339,19 @@ func (a *UIDAllocator) Acquire() (uid, gid uint32, err error) {
 	return 0, 0, &ErrUIDRangeExhausted{Low: a.low, High: a.high}
 }
 
+// MarkInUse reserves a specific uid so a later Acquire never hands it out. It
+// is used by crash recovery to re-claim the dedicated uid of a pre-crash VM
+// that a restarted forkd re-adopted, so a fresh fork cannot collide on it. A
+// uid outside the configured range is ignored. Idempotent.
+func (a *UIDAllocator) MarkInUse(uid uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if uid < a.low || uid > a.high {
+		return
+	}
+	a.inUse[uid] = true
+}
+
 // Release returns a uid to the pool. Releasing an unallocated uid is a
 // no-op.
 func (a *UIDAllocator) Release(uid uint32) {

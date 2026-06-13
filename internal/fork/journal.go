@@ -92,7 +92,50 @@ type sandboxRecord struct {
 	FirecrackerBin string `json:"firecrackerBin"`
 }
 
-// journal persists sandbox records under <dataDir>/sandbox-journal. Writes are
+// journalSandbox persists a record for a freshly-created sandbox so a restarted
+// forkd can recognize and reap it. A nil journal (mock engine, legacy test
+// paths) makes it a no-op. A write failure is logged (id/pid/path only, no
+// secrets) but does NOT fail the fork: the VM is already running, and a missing
+// journal record only loses crash-recovery for that one VM, which is strictly
+// better than failing an otherwise successful fork.
+func (e *Engine) journalSandbox(sb *Sandbox) {
+	if e.journal == nil || sb == nil {
+		return
+	}
+	rec := sandboxRecord{
+		ID:             sb.ID,
+		TemplateID:     sb.TemplateID,
+		SnapshotID:     sb.SnapshotID,
+		Endpoint:       sb.Endpoint,
+		Pid:            sb.Pid,
+		CreatedAt:      sb.CreatedAt,
+		VsockPath:      sb.VsockPath,
+		RootfsPath:     sb.rootfsPath,
+		ChrootDir:      sb.chrootDir,
+		JailerVMDir:    sb.jailerVMDir,
+		JailedUID:      sb.jailedUID,
+		Network:        networkIdentityFrom(sb.netID),
+		HasVolumes:     sb.hasVolumes,
+		FirecrackerBin: e.firecrackerBin,
+	}
+	if err := e.journal.write(rec); err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: journal sandbox %s (pid %d): %v\n", sb.ID, sb.Pid, err)
+	}
+}
+
+// unjournalSandbox removes a sandbox's journal record on clean destroy. A nil
+// journal is a no-op; a remove failure is logged (id only) but never blocks
+// teardown.
+func (e *Engine) unjournalSandbox(id string) {
+	if e.journal == nil {
+		return
+	}
+	if err := e.journal.remove(id); err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: remove journal record %s: %v\n", id, err)
+	}
+}
+
+// journal persists sandbox records under <dataDir>/sandboxes. Writes are
 // atomic (temp file + rename) so a crash mid-write never leaves a torn record.
 type journal struct {
 	dir string

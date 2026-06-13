@@ -172,6 +172,17 @@ type Engine struct {
 	// host MemTotal. A seam: production reads /proc/meminfo; tests inject canned
 	// contents. On non-linux/dev hosts the read fails and MemoryTotal is 0.
 	meminfoReader func() (string, error)
+
+	// journal persists one on-disk record per live sandbox under the data dir so
+	// a restarted forkd can recognize and reap its own pre-crash VMs (issue #12).
+	// nil disables journaling (the mock engine and the legacy test paths leave it
+	// unset; journalSandbox/unjournalSandbox are no-ops then).
+	journal *journal
+	// verifyPID is the PID-recycle guard startup reconcile uses to decide whether
+	// a journaled pid is still our live Firecracker (adopt) or dead/recycled
+	// (reap). nil falls back to procfsVerifier; reconcile tests inject a fake on
+	// darwin.
+	verifyPID pidVerifier
 }
 
 // Placeholder network identity used only while building a template snapshot.
@@ -550,6 +561,18 @@ type Sandbox struct {
 	// metering path uses them to find each volume's backing and seed paths;
 	// they are not on the hot fork path.
 	volumes []volume.Spec
+	// chrootDir, jailerVMDir, and jailedUID are the jailer artifacts captured
+	// from the Firecracker client at create, persisted in the journal so a
+	// restarted forkd can reap a dead VM's chroot and return its uid. Zero for
+	// direct-exec VMs.
+	chrootDir   string
+	jailerVMDir string
+	jailedUID   uint32
+	// adopted marks a sandbox re-adopted from the journal after a forkd restart:
+	// it has no live fcClient (the engine did not launch it this process), so
+	// Terminate reaps it directly from the recorded pid + paths + identity rather
+	// than through the client.
+	adopted bool
 }
 
 type ForkResult struct {
@@ -682,6 +705,8 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		maxSandboxes:         opts.MaxSandboxes,
 		memReserveBytes:      opts.MemoryReserveBytes,
 		meminfoReader:        opts.MeminfoReader,
+		journal:              newJournal(dataDir),
+		verifyPID:            procfsVerifier,
 	}
 	if e.memReserveBytes == 0 {
 		e.memReserveBytes = defaultMemoryReserveBytes
@@ -693,6 +718,12 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands)
 		return err
 	}
+	// Crash recovery (issue #12): before serving, read the on-disk journal and
+	// either re-adopt still-running pre-crash VMs into the live map (so
+	// ListSandboxes reports them and the controller GC can reconcile them) or
+	// reap dead VMs' leaked artifacts and drop their records. Fail-open: a bad
+	// record never blocks startup.
+	e.reconcile()
 	return e, nil
 }
 
@@ -1119,6 +1150,13 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	}
 	sandbox.hasVolumes = len(rebinds) > 0
 
+	// Capture the jailer artifacts so the crash-recovery journal can reap a dead
+	// VM's chroot and return its uid (zero for direct-exec VMs).
+	js := fcClient.JailerState()
+	sandbox.chrootDir = js.ChrootDir
+	sandbox.jailerVMDir = js.JailerVMDir
+	sandbox.jailedUID = js.JailedUID
+
 	sandbox.MemoryUnique, sandbox.MemoryShared = readMemoryStats(sandbox.Pid)
 
 	// Commit: insert the sandbox and consume the reservation atomically under one
@@ -1127,6 +1165,10 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// rollback (the slot is now a live sandbox, not an in-flight reservation).
 	e.commitReservation(sandboxID, sandbox)
 	committed = true
+
+	// Persist the journal record now that the VM is running and recorded in the
+	// live map, so a forkd crash from this point on can recognize and reap it.
+	e.journalSandbox(sandbox)
 
 	return &ForkResult{
 		SandboxID:    sandboxID,
@@ -1225,6 +1267,12 @@ func (e *Engine) Terminate(sandboxID string) error {
 	}
 	if sandbox.fcClient != nil {
 		_ = sandbox.fcClient.Kill()
+	} else if sandbox.adopted {
+		// A sandbox re-adopted from the journal after a forkd restart has no live
+		// client (this process did not launch it). Reap it directly from the
+		// recorded pid + jailer artifacts: kill the process, return its uid, and
+		// remove its jailer workspace, mirroring firecracker.Client.Kill.
+		e.reapAdopted(sandbox)
 	}
 
 	// Release the per-fork host network (tap + egress ruleset) and the
@@ -1246,6 +1294,10 @@ func (e *Engine) Terminate(sandboxID string) error {
 
 	sandboxDir := filepath.Join(e.dataDir, "sandboxes", sandboxID)
 	os.RemoveAll(sandboxDir)
+
+	// Clean destroy: drop the journal record so a later restart does not try to
+	// reap an already-terminated VM.
+	e.unjournalSandbox(sandboxID)
 
 	return nil
 }

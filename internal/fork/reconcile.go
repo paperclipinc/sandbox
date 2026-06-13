@@ -5,7 +5,177 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
+
+// reconcile reads the on-disk sandbox journal at forkd startup and, for every
+// record, either RE-ADOPTS the still-running VM into the live map (so
+// ListSandboxes reports it and the controller GC can reconcile it against the
+// CRDs) or REAPS a dead VM's leaked artifacts (jailer chroot, rootfs CoW clone,
+// fork network, jailer uid) and drops its record. This closes the forkd-crash
+// leak (issue #12): without it a restarted forkd reports zero sandboxes and its
+// pre-crash Firecracker processes leak until the node reboots.
+//
+// It is fail-OPEN: a nil journal, an unreadable journal dir, or a single bad
+// record never stops forkd from starting; every orphan found and reaped is
+// logged (counts + ids/paths, NEVER secrets) so an operator and the GC have
+// visibility. The PID-recycle guard (verifyPID) is critical: a journaled pid is
+// adopted ONLY when it is genuinely our live Firecracker, so a recycled,
+// unrelated pid is reaped/dropped rather than adopted or wrongly killed.
+func (e *Engine) reconcile() {
+	if e.journal == nil {
+		return
+	}
+	recs, err := e.journal.load()
+	if err != nil {
+		// Fail open: log and serve. A reconcile that cannot read the journal must
+		// not block startup; new forks still work, only crash recovery is skipped.
+		fmt.Fprintf(os.Stderr, "forkd: skip crash reconcile (journal unreadable): %v\n", err)
+		return
+	}
+	if len(recs) == 0 {
+		return
+	}
+
+	verify := e.verifyPID
+	if verify == nil {
+		verify = procfsVerifier
+	}
+
+	var adopted, reaped int
+	for _, rec := range recs {
+		if verify(rec.Pid, rec.FirecrackerBin) {
+			e.adoptSandbox(rec)
+			adopted++
+			continue
+		}
+		// Not our live process: dead or a recycled, unrelated pid. Reap its
+		// artifacts (it is NOT killed: a dead pid has nothing to kill, and a
+		// recycled pid is not ours to kill) and drop the record.
+		e.reapArtifacts(rec)
+		if err := e.journal.remove(rec.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: remove reaped journal record %s: %v\n", rec.ID, err)
+		}
+		reaped++
+	}
+	fmt.Fprintf(os.Stderr, "forkd: crash reconcile complete: %d sandbox(es) re-adopted, %d orphan(s) reaped\n", adopted, reaped)
+}
+
+// adoptSandbox reconstructs enough Sandbox state from a journal record to report
+// it through ListSandboxes/GetCapacity and to later Terminate it directly (the
+// engine has no live firecracker.Client for a VM it did not launch this
+// process). The reconstructed sandbox is marked adopted so Terminate reaps it
+// from the recorded pid + paths + identity.
+func (e *Engine) adoptSandbox(rec sandboxRecord) {
+	sb := &Sandbox{
+		ID:          rec.ID,
+		TemplateID:  rec.TemplateID,
+		SnapshotID:  rec.SnapshotID,
+		Endpoint:    rec.Endpoint,
+		Pid:         rec.Pid,
+		CreatedAt:   rec.CreatedAt,
+		VsockPath:   rec.VsockPath,
+		rootfsPath:  rec.RootfsPath,
+		chrootDir:   rec.ChrootDir,
+		jailerVMDir: rec.JailerVMDir,
+		jailedUID:   rec.JailedUID,
+		netID:       rec.Network.toIdentity(),
+		hasVolumes:  rec.HasVolumes,
+		adopted:     true,
+	}
+	sb.MemoryUnique, sb.MemoryShared = readMemoryStats(sb.Pid)
+
+	// Re-mark the adopted VM's jailer uid as in use so a fresh fork cannot hand
+	// the same uid to a new VM while this one still runs. Best effort: the
+	// allocator may be nil (direct-exec) or the uid zero.
+	if rec.JailedUID != 0 && e.jailer.Allocator != nil {
+		e.jailer.Allocator.MarkInUse(rec.JailedUID)
+	}
+	// Re-mark the network identity as in use so a fresh fork cannot collide on the
+	// adopted VM's tap/IP. Acquire is idempotent per id and reserves the slot.
+	if sb.netID.TapName != "" && e.netAlloc != nil {
+		_, _ = e.netAlloc.Acquire(rec.ID)
+	}
+
+	fmt.Fprintf(os.Stderr, "forkd: re-adopted pre-crash sandbox %s (pid %d, template %s)\n", rec.ID, rec.Pid, rec.TemplateID)
+
+	e.mu.Lock()
+	e.sandboxes[rec.ID] = sb
+	e.mu.Unlock()
+}
+
+// reapArtifacts removes a dead VM's leaked host artifacts: the jailer workspace
+// (chroot + CoW rootfs clone live under it), the sandbox working directory, the
+// fork network (tap + ruleset + identity), and the jailer uid. It is best-effort
+// and idempotent: an already-gone artifact is not an error. Paths are logged,
+// never secrets. The recorded pid is NOT signaled here: a dead pid has nothing
+// to kill, and an unrelated recycled pid is not ours to kill.
+func (e *Engine) reapArtifacts(rec sandboxRecord) {
+	// Jailer workspace (parent of the chroot, holds the CoW rootfs hard link).
+	if rec.JailerVMDir != "" {
+		if err := os.RemoveAll(rec.JailerVMDir); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: reap jailer dir %s for %s: %v\n", rec.JailerVMDir, rec.ID, err)
+		}
+	}
+	// Sandbox working dir (direct-exec rootfs clone, vsock socket, checkpoints).
+	sandboxDir := filepath.Join(e.dataDir, "sandboxes", rec.ID)
+	if err := os.RemoveAll(sandboxDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forkd: reap sandbox dir %s for %s: %v\n", sandboxDir, rec.ID, err)
+	}
+	// Fork network: tear down the tap + egress ruleset and release the identity.
+	if rec.Network.TapName != "" && e.networkEnabled() {
+		e.teardownForkNetwork(rec.ID, rec.Network.toIdentity())
+	}
+	// Per-fork volume backings.
+	if rec.HasVolumes && e.volBackend != nil {
+		if err := e.volBackend.Cleanup(rec.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: reap volumes for %s: %v\n", rec.ID, err)
+		}
+	}
+	// Jailer uid back to the pool.
+	if rec.JailedUID != 0 && e.jailer.Allocator != nil {
+		e.jailer.Allocator.Release(rec.JailedUID)
+	}
+	fmt.Fprintf(os.Stderr, "forkd: reaped orphan sandbox %s (pid %d, jailerDir %q, tap %q)\n", rec.ID, rec.Pid, rec.JailerVMDir, rec.Network.TapName)
+}
+
+// reapAdopted reaps a sandbox that was re-adopted from the journal (no live
+// firecracker.Client) when the controller GC later terminates it. It kills the
+// recorded pid (this VM IS ours: the PID-recycle guard adopted it), reaps the
+// leaked filesystem artifacts and the jailer uid, then leaves network/volume
+// teardown to Terminate, which already runs it for every sandbox. The kill is
+// best-effort: the process may have exited between adoption and termination.
+func (e *Engine) reapAdopted(sb *Sandbox) {
+	if sb.Pid > 0 {
+		if proc, err := os.FindProcess(sb.Pid); err == nil {
+			if kerr := proc.Kill(); kerr != nil && !isProcessGone(kerr) {
+				fmt.Fprintf(os.Stderr, "forkd: kill adopted sandbox %s (pid %d): %v\n", sb.ID, sb.Pid, kerr)
+			}
+		}
+	}
+	if sb.jailerVMDir != "" {
+		if err := os.RemoveAll(sb.jailerVMDir); err != nil {
+			fmt.Fprintf(os.Stderr, "forkd: remove jailer dir %s for adopted %s: %v\n", sb.jailerVMDir, sb.ID, err)
+		}
+	}
+	if sb.jailedUID != 0 && e.jailer.Allocator != nil {
+		e.jailer.Allocator.Release(sb.jailedUID)
+	}
+}
+
+// isProcessGone reports whether a kill error means the process was already gone
+// (ESRCH or the os "process already finished" sentinel), which is not a failure
+// for reaping.
+func isProcessGone(err error) bool {
+	if err == nil {
+		return true
+	}
+	if err == os.ErrProcessDone {
+		return true
+	}
+	return strings.Contains(err.Error(), "process already finished") ||
+		strings.Contains(err.Error(), syscall.ESRCH.Error())
+}
 
 // pidVerifier reports whether the process at pid is GENUINELY our Firecracker
 // VM (the one launched with firecrackerBin), as opposed to dead or a recycled,
