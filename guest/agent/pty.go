@@ -65,7 +65,12 @@ func setWinsize(master *os.File, cols, rows int) error {
 // output back, and on shell exit it writes the terminal exit frame. The shell
 // runs in its own session/process group so a connection drop or the host's
 // kill kills the whole tree.
-func handlePtyStream(conn net.Conn, req *vsock.PtyRequest) {
+//
+// sc is the dispatcher's scanner, handed over (not freshly allocated): it may
+// already hold input/resize frames that arrived coalesced with the open-request
+// line in a single read (bufio.Scanner reads in chunks). Reusing it ensures
+// those early frames are consumed rather than dropped by a fresh scanner.
+func handlePtyStream(conn net.Conn, sc *bufio.Scanner, req *vsock.PtyRequest) {
 	master, slavePath, err := openPTY()
 	if err != nil {
 		writePtyFrame(conn, vsock.PtyFrame{Kind: vsock.PtyExit, ExitCode: 1, Error: err.Error()})
@@ -136,8 +141,6 @@ func handlePtyStream(conn net.Conn, req *vsock.PtyRequest) {
 	// Reader goroutine: host->guest. Decodes input/resize frames. A scan error
 	// (host hung up or ctx-cancel closed the conn) kills the shell group.
 	go func() {
-		sc := bufio.NewScanner(conn)
-		sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
 		for sc.Scan() {
 			var f vsock.PtyFrame
 			if err := json.Unmarshal(sc.Bytes(), &f); err != nil {

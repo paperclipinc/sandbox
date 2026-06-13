@@ -20,7 +20,9 @@ func runPty(t *testing.T, req *vsock.PtyRequest) (send func(vsock.PtyFrame), fra
 	server, client := net.Pipe()
 	go func() {
 		defer server.Close()
-		handlePtyStream(server, req)
+		sc := bufio.NewScanner(server)
+		sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
+		handlePtyStream(server, sc, req)
 	}()
 
 	out := make(chan vsock.PtyFrame, 256)
@@ -82,6 +84,86 @@ func TestHandlePtyEchoAndExit(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatalf("timeout; collected %q", collected.String())
+		}
+	}
+}
+
+// TestHandleConnectionPtyCoalescedInput drives the REAL handleConnection
+// dispatch path (not handlePtyStream directly) and writes the PTY open request
+// AND a first input frame in a SINGLE write to the conn. bufio.Scanner reads in
+// chunks, so the dispatcher's outer scanner buffers both lines; the input frame
+// must still reach the PTY (it is not dropped by a fresh scanner). The input
+// echoes a unique marker which must appear in the guest output.
+func TestHandleConnectionPtyCoalescedInput(t *testing.T) {
+	server, client := net.Pipe()
+	go func() {
+		defer server.Close()
+		handleConnection(server)
+	}()
+
+	// Collect guest output frames.
+	out := make(chan vsock.PtyFrame, 256)
+	go func() {
+		sc := bufio.NewScanner(client)
+		sc.Buffer(make([]byte, 1<<20), vsock.MaxMessageBytes)
+		for sc.Scan() {
+			var f vsock.PtyFrame
+			if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
+				return
+			}
+			out <- f
+		}
+		close(out)
+	}()
+
+	// Build the open request line and the first input frame, then write BOTH in
+	// a single Write so they coalesce into one read on the guest side.
+	openReq, _ := json.Marshal(vsock.Request{
+		Type: vsock.TypePty,
+		Pty:  &vsock.PtyRequest{Command: "/bin/sh", WorkingDir: t.TempDir(), Cols: 80, Rows: 24},
+	})
+	inputFrame, _ := json.Marshal(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("echo coalesced_marker_99\n")})
+	var batch []byte
+	batch = append(batch, openReq...)
+	batch = append(batch, '\n')
+	batch = append(batch, inputFrame...)
+	batch = append(batch, '\n')
+	if _, err := client.Write(batch); err != nil {
+		t.Fatalf("write batch: %v", err)
+	}
+
+	send := func(f vsock.PtyFrame) {
+		b, _ := json.Marshal(f)
+		if _, err := client.Write(append(b, '\n')); err != nil {
+			t.Errorf("write frame: %v", err)
+		}
+	}
+
+	var collected strings.Builder
+	exitSent := false
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case f, ok := <-out:
+			if !ok {
+				t.Fatalf("stream closed before coalesced marker; got %q", collected.String())
+			}
+			if f.Kind == vsock.PtyOutput {
+				collected.Write(f.Data)
+				if !exitSent && strings.Contains(collected.String(), "coalesced_marker_99") {
+					exitSent = true
+					send(vsock.PtyFrame{Kind: vsock.PtyInput, Data: []byte("exit\n")})
+				}
+			}
+			if f.Kind == vsock.PtyExit {
+				if !strings.Contains(collected.String(), "coalesced_marker_99") {
+					t.Fatalf("coalesced input frame was dropped; output %q", collected.String())
+				}
+				client.Close()
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for coalesced marker; collected %q", collected.String())
 		}
 	}
 }

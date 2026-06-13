@@ -149,8 +149,12 @@ func handleConnection(conn net.Conn) {
 				return
 			}
 			// A PTY owns its connection bidirectionally: it reads input/resize
-			// frames and writes output/exit frames until the shell exits.
-			handlePtyStream(conn, req.Pty)
+			// frames and writes output/exit frames until the shell exits. The
+			// outer scanner is handed over (not a fresh one): if the open
+			// request and a first input frame arrived coalesced in one read,
+			// the buffered remainder lives in this scanner, so reusing it
+			// avoids dropping those early frames.
+			handlePtyStream(conn, scanner, req.Pty)
 			return
 		}
 
