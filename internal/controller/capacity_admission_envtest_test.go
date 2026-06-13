@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -94,13 +94,13 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 	// projected fork cost fits under the (default 1.0) overcommit factor.
 	testRegistry.SetNodeMemory("cap-node-1", 2*gib, 2*gib)
 
-	pendingBefore := counterValue(t, "agentrun_claim_pending_total", nil)
+	pendingBefore := counterValue(t, "mitos_claim_pending_total", nil)
 
 	makeCapacityFixture(t, "cap1")
 
 	// The claim must pend (not Ready, not Failed) while capacity is exhausted.
 	pending := waitForPhase(t, "cap1", v1alpha1.SandboxPending, 15*time.Second)
-	if got := counterValue(t, "agentrun_claim_pending_total", nil); got <= pendingBefore {
+	if got := counterValue(t, "mitos_claim_pending_total", nil); got <= pendingBefore {
 		t.Fatalf("claim_pending_total = %v, want > %v", got, pendingBefore)
 	}
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
@@ -140,7 +140,7 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 	defer stop()
 	testRegistry.SetNodeMemory("cap-node-2", 2*gib, 2*gib) // full
 
-	errBefore := counterValue(t, "agentrun_claim_errors_total", map[string]string{"pool": "cap2-pool", "reason": "capacity"})
+	errBefore := counterValue(t, "mitos_claim_errors_total", map[string]string{"pool": "cap2-pool", "reason": "capacity"})
 
 	makeCapacityFixture(t, "cap2")
 
@@ -172,11 +172,11 @@ func TestClaimFailsAfterBoundedPendingWait(t *testing.T) {
 	if cond == nil || cond.Reason != "CapacityExhausted" {
 		t.Fatalf("Ready condition = %+v, want reason CapacityExhausted", cond)
 	}
-	if got := counterValue(t, "agentrun_claim_errors_total", map[string]string{"pool": "cap2-pool", "reason": "capacity"}); got <= errBefore {
+	if got := counterValue(t, "mitos_claim_errors_total", map[string]string{"pool": "cap2-pool", "reason": "capacity"}); got <= errBefore {
 		t.Fatalf("claim_errors_total{pool=cap2-pool,reason=capacity} = %v, want > %v", got, errBefore)
 	}
 }
 
 // capacityPendingSinceKey mirrors the unexported annotation key the reconciler
 // stamps; kept in the external test package as a literal so a rename is caught.
-const capacityPendingSinceKey = "agentrun.dev/capacity-pending-since"
+const capacityPendingSinceKey = "mitos.run/capacity-pending-since"

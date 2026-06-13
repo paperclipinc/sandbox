@@ -26,7 +26,7 @@ Tunables and their defaults (see `gc.go`):
 
 ### Finalizer reap: a claim never disappears without its VM being reaped
 
-Every claim acquires the `agentrun.dev/forkd-terminate` finalizer before it
+Every claim acquires the `mitos.run/forkd-terminate` finalizer before it
 acquires a VM. On delete the reconciler calls forkd `Terminate` on the claim's
 node, then removes the finalizer. The RPC is bounded at 10s and tolerant: a node
 that has left the registry, is unhealthy, cannot be dialed, or answers

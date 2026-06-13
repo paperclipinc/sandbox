@@ -1,7 +1,7 @@
 package controller_test
 
 // Envtest coverage for the claim terminate-finalizer: a claim that reaches
-// Ready carries agentrun.dev/forkd-terminate, and deleting it reaps the
+// Ready carries mitos.run/forkd-terminate, and deleting it reaps the
 // backing VM via forkd Terminate before the object disappears. A claim whose
 // node has left the registry still deletes cleanly (the VM died with the
 // node), never hanging on the finalizer.
@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"

@@ -3,7 +3,7 @@
 // It presents sandboxes via the upstream SIG agent-sandbox API
 // (agents.x-k8s.io/v1alpha1 Sandbox) and fulfils them on our fork engine by
 // mapping each upstream Sandbox onto our husk-backed run path: a SandboxClaim
-// in our agentrun.dev group, bound to one of our pools.
+// in our mitos.run group, bound to one of our pools.
 //
 // Toolchain note (ADR 0001): we vendor the upstream Go types
 // (sigs.k8s.io/agent-sandbox) directly. That module declares go 1.26, so the
@@ -14,8 +14,8 @@
 //
 // The facade is opt-in: it runs as a separate binary (cmd/facade) with its own
 // manager and is not entangled with cmd/controller. Extras (pools, warm pools,
-// templates) stay in our agentrun.dev group; the single bridge annotation
-// agentrun.dev/pool links an upstream Sandbox to one of our pools.
+// templates) stay in our mitos.run group; the single bridge annotation
+// mitos.run/pool links an upstream Sandbox to one of our pools.
 package facade
 
 import (
@@ -35,15 +35,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 const (
 	// PoolAnnotation is the single bridge annotation that links an upstream
-	// agents.x-k8s.io Sandbox to one of our agentrun.dev pools (the warm-pool
+	// agents.x-k8s.io Sandbox to one of our mitos.run pools (the warm-pool
 	// source for the husk run path). When unset the facade falls back to its
 	// configured default pool. Documented in docs/adr/0001-facade-and-naming.md.
-	PoolAnnotation = "agentrun.dev/pool"
+	PoolAnnotation = "mitos.run/pool"
 
 	// SandboxConditionType is the upstream Ready condition the facade mirrors
 	// our SandboxClaim readiness into.
@@ -59,8 +59,8 @@ type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// DefaultPool is the agentrun.dev pool a Sandbox binds to when it carries no
-	// agentrun.dev/pool bridge annotation. Required: the facade cannot fulfil a
+	// DefaultPool is the mitos.run pool a Sandbox binds to when it carries no
+	// mitos.run/pool bridge annotation. Required: the facade cannot fulfil a
 	// Sandbox without a pool to draw a husk from.
 	DefaultPool string
 
@@ -79,8 +79,8 @@ func desiredReplicas(sb *agentsv1alpha1.Sandbox) int32 {
 	return *sb.Spec.Replicas
 }
 
-// poolFor resolves the agentrun.dev pool a Sandbox binds to: the bridge
-// annotation agentrun.dev/pool if present, else the configured default pool.
+// poolFor resolves the mitos.run pool a Sandbox binds to: the bridge
+// annotation mitos.run/pool if present, else the configured default pool.
 func (r *SandboxReconciler) poolFor(sb *agentsv1alpha1.Sandbox) string {
 	if p := sb.Annotations[PoolAnnotation]; p != "" {
 		return p

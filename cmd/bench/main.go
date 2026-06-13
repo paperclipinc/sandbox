@@ -21,11 +21,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/benchstat"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/metering"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/benchstat"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/metering"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 const (
@@ -62,9 +62,9 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.iterations, "iterations", 50, "measured iterations")
 	fs.IntVar(&cfg.warmup, "warmup", 5, "discarded warmup iterations; in exec-rt mode one mandatory connection-establishment exec always runs in addition to these, even at --warmup=0")
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
-	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/agent-run", "data directory holding template snapshots")
+	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/mitos", "data directory holding template snapshots")
 	fs.StringVar(&cfg.firecracker, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
-	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/agent-run/vmlinux", "guest kernel path")
+	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/mitos/vmlinux", "guest kernel path")
 	fs.StringVar(&cfg.jsonPath, "json", "", "optional path to write results JSON")
 	fs.BoolVar(&cfg.summary, "summary", false, "print the summary table to stdout")
 	fs.IntVar(&cfg.forks, "forks", 4, "metering mode: number of sandboxes to fork from one template before reading the report")

@@ -37,9 +37,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/huskprobe"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/huskprobe"
 )
 
 type config struct {
@@ -57,9 +57,9 @@ func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("husk-probe", flag.ContinueOnError)
 	var cfg config
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
-	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/agent-run", "data directory holding template snapshots")
+	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/mitos", "data directory holding template snapshots")
 	fs.StringVar(&cfg.firecracker, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
-	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/agent-run/vmlinux", "guest kernel path")
+	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/mitos/vmlinux", "guest kernel path")
 	fs.IntVar(&cfg.forks, "forks", 4, "number of sandboxes to fork from one template")
 	fs.StringVar(&cfg.cgroupRoot, "cgroup-root", "/sys/fs/cgroup/husk-probe", "writable cgroup2 path under which per-VM memcgs are created")
 	fs.IntVar(&cfg.settleMs, "settle-ms", 800, "milliseconds to let the forks settle before sampling")

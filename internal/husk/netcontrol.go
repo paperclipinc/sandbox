@@ -8,7 +8,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/paperclipinc/sandbox/internal/pki"
+	"github.com/paperclipinc/mitos/internal/pki"
 )
 
 // AuthorizeControllerIdentity is the authorize hook for ServeTLS that mirrors

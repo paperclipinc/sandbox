@@ -1,9 +1,9 @@
-# Default dev pool in the `default` namespace: `agentrun sandbox create` creates
+# Default dev pool in the `default` namespace: `mitos sandbox create` creates
 # claims there and the claim reconciler looks up the pool in the claim's
-# namespace. The controller (in agent-run) discovers the mock forkd, builds this
+# namespace. The controller (in mitos) discovers the mock forkd, builds this
 # template's snapshot over insecure gRPC, and claims fork via the mock engine and
 # reach Ready. No CSI/snapshot volumes, so it reconciles on the no-KVM node.
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: dev-default
@@ -14,7 +14,7 @@ spec:
     cpu: "1"
     memory: "512Mi"
 ---
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxPool
 metadata:
   name: dev-default

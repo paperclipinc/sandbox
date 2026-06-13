@@ -1,4 +1,4 @@
-module github.com/paperclipinc/sandbox
+module github.com/paperclipinc/mitos
 
 go 1.26.2
 

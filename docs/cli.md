@@ -1,39 +1,39 @@
-# agentrun CLI
+# mitos CLI
 
-`agentrun` is the command-line interface for snapshot-fork sandboxes. It drives
+`mitos` is the command-line interface for snapshot-fork sandboxes. It drives
 the sandbox lifecycle (create, exec, file IO, fork, terminate, list) against a
 Kubernetes cluster, and brings a local kind dev cluster up or down for a
 one-command local-dev loop.
 
 ```bash
-go build -o agentrun ./cmd/agentrun/
+go build -o mitos ./cmd/mitos/
 ```
 
 ## Command reference
 
 ```
-agentrun run <command> [--pool P] [--timeout N]   create a sandbox, run the
+mitos run <command> [--pool P] [--timeout N]   create a sandbox, run the
                                                   command, terminate, exit with
                                                   the command's exit code
-agentrun sandbox create [--pool P]                create a sandbox, print its id
-agentrun sandbox ls [-n namespace] [-A]           list sandboxes
-agentrun sandbox exec <id> <command...>           run a command in a sandbox
-agentrun sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
-agentrun sandbox terminate <id>                   destroy a sandbox
-agentrun dev up [--skip-cluster-create]           bring a local kind dev cluster
+mitos sandbox create [--pool P]                create a sandbox, print its id
+mitos sandbox ls [-n namespace] [-A]           list sandboxes
+mitos sandbox exec <id> <command...>           run a command in a sandbox
+mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
+mitos sandbox terminate <id>                   destroy a sandbox
+mitos dev up [--skip-cluster-create]           bring a local kind dev cluster
                                                   up with a mock control plane
-agentrun dev down                                 delete the local kind dev cluster
+mitos dev down                                 delete the local kind dev cluster
 ```
 
 Global flags `--namespace`/`-n` and `--pool` may appear before the subcommand.
-`agentrun run` exits with the executed command's exit code so it chains in shell
+`mitos run` exits with the executed command's exit code so it chains in shell
 pipelines.
 
 ## Backends
 
 ### Cluster backend (kubeconfig)
 
-For every `run` and `sandbox` verb, `agentrun` resolves a Kubernetes connection
+For every `run` and `sandbox` verb, `mitos` resolves a Kubernetes connection
 from the standard kubeconfig (`KUBECONFIG`, `--kubeconfig`, or in-cluster). It
 then:
 
@@ -54,7 +54,7 @@ is a thin client over the CRDs plus the token-scoped HTTP exec.
 
 ### Dev mock-mode local cluster
 
-`agentrun dev up` brings up a local kind cluster running a MOCK control plane so
+`mitos dev up` brings up a local kind cluster running a MOCK control plane so
 the full claim path completes without KVM:
 
 1. `kind create cluster` (tolerating an already-existing cluster; skipped with
@@ -67,7 +67,7 @@ The dev overlay (`deploy/dev/`) runs:
 - the **controller** with `--mock --disable-pki-bootstrap`, so it dials forkd over
   insecure gRPC (no control plane CA or TLS Secrets).
 - a **forkd** DaemonSet with `--mock` and no TLS flags, using the no-KVM mock fork
-  engine. It mounts no `/dev/kvm` and carries no `agentrun.dev/kvm` nodeSelector,
+  engine. It mounts no `/dev/kvm` and carries no `mitos.run/kvm` nodeSelector,
   so it schedules on the plain kind node.
 - a default `SandboxTemplate` + `SandboxPool` named `dev-default` in the `default`
   namespace.
@@ -77,22 +77,22 @@ forkd` pod label, builds the `dev-default` pool snapshot over insecure gRPC, and
 claim forks via the mock engine and reaches `Ready`:
 
 ```bash
-agentrun dev up
-agentrun sandbox create --pool dev-default   # prints the sandbox id, Ready
-agentrun sandbox ls
-agentrun sandbox terminate <id>
-agentrun dev down
+mitos dev up
+mitos sandbox create --pool dev-default   # prints the sandbox id, Ready
+mitos sandbox ls
+mitos sandbox terminate <id>
+mitos dev down
 ```
 
-The dev manifests reference the `agent-run-controller:ci` and `agent-run-forkd:ci`
+The dev manifests reference the `mitos-controller:ci` and `mitos-forkd:ci`
 image tags with `imagePullPolicy: IfNotPresent`. Build and load them before
-`agentrun dev up` (CI does this automatically):
+`mitos dev up` (CI does this automatically):
 
 ```bash
-docker build -f Dockerfile.controller -t agent-run-controller:ci .
-docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
-kind load docker-image agent-run-controller:ci --name agentrun-dev
-kind load docker-image agent-run-forkd:ci --name agentrun-dev
+docker build -f Dockerfile.controller -t mitos-controller:ci .
+docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+kind load docker-image mitos-controller:ci --name mitos-dev
+kind load docker-image mitos-forkd:ci --name mitos-dev
 ```
 
 ## Mock-engine limitation
@@ -101,7 +101,7 @@ The dev cluster uses the mock fork engine, which has NO guest VM. A claim
 reconciles to `Ready` and the control-plane dispatch works, but a real in-VM
 `exec` is not exercised on the dev cluster. To run real sandboxes locally you need
 a node with `/dev/kvm` and the production manifests (`deploy/controller/` +
-`deploy/daemon/`) with the `agentrun.dev/kvm=true` node label.
+`deploy/daemon/`) with the `mitos.run/kvm=true` node label.
 
 ## What is proven
 
@@ -109,7 +109,7 @@ PROVEN in CI:
 
 - command dispatch for `run` and every `sandbox` verb;
 - the cluster `SandboxClaim` claim path with token-scoped exec;
-- `agentrun dev up` orchestration (CRDs + mock controller + mock forkd + pool);
+- `mitos dev up` orchestration (CRDs + mock controller + mock forkd + pool);
 - `sandbox ls` over the control plane;
 - on the dev mock cluster on kind: `sandbox create` reaches `Ready`, `sandbox ls`
   shows it, and `sandbox terminate` removes it.
@@ -166,12 +166,12 @@ fabricated value.
 ### logs
 
 `logs <sandbox>` prints the husk stub pod console for the claim (the
-`agentrun.dev/husk` pod labeled `agentrun.dev/claim=<claim>`) via the Kubernetes
+`mitos.run/husk` pod labeled `mitos.run/claim=<claim>`) via the Kubernetes
 pod-logs API, then a one-line guest-console note. On a mock or no-VMM control
 plane (kind) there is no husk pod or no live guest, so the stub console is
 reported absent and the guest console states it needs a running sandbox: the
 guest serial/vsock console streams only from a live VMM (the
-[#18](https://github.com/paperclipinc/sandbox/issues/18) boundary), not from this
+[#18](https://github.com/paperclipinc/mitos/issues/18) boundary), not from this
 read-only operator path.
 
 ### exec
@@ -192,11 +192,11 @@ ergonomics longtail.
 
 ## Follow-ups
 
-- workspace verbs (`agentrun ws log|diff|revert|branch`) pending Workspace
-  ([#21](https://github.com/paperclipinc/sandbox/issues/21));
-- `agentrun pool create|refresh` beyond what `dev up` needs;
+- workspace verbs (`mitos ws log|diff|revert|branch`) pending Workspace
+  ([#21](https://github.com/paperclipinc/mitos/issues/21));
+- `mitos pool create|refresh` beyond what `dev up` needs;
 - streaming exec / PTY (`exec_stream`) pending the Connect protocol
-  ([#23](https://github.com/paperclipinc/sandbox/issues/23));
-- a `curl | sh` installer and `get.agentrun.dev` distribution
-  ([#37](https://github.com/paperclipinc/sandbox/issues/37));
+  ([#23](https://github.com/paperclipinc/mitos/issues/23));
+- a `curl | sh` installer and `get.mitos.run` distribution
+  ([#37](https://github.com/paperclipinc/mitos/issues/37));
 - shell completions and a code-interpreter-compatible API shim.

@@ -223,7 +223,7 @@ The cost that raw-forkd pays at claim time and husk pods pay off the hot path:
 
 Both costs are paid per warm slot and are therefore on the order of seconds
 (scheduling) per slot. The warm pool must be sized ahead of demand, or autoscaled
-from the `agentrun_claim_pending_total` metric (the pending-claims signal, issue
+from the `mitos_claim_pending_total` metric (the pending-claims signal, issue
 #17). An undersized warm pool degrades to cold-start: scheduling a fresh husk pod
 at claim time, which is the slow path (seconds, not the warm-pool activation
 latency). The warm pool is the capacity lever that keeps the claim hot path fast.
@@ -288,7 +288,7 @@ same-hardware figure is what the bare-metal harness run produces.
 ## Open (not yet measured)
 
 These are explicitly out of scope for the current harness and tracked in
-[#15](https://github.com/paperclipinc/sandbox/issues/15) / roadmap section 4:
+[#15](https://github.com/paperclipinc/mitos/issues/15) / roadmap section 4:
 
 - **Bare-metal reference numbers** on the Hetzner + Talos reference node. The
   CI numbers above are shared-runner-class; the representative numbers need the

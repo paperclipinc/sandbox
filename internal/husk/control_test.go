@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 func TestActivateRequestRoundTrip(t *testing.T) {

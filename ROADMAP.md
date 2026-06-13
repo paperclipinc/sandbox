@@ -51,14 +51,14 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     in each guest with the secret value absent from the host-side logs. See
     `docs/fork-correctness.md` and `docs/husk-pods.md`.
   - ✅ The `/dev/kvm` device plugin (vs privileged): `cmd/kvm-device-plugin`
-    (in `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where
+    (in `internal/deviceplugin`) advertises `mitos.run/kvm` only where
     `/dev/kvm` exists (scheduler truth: a no-KVM node advertises zero) and
     injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod requests
     KVM as a scheduled resource instead of `privileged: true`. The DevicePlugin
     and Registration gRPC are unit-tested against a fake kubelet. The kind e2e
     proves the full advertise->schedule->inject path end to end on the
     KVM-capable kind-e2e runner: a non-privileged probe pod (no `privileged`,
-    no hostPath, all capabilities dropped) requesting `agentrun.dev/kvm: 1` is
+    no hostPath, all capabilities dropped) requesting `mitos.run/kvm: 1` is
     scheduled to Running and `kubectl exec` confirms `/dev/kvm` is present
     inside the container, injected solely by `Allocate`. This is the full
     PSA-restricted device-access path proven in CI. The assertion is adaptive:
@@ -68,7 +68,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   - ✅ Husk pod lifecycle controller (migration slice 1, behind a flag): with
     `--enable-husk-pods` (default off, raw-forkd unchanged) a `SandboxPool`
     maintains a warm pool of pre-scheduled husk pod OBJECTS running the
-    dormant-VMM stub, each requesting `agentrun.dev/kvm` (not `privileged`) with
+    dormant-VMM stub, each requesting `mitos.run/kvm` (not `privileged`) with
     cpu/memory requests sized to the template (scheduler-truth-partial),
     locked-down securityContext (drop ALL, no escalation, seccomp
     RuntimeDefault, the documented `/dev/kvm` device exception), owner-ref GC,
@@ -169,7 +169,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   - ✅ FOUNDATION (slice 1, this slice): the facade controller maps an upstream
     `Sandbox` onto our husk-backed run path (`internal/facade` +
     `cmd/facade`, a separate opt-in binary): replicas 1 creates/owns our
-    `SandboxClaim` via the `agentrun.dev/pool` bridge annotation (or a
+    `SandboxClaim` via the `mitos.run/pool` bridge annotation (or a
     `--default-pool`), the claim Ready phase mirrors into the Sandbox Ready
     condition + replicas + serviceFQDN, replicas 0 / deletion terminates.
     Proven in envtest (the create -> Ready -> delete lifecycle). The faithful
@@ -224,10 +224,10 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     mappings + behavioral fidelity. The facade now maps the core `Sandbox` AND
     all three upstream `extensions.agents.x-k8s.io` kinds onto our engine:
     their `SandboxTemplate` to our template (the first podTemplate container's
-    image/command/env, bridge annotation `agentrun.dev/template`); their
+    image/command/env, bridge annotation `mitos.run/template`); their
     `SandboxWarmPool` to our `SandboxPool` at the requested `spec.replicas`
     (re-read every reconcile so an HPA-controlled scale is honored, bridge
-    annotation `agentrun.dev/warmpool`); their `SandboxClaim` to our
+    annotation `mitos.run/warmpool`); their `SandboxClaim` to our
     fork-from-snapshot claim honoring the warmpool policy
     (none/default/<name>), with status conditions (Bound/Ready), the bound
     sandbox identity, and deletion (their object deleted => ours GC'd) mirrored.
@@ -269,7 +269,7 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   cache via Share policy, flagship reversible sleep-consolidation demo.
   Depends on §3; may land as alpha behind a flag with eager-fetch fallback.
   DONE (the declarative foundation): the `Workspace` and `WorkspaceRevision`
-  CRDs in agentrun.dev/v1alpha1, and the Workspace controller that manages
+  CRDs in mitos.run/v1alpha1, and the Workspace controller that manages
   the revision DAG (head/revisions/resumable status with typed conditions +
   observedGeneration), the Pending -> Committed transition with
   immutability of a committed revision, `fromWorkspaceRevision` lineage
@@ -353,7 +353,7 @@ Format-freeze blockers:
   `Metering()` report also accounts CoW disk for reflink (Snapshot) volumes
   (seed shared once, fork divergence unique). forkd serves it on the operational
   `GET /v1/metering` endpoint, and the memory gauges are CoW-aware plus
-  `agentrun_cow_memory_savings_bytes` and `agentrun_metered_disk_bytes`. Proven
+  `mitos_cow_memory_savings_bytes` and `mitos_metered_disk_bytes`. Proven
   by unit tests and a KVM CI phase that forks 4 sandboxes from one template and
   asserts the shared region is counted once (CoW-aware total below naive,
   positive savings, per-fork unique below the shared-once set), an honest
@@ -457,7 +457,7 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
   `--allow-unverified-snapshots`). Proven by unit tests and the KVM CI
   tamper-detection phase on a real snapshot; residual (verify-once, not
   per-fork) tracked in the threat model. See docs/snapshot-distribution.md.
-- ⬜ Lifetime memory accounting (`agentrun_memory_unique_bytes` over time,
+- ⬜ Lifetime memory accounting (`mitos_memory_unique_bytes` over time,
   not just T=0)
 - ⬜ External security review scheduled before any 1.0 claim
 
@@ -643,7 +643,7 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   fitting node pend with backpressure (NoCapacity condition, bounded backoff)
   and fail cleanly with an actionable capacity-exhaustion error after a
   bounded --max-pending-duration instead of OOMing a node. The pending-claims
-  metric (agentrun_claim_pending_total) is the autoscaler/back-pressure
+  metric (mitos_claim_pending_total) is the autoscaler/back-pressure
   signal; envtest-proven in internal/controller.
 - ⬜ NUMA pinning + hugepage-backed guest memory; KSM same-page-merging
   tuning; per-node max density config (needs hardware)
@@ -659,20 +659,20 @@ pending/backpressure behavior are documented in docs/scheduling.md.
 The DX gap against E2B/Daytona is the adoption bottleneck once the core is
 verified. In rough order of leverage:
 
-- ✅ **MCP server interface**: `agentrun-mcp` exposes sandboxes as an MCP tool
+- ✅ **MCP server interface**: `mitos-mcp` exposes sandboxes as an MCP tool
   server (create/exec/read/write/fork/terminate as tools with versioned JSON
   schemas) over stdio JSON-RPC; every MCP-speaking agent becomes a user with
   zero SDK integration. A conformance test drives the server as a real MCP
   client in standard CI; see docs/mcp.md. Open: workspace tools (#21) and
   capability-budget advertisement (#24).
-- ✅ **agentrun CLI + one-command local dev**: `agentrun run` and `agentrun
+- ✅ **mitos CLI + one-command local dev**: `mitos run` and `mitos
   sandbox create|ls|exec|fork|terminate` drive the `SandboxClaim` path over
-  kubeconfig with token-scoped exec; `agentrun dev up|down` brings up a kind
+  kubeconfig with token-scoped exec; `mitos dev up|down` brings up a kind
   cluster running a mock control plane (controller `--mock
   --disable-pki-bootstrap`, forkd `--mock`, no KVM) from `deploy/dev/`. PROVEN in
   the kind CI smoke: `dev up` + `sandbox create` reaches Ready + `ls` + `terminate`
   on the mock engine; real in-VM exec is proven by the KVM CI of the API. See
-  docs/cli.md. OPEN: workspace verbs (`agentrun ws ...`) deferred to Workspace
+  docs/cli.md. OPEN: workspace verbs (`mitos ws ...`) deferred to Workspace
   (#21).
 - ⬜ Streaming exec (stdout/stderr), stdin, **PTY mode**, file transfer,
   port forwarding, the daily-driver agent-harness needs
@@ -688,7 +688,7 @@ verified. In rough order of leverage:
   kind-e2e smoke proves ls/ps/tree object-level, with exec/top/logs of a running
   sandbox as the KVM/bare-metal tail). OPEN: cp (file copy) and port-forward for
   operators, and the PTY-mode streaming exec on the SDK side.
-- ✅ TypeScript SDK (`@agentrun/sdk`): `Sandbox` exec/fork/terminate/files over
+- ✅ TypeScript SDK (`@mitos/sdk`): `Sandbox` exec/fork/terminate/files over
   the forkd HTTP API with bearer auth; `SandboxServer` direct mode;
   `AgentRun` cluster mode over a mockable `K8sApi` interface;
   `@kubernetes/client-node` lazy-loaded so direct mode stays light; token
@@ -698,7 +698,7 @@ verified. In rough order of leverage:
   package; real in-VM exec proven by the KVM CI of the underlying API; npm
   publish is a release follow-up. Parity table in sdk/typescript/README.md.
 - ⬜ Agent Sandbox (k8s-sigs) CRD adapter: assess, decide, document either way
-- ✅ One-command local story: `agentrun dev up` (kind + mock control plane from
+- ✅ One-command local story: `mitos dev up` (kind + mock control plane from
   deploy/dev/), proven in the kind CI smoke. OPEN: document the KVM-passthrough
   path for real local exec.
 - ⬜ Helm chart (README previously implied one exists; it does not yet)
@@ -710,7 +710,7 @@ verified. In rough order of leverage:
   propagation over gRPC, enabled by --otlp-endpoint, no secrets in spans; PROVEN
   by in-memory span tests in CI.
 - ✅ Trace-to-revision link: the claim reconcile trace id is stamped on the
-  WorkspaceRevision it produces (the agentrun.dev/trace-id annotation, valid id
+  WorkspaceRevision it produces (the mitos.run/trace-id annotation, valid id
   only, omitted when tracing is off), a workspace.dehydrate child span names the
   revision and the contentManifest digest, and the trace id rides the
   revision.created feed event (traceId field), so a revision resolves to the
@@ -721,9 +721,9 @@ verified. In rough order of leverage:
   the Cilium/Hubble integration, and Grafana dashboards plus PrometheusRule
   alerts that pivot on the trace id are the 1.0 maturity bar.
 - ✅ Metrics: orphan-sweep counts, pending-claim requeues, and per-pool claim
-  error rates are exported (agentrun_orphan_sweeps_total,
-  agentrun_claim_pending_total, agentrun_claim_errors_total{pool,reason},
-  agentrun_pool_ready_snapshots{pool}; increments asserted in CI).
+  error rates are exported (mitos_orphan_sweeps_total,
+  mitos_claim_pending_total, mitos_claim_errors_total{pool,reason},
+  mitos_pool_ready_snapshots{pool}; increments asserted in CI).
 - ✅ Grafana dashboard + PrometheusRule alerts + runbooks + the
   conditions/reason-code catalogue (the 1.0 maturity bar): the opt-in
   deploy/monitoring kustomize layer ships a Grafana dashboard and five alerts

@@ -1,6 +1,6 @@
-# @agentrun/sdk
+# @mitos/sdk
 
-TypeScript SDK for the agent-run sandbox runtime. Snapshot-fork microVMs for
+TypeScript SDK for the mitos sandbox runtime. Snapshot-fork microVMs for
 AI agents: fork from a pool in milliseconds, exec commands, read and write
 files, then terminate. Targets Node 18+ with native fetch.
 
@@ -10,7 +10,7 @@ Two modes:
   (no Kubernetes required). No bearer token; the standalone server is tokenless
   by design.
 - **Cluster mode** (`AgentRun`): drives the Kubernetes CRDs
-  (`SandboxClaim`, `SandboxFork`) in the `agentrun.dev/v1alpha1` API group.
+  (`SandboxClaim`, `SandboxFork`) in the `mitos.run/v1alpha1` API group.
   Each sandbox gets a per-sandbox bearer token read from a Secret and sent
   as `Authorization: Bearer <token>`. The token value is never logged and is
   redacted from any error message surfaced to callers.
@@ -21,13 +21,13 @@ equivalent and the parity mapping below.
 ## Install
 
 ```
-npm install @agentrun/sdk
+npm install @mitos/sdk
 ```
 
 ## Direct mode: SandboxServer
 
 ```typescript
-import { SandboxServer } from "@agentrun/sdk";
+import { SandboxServer } from "@mitos/sdk";
 
 const server = new SandboxServer("http://localhost:8080");
 
@@ -60,7 +60,7 @@ Full runnable example: [`examples/direct.ts`](examples/direct.ts).
 ## Cluster mode: AgentRun
 
 ```typescript
-import { AgentRun, KubeConfigApi } from "@agentrun/sdk";
+import { AgentRun, KubeConfigApi } from "@mitos/sdk";
 
 // KubeConfigApi loads ~/.kube/config by default. Pass { inCluster: true }
 // inside a pod that has a service account.
@@ -138,7 +138,7 @@ sandbox API with `AllowTokenless`.
 
 See [`sdk/python/README.md`](../python/README.md) for the Python SDK.
 
-| Python (`agent_run`)            | TypeScript (`@agentrun/sdk`)        | Notes                               |
+| Python (`mitos`)            | TypeScript (`@mitos/sdk`)        | Notes                               |
 |---------------------------------|-------------------------------------|-------------------------------------|
 | `SandboxServer(url)`            | `new SandboxServer(url)`            | direct mode                         |
 | `server.create_template(id)`    | `server.createTemplate(id)`         | builds a VM snapshot                |
@@ -164,7 +164,7 @@ All errors are `AgentRunError` instances with a machine-readable `code`, a
 human-readable `errorCause`, and an actionable `remediation`:
 
 ```typescript
-import { AgentRunError } from "@agentrun/sdk";
+import { AgentRunError } from "@mitos/sdk";
 
 try {
   await sandbox.exec("...");

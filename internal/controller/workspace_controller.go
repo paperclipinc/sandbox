@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -22,7 +22,7 @@ import (
 // well as by owner reference. The reconciler adopts a revision that names a
 // workspace via spec.workspaceRef by setting both the label and the owner
 // reference (for GC) the first time it reconciles the workspace.
-const WorkspaceLabel = "agentrun.dev/workspace"
+const WorkspaceLabel = "mitos.run/workspace"
 
 // Workspace reason codes. These are the normative reason strings for the
 // Workspace and WorkspaceRevision Ready conditions; the catalogue lives in
@@ -80,8 +80,8 @@ func (r *WorkspaceReconciler) snapshotExists() memorySnapshotExistsFunc {
 	}
 }
 
-// +kubebuilder:rbac:groups=agentrun.dev,resources=workspaces;workspacerevisions,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=workspaces/status;workspacerevisions/status,verbs=get;patch;update
+// +kubebuilder:rbac:groups=mitos.run,resources=workspaces;workspacerevisions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=workspaces/status;workspacerevisions/status,verbs=get;patch;update
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

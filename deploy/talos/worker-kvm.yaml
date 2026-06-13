@@ -28,14 +28,14 @@ machine:
       # tun/tap driver behind it.
       - name: tun
   # forkd schedules only onto nodes carrying this label (the DaemonSet
-  # nodeSelector agentrun.dev/kvm: "true" in deploy/daemon/daemonset.yaml).
+  # nodeSelector mitos.run/kvm: "true" in deploy/daemon/daemonset.yaml).
   nodeLabels:
-    agentrun.dev/kvm: "true"
+    mitos.run/kvm: "true"
   # No extra sysctls are required: /dev/kvm comes from the kvm modules, the
   # guest-agent vsock from vhost_vsock, and tap devices from tun. Add
   # machine.sysctls here only if a future networking change needs one.
   #
-  # Mount a dedicated data partition at /var/lib/agent-run, the forkd dataDir
+  # Mount a dedicated data partition at /var/lib/mitos, the forkd dataDir
   # (--data-dir in deploy/daemon/daemonset.yaml). Snapshot, rootfs, and the
   # jailer chroot base all live here and must share one filesystem so forkd can
   # hard-link them into each per-VM chroot. Point device at the actual data
@@ -44,4 +44,4 @@ machine:
   disks:
     - device: /dev/nvme1n1
       partitions:
-        - mountpoint: /var/lib/agent-run
+        - mountpoint: /var/lib/mitos

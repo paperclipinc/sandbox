@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/guestenv"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/guestenv"
+	"github.com/paperclipinc/mitos/internal/vsock"
 	"golang.org/x/sys/unix"
 )
 

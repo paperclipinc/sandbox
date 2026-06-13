@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/dnsproxy"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/netconf"
-	"github.com/paperclipinc/sandbox/internal/network"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/dnsproxy"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/netconf"
+	"github.com/paperclipinc/mitos/internal/network"
 )
 
 // newNetEngine builds an Engine with networking wired but WITHOUT touching

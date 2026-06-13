@@ -14,7 +14,7 @@ import (
 )
 
 func TestIssueAndVerifyRoundTrip(t *testing.T) {
-	ca, err := NewCA("agent-run")
+	ca, err := NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestIssueAndVerifyRoundTrip(t *testing.T) {
 }
 
 func TestServerRejectsClientWithoutCert(t *testing.T) {
-	ca, _ := NewCA("agent-run")
+	ca, _ := NewCA("mitos")
 	server, _ := ca.Issue(ServerName)
 	serverTLS, _ := ServerTLSConfig(server.CertPEM, server.KeyPEM, ca.CertPEM())
 
@@ -98,8 +98,8 @@ func TestServerRejectsClientWithoutCert(t *testing.T) {
 }
 
 func TestIssueRejectsUnknownName(t *testing.T) {
-	ca, _ := NewCA("agent-run")
-	if _, err := ca.Issue("imposter.agent-run"); err == nil {
+	ca, _ := NewCA("mitos")
+	if _, err := ca.Issue("imposter.mitos"); err == nil {
 		t.Fatal("expected issuance restricted to known identities")
 	}
 }
@@ -118,7 +118,7 @@ func parseLeafCert(t *testing.T, certPEM []byte) *x509.Certificate {
 }
 
 func TestIssueSplitsExtKeyUsagePerIdentity(t *testing.T) {
-	ca, err := NewCA("agent-run")
+	ca, err := NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestIssueSplitsExtKeyUsagePerIdentity(t *testing.T) {
 }
 
 func TestPeerDNSNameIgnoresUnverifiedPeerCertificates(t *testing.T) {
-	ca, err := NewCA("agent-run")
+	ca, err := NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestPeerDNSNameIgnoresUnverifiedPeerCertificates(t *testing.T) {
 }
 
 func TestKeyPEMSurvivesLoadCARoundTrip(t *testing.T) {
-	ca, err := NewCA("agent-run")
+	ca, err := NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,9 +21,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/vsock"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/vsock"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,

@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/facade"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/facade"
 )
 
 // exampleImage is the test image substituted for the upstream ${IMAGE}
@@ -122,7 +122,7 @@ func convertUnstructured(u *unstructured.Unstructured, into *agentsv1alpha1.Sand
 // unmapped fields gracefully and still bridges the claim. Those unmapped fields
 // are recorded as justified exceptions in docs/facade-conformance.md (no silent
 // divergence). The identity (name/namespace), the pool binding (the default
-// pool here, since the examples carry no agentrun.dev/pool annotation), and the
+// pool here, since the examples carry no mitos.run/pool annotation), and the
 // first container's env are what the facade maps and asserts.
 func TestFacadeReconcilesVendoredExamples(t *testing.T) {
 	examples := loadCoreSandboxExamples(t)
@@ -161,7 +161,7 @@ func TestFacadeReconcilesVendoredExamples(t *testing.T) {
 			})
 
 			// The facade binds the example to the configured default pool (the
-			// examples carry no agentrun.dev/pool annotation) and stamps the
+			// examples carry no mitos.run/pool annotation) and stamps the
 			// bridge annotation onto the claim.
 			if claim.Spec.PoolRef.Name != "default-pool" {
 				t.Fatalf("%s: claim poolRef = %q, want default-pool", ex.sourcePath, claim.Spec.PoolRef.Name)

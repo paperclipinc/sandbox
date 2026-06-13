@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/mcp"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/mcp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,7 +23,7 @@ import (
 // constant (internal/controller/token_secret.go).
 const tokenSecretSuffix = "-sandbox-token"
 
-// Scheme is the runtime scheme with the agentrun v1alpha1 and core types
+// Scheme is the runtime scheme with the mitos v1alpha1 and core types
 // registered, for building a controller-runtime client against a real cluster.
 func Scheme() *runtime.Scheme {
 	s := runtime.NewScheme()

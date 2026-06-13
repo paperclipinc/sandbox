@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from agent_run.direct import SandboxServer
+from mitos.direct import SandboxServer
 
 
 SERVER_URL = "http://localhost:18080"

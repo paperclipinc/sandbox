@@ -1,4 +1,4 @@
-// Command agentrun-mcp exposes the agentrun sandbox lifecycle (create, exec,
+// Command mitos-mcp exposes the mitos sandbox lifecycle (create, exec,
 // file IO, fork, terminate) as Model Context Protocol tools over a stdio
 // JSON-RPC transport. Any MCP-speaking agent can drive sandboxes through it
 // without an SDK integration.
@@ -17,7 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/paperclipinc/sandbox/internal/mcp"
+	"github.com/paperclipinc/mitos/internal/mcp"
 )
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 	flag.Parse()
 
 	// Log to stderr only: stdout is the MCP JSON-RPC channel. Never log the token.
-	logger := log.New(os.Stderr, "agentrun-mcp ", log.LstdFlags)
+	logger := log.New(os.Stderr, "mitos-mcp ", log.LstdFlags)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

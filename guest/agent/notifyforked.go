@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/vsock"
 	"golang.org/x/sys/unix"
 )
 

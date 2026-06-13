@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,11 +40,11 @@ type SandboxPoolReconciler struct {
 	HuskStubImage string
 	// KVMResourceName is the extended resource a husk pod requests for KVM
 	// access (the device plugin slot, not privileged: true). Empty defaults to
-	// agentrun.dev/kvm. Only used when EnableHuskPods is true.
+	// mitos.run/kvm. Only used when EnableHuskPods is true.
 	KVMResourceName string
 	// DataDir is the forkd data directory on the node; the husk pod's snapshot
 	// hostPath is rooted here (<DataDir>/templates/<id>/snapshot). Empty defaults
-	// to /var/lib/agent-run. Only used when EnableHuskPods is true.
+	// to /var/lib/mitos. Only used when EnableHuskPods is true.
 	DataDir string
 	// HuskTLSSecretName is the Secret holding the husk stub's mTLS server leaf
 	// (tls.crt, tls.key), mounted into each husk pod so the stub can serve the
@@ -64,8 +64,8 @@ type SandboxPoolReconciler struct {
 // The husk warm pool is bounded against voluntary disruption (node drain,
 // eviction) by a PodDisruptionBudget the reconciler creates-or-updates per pool
 // (issue #18, slice 4b), so it needs the policy/poddisruptionbudgets verbs.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

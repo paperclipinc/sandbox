@@ -12,16 +12,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/metering"
-	"github.com/paperclipinc/sandbox/internal/netconf"
-	"github.com/paperclipinc/sandbox/internal/network"
-	"github.com/paperclipinc/sandbox/internal/snapcompat"
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
-	"github.com/paperclipinc/sandbox/internal/volume"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/metering"
+	"github.com/paperclipinc/mitos/internal/netconf"
+	"github.com/paperclipinc/mitos/internal/network"
+	"github.com/paperclipinc/mitos/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/volume"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 type Engine struct {

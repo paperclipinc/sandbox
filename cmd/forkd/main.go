@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/dnsproxy"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/netconf"
-	"github.com/paperclipinc/sandbox/internal/network"
-	"github.com/paperclipinc/sandbox/internal/observability"
-	"github.com/paperclipinc/sandbox/internal/pki"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/dnsproxy"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/netconf"
+	"github.com/paperclipinc/mitos/internal/network"
+	"github.com/paperclipinc/mitos/internal/observability"
+	"github.com/paperclipinc/mitos/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -66,9 +66,9 @@ func main() {
 
 	flag.StringVar(&listenAddr, "listen", ":9090", "gRPC listen address (controller communication)")
 	flag.StringVar(&httpAddr, "http", ":9091", "HTTP listen address (metrics + sandbox exec/files API)")
-	flag.StringVar(&dataDir, "data-dir", "/var/lib/agent-run", "Data directory for snapshots and sandboxes")
+	flag.StringVar(&dataDir, "data-dir", "/var/lib/mitos", "Data directory for snapshots and sandboxes")
 	flag.StringVar(&firecrackerBin, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
-	flag.StringVar(&kernelPath, "kernel", "/var/lib/agent-run/vmlinux", "Guest kernel path")
+	flag.StringVar(&kernelPath, "kernel", "/var/lib/mitos/vmlinux", "Guest kernel path")
 	flag.BoolVar(&mockMode, "mock", false, "Use mock fork engine (no KVM required)")
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to the forkd server certificate PEM (mTLS)")
 	flag.StringVar(&tlsKey, "tls-key", "", "Path to the forkd server key PEM (mTLS)")
@@ -107,7 +107,7 @@ func main() {
 	// per-pull minted token / forkd-peer mTLS identity is a follow-up.
 	flag.Parse()
 
-	shutdownTracing, err := observability.Setup(context.Background(), "agentrun-forkd", otlpEndpoint)
+	shutdownTracing, err := observability.Setup(context.Background(), "mitos-forkd", otlpEndpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: tracing setup: %v\n", err)
 		os.Exit(1)

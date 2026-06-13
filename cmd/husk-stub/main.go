@@ -47,12 +47,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/husk"
-	"github.com/paperclipinc/sandbox/internal/pki"
-	"github.com/paperclipinc/sandbox/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/pki"
+	"github.com/paperclipinc/mitos/internal/snapcompat"
 )
 
 // huskSandboxID is the stable sandbox id the husk-stub registers its single

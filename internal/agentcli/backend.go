@@ -1,4 +1,4 @@
-// Package agentcli implements the agentrun command-line interface: a thin,
+// Package agentcli implements the mitos command-line interface: a thin,
 // dependency-free command tree over a Backend that drives the sandbox lifecycle
 // (create, exec, file IO, fork, terminate, list).
 //
@@ -11,7 +11,7 @@
 // dependency free.
 //
 // Run is the testable entry point: it takes the Backend, output writers, and the
-// raw argument slice, and returns a process exit code. cmd/agentrun is a thin
+// raw argument slice, and returns a process exit code. cmd/mitos is a thin
 // wrapper that builds a real cluster Backend and calls Run.
 package agentcli
 

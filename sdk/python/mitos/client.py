@@ -6,16 +6,16 @@ from typing import Optional
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 
-from agent_run.sandbox import Sandbox
-from agent_run.types import PoolStatus, SandboxPhase
+from mitos.sandbox import Sandbox
+from mitos.types import PoolStatus, SandboxPhase
 
 
-API_GROUP = "agentrun.dev"
+API_GROUP = "mitos.run"
 API_VERSION = "v1alpha1"
 
 
 class AgentRun:
-    """Client for the agent-run sandbox runtime."""
+    """Client for the mitos sandbox runtime."""
 
     def __init__(
         self,

@@ -6,7 +6,7 @@ const manifest: PaperclipPluginManifestV1 = {
   version: "0.1.0",
   displayName: "Sandbox Provider (Firecracker)",
   description:
-    "Self-hosted sandbox provider using paperclipinc/sandbox. Sub-millisecond Firecracker microVM forking with per-volume fork policies.",
+    "Self-hosted sandbox provider using paperclipinc/mitos. Sub-millisecond Firecracker microVM forking with per-volume fork policies.",
   author: "Paperclip",
   categories: ["automation"],
   capabilities: ["environment.drivers.register"],
@@ -19,7 +19,7 @@ const manifest: PaperclipPluginManifestV1 = {
       kind: "sandbox_provider",
       displayName: "Sandbox (Firecracker)",
       description:
-        "Self-hosted sandboxes via paperclipinc/sandbox. Firecracker microVMs with CoW forking (~0.8ms), volume fork policies, and k8s-native management.",
+        "Self-hosted sandboxes via paperclipinc/mitos. Firecracker microVMs with CoW forking (~0.8ms), volume fork policies, and k8s-native management.",
       configSchema: {
         type: "object",
         properties: {

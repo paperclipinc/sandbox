@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/snapcompat"
 )
 
 // snapshotVerifier re-verifies a snapshot at activate time BEFORE it is loaded

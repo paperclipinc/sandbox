@@ -1,5 +1,5 @@
-IMG_CONTROLLER ?= ghcr.io/paperclipinc/sandbox-controller:latest
-IMG_FORKD ?= ghcr.io/paperclipinc/sandbox-forkd:latest
+IMG_CONTROLLER ?= ghcr.io/paperclipinc/mitos-controller:latest
+IMG_FORKD ?= ghcr.io/paperclipinc/mitos-forkd:latest
 
 .PHONY: all build test generate manifests proto docker-build docker-push install deploy
 
@@ -32,8 +32,8 @@ manifests:
 
 proto:
 	protoc \
-		--go_out=. --go_opt=module=github.com/paperclipinc/sandbox \
-		--go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/sandbox \
+		--go_out=. --go_opt=module=github.com/paperclipinc/mitos \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/mitos \
 		proto/forkd.proto
 
 docker-build:

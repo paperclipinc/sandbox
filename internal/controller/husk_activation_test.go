@@ -6,13 +6,13 @@ package controller_test
 //
 //   - a dormant Ready husk pod present  -> the reconciler activates it (the fake
 //     activator records the snapshot dir + env + secrets), sets Endpoint/Node,
-//     marks the pod claimed (the agentrun.dev/claim label appears), claim Ready;
+//     marks the pod claimed (the mitos.run/claim label appears), claim Ready;
 //   - no dormant pod                    -> claim Pending;
 //   - an Activate failure               -> claim does NOT go Ready;
 //   - secret VALUES never appear in the captured suite log.
 //
 // The suite registers a husk-enabled claim reconciler that handles ONLY claims
-// labeled agentrun.dev/husk-test, with a swappable activator (setHuskTest
+// labeled mitos.run/husk-test, with a swappable activator (setHuskTest
 // activator); the raw forkd reconciler skips those, so the two never race.
 
 import (
@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/husk"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/husk"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -81,15 +81,15 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 			GenerateName: poolName + "-husk-",
 			Namespace:    "default",
 			Labels: map[string]string{
-				"agentrun.dev/pool": poolName,
-				"agentrun.dev/husk": "true",
+				"mitos.run/pool": poolName,
+				"mitos.run/husk": "true",
 			},
 		},
 		Spec: corev1.PodSpec{
 			NodeName: "kvm-node-1",
 			Containers: []corev1.Container{{
 				Name:  "husk-stub",
-				Image: "agent-run-husk-stub:test",
+				Image: "mitos-husk-stub:test",
 			}},
 		},
 	}
@@ -229,8 +229,8 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: "default"}, &claimedPod); err != nil {
 		t.Fatal(err)
 	}
-	if claimedPod.Labels["agentrun.dev/claim"] != claim.Name {
-		t.Errorf("husk pod claim label = %q, want %q", claimedPod.Labels["agentrun.dev/claim"], claim.Name)
+	if claimedPod.Labels["mitos.run/claim"] != claim.Name {
+		t.Errorf("husk pod claim label = %q, want %q", claimedPod.Labels["mitos.run/claim"], claim.Name)
 	}
 
 	// Secret value never logged.
@@ -283,7 +283,7 @@ func TestHuskClaimActivateCarriesExpectedDigest(t *testing.T) {
 // (activate it) and the other never activates the same pod. Concretely:
 //   - the fake activator (the only dormant pod, so any activate targets it) is
 //     called exactly once: only the winner reaches Activate;
-//   - the pod's agentrun.dev/claim label names exactly one of the two claims;
+//   - the pod's mitos.run/claim label names exactly one of the two claims;
 //   - that named claim is Ready and the other is NOT Ready (Pending/requeued).
 //
 // Without the optimistic lock (a plain MergeFrom carries no resourceVersion),
@@ -384,7 +384,7 @@ func TestHuskClaimSingleDormantPodNoDoubleAssign(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: "default"}, &claimedPod); err != nil {
 		t.Fatal(err)
 	}
-	if got := claimedPod.Labels["agentrun.dev/claim"]; got != ready.Name {
+	if got := claimedPod.Labels["mitos.run/claim"]; got != ready.Name {
 		t.Fatalf("pod claim label = %q, want the winning claim %q", got, ready.Name)
 	}
 

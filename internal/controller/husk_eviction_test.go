@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/husk"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/husk"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,11 +83,11 @@ func TestEnsureHuskPDB(t *testing.T) {
 	if pdb.Spec.Selector == nil {
 		t.Fatal("PDB has no selector")
 	}
-	if pdb.Spec.Selector.MatchLabels["agentrun.dev/pool"] != "pdb-pool" {
-		t.Errorf("PDB pool selector = %q, want pdb-pool", pdb.Spec.Selector.MatchLabels["agentrun.dev/pool"])
+	if pdb.Spec.Selector.MatchLabels["mitos.run/pool"] != "pdb-pool" {
+		t.Errorf("PDB pool selector = %q, want pdb-pool", pdb.Spec.Selector.MatchLabels["mitos.run/pool"])
 	}
-	if pdb.Spec.Selector.MatchLabels["agentrun.dev/husk"] != "true" {
-		t.Errorf("PDB husk selector = %q, want true", pdb.Spec.Selector.MatchLabels["agentrun.dev/husk"])
+	if pdb.Spec.Selector.MatchLabels["mitos.run/husk"] != "true" {
+		t.Errorf("PDB husk selector = %q, want true", pdb.Spec.Selector.MatchLabels["mitos.run/husk"])
 	}
 	// minAvailable = max(1, Replicas-1) = 2 for Replicas=3.
 	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() != 2 {
@@ -143,8 +143,8 @@ func TestHuskPoolSelfHealsDeletedPod(t *testing.T) {
 		Client:          c,
 		NodeRegistry:    controller.NewNodeRegistry(),
 		EnableHuskPods:  true,
-		HuskStubImage:   "agent-run-husk-stub:test",
-		KVMResourceName: "agentrun.dev/kvm",
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
 	}
 
 	// Bring the warm pool up to Replicas=2.
@@ -236,8 +236,8 @@ func TestHuskWarmPoolDecoupledFromSnapshotBuild(t *testing.T) {
 		Client:          c,
 		NodeRegistry:    reg,
 		EnableHuskPods:  true,
-		HuskStubImage:   "agent-run-husk-stub:test",
-		KVMResourceName: "agentrun.dev/kvm",
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
 	}
 
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}

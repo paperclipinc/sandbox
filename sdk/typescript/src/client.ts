@@ -1,7 +1,7 @@
-// Cluster client for the agent-run runtime on Kubernetes. Creates SandboxClaims
-// (agentrun.dev/v1alpha1), polls them to Ready, reads the per-sandbox bearer
+// Cluster client for the mitos runtime on Kubernetes. Creates SandboxClaims
+// (mitos.run/v1alpha1), polls them to Ready, reads the per-sandbox bearer
 // token Secret, and hands back a Sandbox bound to the claim's HTTP endpoint.
-// Mirrors the Python AgentRun (sdk/python/agent_run/client.py). The token is
+// Mirrors the Python AgentRun (sdk/python/mitos/client.py). The token is
 // read into memory only and is never logged.
 
 import { AgentRunError } from "./errors.js";
@@ -9,7 +9,7 @@ import type { CustomObject, K8sApi } from "./k8s.js";
 import { Sandbox, toBaseUrl } from "./sandbox.js";
 import type { SandboxInfo, SandboxPhase } from "./types.js";
 
-const API_GROUP = "agentrun.dev";
+const API_GROUP = "mitos.run";
 const API_VERSION = "v1alpha1";
 // Suffix of the Secret holding a claim's sandbox API bearer token. Mirrors the
 // controller constant and internal/agentcli tokenSecretSuffix.

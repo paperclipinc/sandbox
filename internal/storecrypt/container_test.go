@@ -112,7 +112,7 @@ func TestCreateEmitsLuksSequenceWithKeyOnStdin(t *testing.T) {
 		t.Fatalf("luksFormat target = %v", formatCall.argv)
 	}
 	openCall := rr.calls[1]
-	if openCall.argv[len(openCall.argv)-1] != "agentrun-tmpl1" {
+	if openCall.argv[len(openCall.argv)-1] != "mitos-tmpl1" {
 		t.Fatalf("luksOpen mapper name = %v", openCall.argv)
 	}
 }

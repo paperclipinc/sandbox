@@ -1,6 +1,6 @@
-# Dev overlay: mock control plane for `agentrun dev up`
+# Dev overlay: mock control plane for `mitos dev up`
 
-This directory is the local-dev control plane that `agentrun dev up` applies to a
+This directory is the local-dev control plane that `mitos dev up` applies to a
 kind cluster. It runs a MOCK-mode control plane so the full claim path completes
 without KVM:
 
@@ -10,15 +10,15 @@ without KVM:
   the controller dials forkd over insecure gRPC.
 - **forkd** DaemonSet with `--mock` and no TLS flags. It uses the no-KVM mock fork
   engine (`internal/fork/mock.go`), mounts no `/dev/kvm`, and carries no
-  `agentrun.dev/kvm` nodeSelector so it schedules on the plain kind node. The
+  `mitos.run/kvm` nodeSelector so it schedules on the plain kind node. The
   controller discovers it by the `app.kubernetes.io/component: forkd` pod label,
   builds the pool snapshot over insecure gRPC, and claims fork via the mock engine
   and reach Ready.
 - a default `SandboxTemplate` + `SandboxPool` (`dev-default`) in the `default`
-  namespace so `agentrun sandbox create --pool dev-default` has a pool to claim
+  namespace so `mitos sandbox create --pool dev-default` has a pool to claim
   from. Pools, templates, and claims are namespaced and looked up in the claim's
   namespace; the CLI creates claims in `default`, so the dev pool lives there too.
-  The control plane itself runs in the `agent-run` namespace (the forkd discovery
+  The control plane itself runs in the `mitos` namespace (the forkd discovery
   default).
 
 ## Mock-engine limitation
@@ -31,16 +31,16 @@ sandboxes locally you need a node with `/dev/kvm` and the production manifests
 
 ## Images
 
-The controller and forkd Deployments reference `agent-run-controller:ci` and
-`agent-run-forkd:ci` with `imagePullPolicy: IfNotPresent`. These are the tags the
+The controller and forkd Deployments reference `mitos-controller:ci` and
+`mitos-forkd:ci` with `imagePullPolicy: IfNotPresent`. These are the tags the
 kind CI builds and `kind load docker-image`s into the cluster. For local use,
-build and load the same tags before `agentrun dev up`:
+build and load the same tags before `mitos dev up`:
 
 ```bash
-docker build -f Dockerfile.controller -t agent-run-controller:ci .
-docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
-kind load docker-image agent-run-controller:ci --name agentrun-dev
-kind load docker-image agent-run-forkd:ci --name agentrun-dev
+docker build -f Dockerfile.controller -t mitos-controller:ci .
+docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+kind load docker-image mitos-controller:ci --name mitos-dev
+kind load docker-image mitos-forkd:ci --name mitos-dev
 ```
 
 ## Apply
@@ -51,5 +51,5 @@ kubectl apply -k deploy/dev/
 ```
 
 The CRDs are applied separately because kustomize refuses to reference files
-outside `deploy/dev/` under its default load restrictor. `agentrun dev up` runs
+outside `deploy/dev/` under its default load restrictor. `mitos dev up` runs
 both steps for you.

@@ -13,15 +13,15 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/eventfeed"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/husk"
-	"github.com/paperclipinc/sandbox/internal/observability"
-	"github.com/paperclipinc/sandbox/internal/workspace"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/eventfeed"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/observability"
+	"github.com/paperclipinc/mitos/internal/workspace"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
@@ -48,7 +48,7 @@ func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, 
 // suite registers the raw claim reconciler to SKIP these (so it does not fight a
 // manually driven husk reconciler over the same object) and a husk-enabled
 // reconciler to handle ONLY these.
-const HuskTestClaimLabel = "agentrun.dev/husk-test"
+const HuskTestClaimLabel = "mitos.run/husk-test"
 
 // SkipLabel restricts this reconciler to claims WITHOUT the given label; only
 // used by the test harness so a raw and a husk reconciler can share one manager.
@@ -81,7 +81,7 @@ func (r *SandboxClaimReconciler) SetFeedForTest(recorder record.EventRecorder, s
 
 // EmitRevisionCreatedForTest exposes emitRevisionCreated to the external
 // controller_test package so the revision.created payload mapping (including the
-// agentrun.dev/trace-id annotation -> TraceID correlation field) can be
+// mitos.run/trace-id annotation -> TraceID correlation field) can be
 // unit-tested directly against a recording sink, without a full reconcile.
 func EmitRevisionCreatedForTest(recorder record.EventRecorder, sink eventfeed.Sink, rev *v1alpha1.WorkspaceRevision) {
 	NewEmitFeed(recorder, sink, nil).emitRevisionCreated(context.Background(), rev)

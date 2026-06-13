@@ -2,7 +2,7 @@ package controller_test
 
 // Unit coverage for the trace-id correlation carried in the revision.created
 // feed event (W4 observability slice). The revision.created CloudEvent gains a
-// TraceID field read from the revision's agentrun.dev/trace-id annotation, so an
+// TraceID field read from the revision's mitos.run/trace-id annotation, so an
 // external indexer correlates the revision event with the orchestrator trace.
 // The id is an opaque correlation id, never a secret; it is empty when the
 // revision carries no annotation (tracing was disabled).
@@ -10,9 +10,9 @@ package controller_test
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/eventfeed"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/eventfeed"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -30,7 +30,7 @@ func revisionCreatedData(t *testing.T, sink *recordingSink) eventfeed.RevisionCr
 }
 
 // TestRevisionCreatedCarriesTraceID asserts the feed event carries the trace id
-// stamped on the revision (the agentrun.dev/trace-id annotation).
+// stamped on the revision (the mitos.run/trace-id annotation).
 func TestRevisionCreatedCarriesTraceID(t *testing.T) {
 	const traceID = "7b743a0c9f1cedb209c9e796151158aa"
 	sink := &recordingSink{}
@@ -38,7 +38,7 @@ func TestRevisionCreatedCarriesTraceID(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "ws-x-abcde",
 			Namespace:   "default",
-			Annotations: map[string]string{"agentrun.dev/trace-id": traceID},
+			Annotations: map[string]string{"mitos.run/trace-id": traceID},
 		},
 		Spec: v1alpha1.WorkspaceRevisionSpec{
 			WorkspaceRef:    v1alpha1.LocalObjectReference{Name: "ws-x"},
@@ -56,7 +56,7 @@ func TestRevisionCreatedCarriesTraceID(t *testing.T) {
 }
 
 // TestRevisionCreatedTraceIDEmptyWithoutAnnotation asserts the trace id is empty
-// when the revision carries no agentrun.dev/trace-id annotation (tracing off).
+// when the revision carries no mitos.run/trace-id annotation (tracing off).
 func TestRevisionCreatedTraceIDEmptyWithoutAnnotation(t *testing.T) {
 	sink := &recordingSink{}
 	rev := &v1alpha1.WorkspaceRevision{

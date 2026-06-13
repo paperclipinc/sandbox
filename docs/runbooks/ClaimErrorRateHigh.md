@@ -2,10 +2,10 @@
 
 ## Signal
 
-`sum by (pool, reason) (rate(agentrun_claim_errors_total[5m])) > 0.05`
+`sum by (pool, reason) (rate(mitos_claim_errors_total[5m])) > 0.05`
 sustained for 10m.
 
-`agentrun_claim_errors_total{pool,reason}` is a controller counter of TERMINAL
+`mitos_claim_errors_total{pool,reason}` is a controller counter of TERMINAL
 claim failures. The `reason` label is a fixed, coarse code (never error text):
 `fork`, `secret`, `volume`, `token`. A sustained nonzero rate means claims are
 failing for a structural reason, not transient requeues. The threshold is
@@ -31,9 +31,9 @@ environment-tunable; set it from the observed baseline.
 - Check the SandboxClaim `Ready` condition reason against the catalogue in
   `docs/conditions.md` (for example `ActivateFailed`, `CapacityExhausted`,
   `NoHuskPod`, `SecretInheritanceDenied`).
-- Metrics to corroborate: `agentrun_claim_errors_total` (split by reason),
-  `agentrun_pool_ready_snapshots{pool}` (is the pool also starved?),
-  `agentrun_fork_duration_seconds_bucket` (are forks slow or failing?).
+- Metrics to corroborate: `mitos_claim_errors_total` (split by reason),
+  `mitos_pool_ready_snapshots{pool}` (is the pool also starved?),
+  `mitos_fork_duration_seconds_bucket` (are forks slow or failing?).
 - Controller and forkd logs for the named pool and node (no secret values are
   logged; reasons and counts only).
 

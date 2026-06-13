@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/mitos/internal/netconf"
 )
 
 // Pinner installs a resolved (address . port) into a sandbox's dynamic egress

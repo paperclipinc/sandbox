@@ -5,7 +5,7 @@ control plane and runs its sandbox API with AllowTokenless. The k8s-mode
 client (sandbox.py) sends per-sandbox bearer tokens instead.
 
 Usage:
-    from agent_run.direct import SandboxServer
+    from mitos.direct import SandboxServer
 
     server = SandboxServer("http://localhost:8080")
     server.create_template("python")
@@ -23,7 +23,7 @@ from typing import Optional
 
 import httpx
 
-from agent_run.types import ExecResult
+from mitos.types import ExecResult
 
 
 class DirectSandbox:

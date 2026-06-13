@@ -6,10 +6,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agent-run-controller
+  name: mitos-controller
 rules:
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims
       - sandboxforks
@@ -25,7 +25,7 @@ rules:
       - update
       - watch
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxtemplates
     verbs:
@@ -33,14 +33,14 @@ rules:
       - list
       - watch
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims/finalizers
       - sandboxforks/finalizers
     verbs:
       - update
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims/status
       - sandboxforks/status

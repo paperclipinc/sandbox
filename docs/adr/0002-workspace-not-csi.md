@@ -101,6 +101,6 @@ head's ancestry, and owner-ref GC of revisions to their workspace.
 OPEN (later W4 slices, none move data here): hydrate/dehydrate over the
 content-addressed transfer layer; the sandbox<->workspace binding; git
 rendezvous for fork-and-merge; outputs extraction on terminate; the
-CloudEvents revision change feed (`dev.agentrun.workspace.revision.created`);
+CloudEvents revision change feed (`dev.mitos.workspace.revision.created`);
 the memory-snapshot pairing producing a resumable head from a real checkpoint;
 the per-node toolchain cache via a Share policy; the S3 object-store backend.

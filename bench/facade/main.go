@@ -46,8 +46,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/benchstat"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/benchstat"
 )
 
 func main() {
@@ -75,7 +75,7 @@ func run(args []string, out *os.File) error {
 }
 
 // newClient builds a controller-runtime client from a kubeconfig path, with the
-// upstream Sandbox and our agentrun.dev types registered on the scheme.
+// upstream Sandbox and our mitos.run types registered on the scheme.
 func newClient(kubeconfig string) (client.Client, error) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -85,7 +85,7 @@ func newClient(kubeconfig string) (client.Client, error) {
 		return nil, fmt.Errorf("register agents.x-k8s.io scheme: %w", err)
 	}
 	if err := runv1alpha1.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("register agentrun.dev scheme: %w", err)
+		return nil, fmt.Errorf("register mitos.run scheme: %w", err)
 	}
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -110,7 +110,7 @@ type harness struct {
 
 // sandbox builds the upstream Sandbox the harness applies: a minimal valid
 // Sandbox (podTemplate is required) bound to the configured pool via the
-// agentrun.dev/pool bridge annotation.
+// mitos.run/pool bridge annotation.
 func (h *harness) sandbox(replicas int32) *agentsv1alpha1.Sandbox {
 	return &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/volume"
+	"github.com/paperclipinc/mitos/internal/volume"
 )
 
 // writeSizedFile creates a file of exactly size bytes (apparent size) at path.

@@ -9,8 +9,8 @@ import (
 const (
 	// poolAnnotation is the facade bridge annotation (mirrors
 	// internal/facade.PoolAnnotation) that binds an upstream Sandbox to one of
-	// our agentrun.dev pools.
-	poolAnnotation = "agentrun.dev/pool"
+	// our mitos.run pools.
+	poolAnnotation = "mitos.run/pool"
 
 	// pollInterval is how often the harness polls the cluster for the bridged
 	// claim transitioning.
@@ -37,7 +37,7 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.kubeconfig, "kubeconfig", "", "path to the kubeconfig for the target cluster (required)")
 	fs.StringVar(&cfg.namespace, "namespace", "default", "namespace to apply the Sandbox in")
 	fs.StringVar(&cfg.name, "name", "facade-bench", "name of the Sandbox + bridged claim")
-	fs.StringVar(&cfg.pool, "pool", "default", "agentrun.dev pool the Sandbox binds to (the agentrun.dev/pool bridge annotation)")
+	fs.StringVar(&cfg.pool, "pool", "default", "mitos.run pool the Sandbox binds to (the mitos.run/pool bridge annotation)")
 	fs.StringVar(&cfg.image, "image", "busybox:stable", "container image for the Sandbox podTemplate (the husk pool pins the real image; this only keeps the manifest valid)")
 	fs.IntVar(&cfg.iterations, "iterations", 20, "number of pause/resume toggles to time")
 	fs.DurationVar(&cfg.timeout, "timeout", 60*time.Second, "per-step timeout waiting for the bridged claim to transition")

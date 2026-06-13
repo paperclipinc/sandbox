@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
 )
 
 func TestRequestKeyProviderSetAndKeyFor(t *testing.T) {

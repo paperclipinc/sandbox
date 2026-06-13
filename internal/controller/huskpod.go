@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,31 +34,31 @@ import (
 const (
 	// huskPoolLabel carries the owning pool name on every husk pod, so a
 	// reconcile can list exactly this pool's husk pods.
-	huskPoolLabel = "agentrun.dev/pool"
+	huskPoolLabel = "mitos.run/pool"
 	// huskLabel marks a pod as a husk pod (vs any other pod the controller may
 	// touch). Both labels together form the warm-pool selector.
-	huskLabel = "agentrun.dev/husk"
+	huskLabel = "mitos.run/husk"
 	// huskContainerName is the single container in a husk pod.
 	huskContainerName = "husk-stub"
 
 	// defaultKVMResourceName is the extended resource the KVM device plugin
 	// advertises (deploy/device-plugin). A husk pod requests one slot so it is
 	// scheduled only onto a node with /dev/kvm; this replaces privileged: true.
-	defaultKVMResourceName = "agentrun.dev/kvm"
+	defaultKVMResourceName = "mitos.run/kvm"
 
 	// huskWorkdir is the per-VM working directory the stub uses.
 	huskWorkdir = "/run/husk/vm"
 
 	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
 	// Selection skips any pod carrying it: one claim activates one husk pod.
-	huskClaimLabel = "agentrun.dev/claim"
+	huskClaimLabel = "mitos.run/claim"
 
 	// huskKVMNodeLabel is the node label the KVM device plugin / node bootstrap
 	// sets on a node that has /dev/kvm (deploy/talos). A husk pod is pinned to
 	// such a node so the dormant VMM can open KVM AND so it lands where the
 	// template snapshot is materialized (the pool's build/distribution machinery
 	// places the snapshot on these nodes; see the placement note below).
-	huskKVMNodeLabel = "agentrun.dev/kvm"
+	huskKVMNodeLabel = "mitos.run/kvm"
 
 	// HuskControlPort is the fixed TCP port the husk stub serves the mTLS network
 	// control on (--control-listen). The controller dials podIP:HuskControlPort
@@ -80,8 +80,8 @@ const (
 	// /etc/forkd/ca split.
 	huskTLSMountPath      = "/etc/husk/tls"
 	huskCAMountPath       = "/etc/husk/ca"
-	huskSnapshotMountPath = "/var/lib/agent-run/snapshot"
-	huskKernelMountPath   = "/var/lib/agent-run/kernel/vmlinux"
+	huskSnapshotMountPath = "/var/lib/mitos/snapshot"
+	huskKernelMountPath   = "/var/lib/mitos/kernel/vmlinux"
 	// huskManifestDirMountPath is the in-pod path the CAS manifests DIRECTORY is
 	// mounted at (read-only); the stub reads <dir>/<digest>. The stub decodes
 	// that file, binds it to the activate request's ExpectedDigest, re-hashes the
@@ -92,7 +92,7 @@ const (
 	// kubelet's single-file hostPath check fails for a file at this depth ("is not
 	// a file" / "no such file or directory") even when it exists, while a
 	// directory hostPath mounts cleanly and exposes the file inside it.
-	huskManifestDirMountPath = "/var/lib/agent-run/manifests"
+	huskManifestDirMountPath = "/var/lib/mitos/manifests"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -105,14 +105,14 @@ type HuskPodOptions struct {
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
 	// KVMResourceName is the extended resource the husk pod requests for KVM
-	// access. Empty defaults to agentrun.dev/kvm.
+	// access. Empty defaults to mitos.run/kvm.
 	KVMResourceName string
 	// SnapshotID names the template snapshot the husk pod activates. It is the
 	// template id; the node-local snapshot lives at
 	// <DataDir>/templates/<SnapshotID>/snapshot. Empty means no snapshot mount is
 	// added (the pod cannot activate; only meaningful with the activation slice).
 	SnapshotID string
-	// DataDir is the forkd data directory on the node (default /var/lib/agent-run).
+	// DataDir is the forkd data directory on the node (default /var/lib/mitos).
 	// The snapshot hostPath is rooted here. Empty defaults to the forkd default.
 	DataDir string
 	// ExpectedDigest is the template's recorded CAS manifest digest, as reported
@@ -127,7 +127,7 @@ type HuskPodOptions struct {
 	// TLSSecretName is the Secret holding the husk stub's mTLS server leaf
 	// (tls.crt, tls.key), mounted read-only so the stub can serve the mTLS network
 	// control. This mirrors how forkd gets its leaf from a mounted PKI Secret
-	// (agent-run-forkd-tls). Empty means no TLS mount is added.
+	// (mitos-forkd-tls). Empty means no TLS mount is added.
 	TLSSecretName string
 	// CASecretName is the Secret holding the control plane CA (ca.crt only),
 	// mounted read-only so the stub can verify the controller client cert. Kept
@@ -152,7 +152,7 @@ const hostnameNodeLabel = "kubernetes.io/hostname"
 // defaultDataDir is the forkd data directory default; the snapshot hostPath is
 // rooted here when HuskPodOptions.DataDir is empty (matches cmd/forkd's
 // --data-dir default).
-const defaultDataDir = "/var/lib/agent-run"
+const defaultDataDir = "/var/lib/mitos"
 
 // defaultHuskCPU and defaultHuskMemory size a husk pod when the template
 // carries no Resources. They make the sandbox visible to the scheduler as
@@ -210,7 +210,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// snapshot hostPath + runAsNonRoot-false (the /dev/kvm device) exceptions". Its
 	// securityContext is restricted-clean: with those two exceptions removed the
 	// SAME securityContext is admitted into a restricted namespace (verified on
-	// kind). The agentrun.dev/kvm device-plugin resource replaces privileged: true.
+	// kind). The mitos.run/kvm device-plugin resource replaces privileged: true.
 	//
 	// The individual controls the husk pod DOES satisfy:
 	//   - Privileged: false. The whole point of the husk model is to drop
@@ -499,7 +499,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 
 	// Owner-ref to the pool so Kubernetes garbage collection deletes husk pods
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
-	// core/v1 and agentrun.dev/v1alpha1). An error here means the scheme is
+	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is
 	// missing a type and is a programming error; the caller logs and skips.
 	_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
 	return pod
@@ -612,7 +612,7 @@ func huskPodReady(p *corev1.Pod) bool {
 }
 
 // selectDormantHuskPod returns one Running+Ready husk pod for the pool that has
-// a PodIP and is not yet claimed (no agentrun.dev/claim label). It is the warm
+// a PodIP and is not yet claimed (no mitos.run/claim label). It is the warm
 // slot the claim path activates. Returns nil (no error) when none is available,
 // so the caller pends the claim. Selection is deterministic (lowest name) so
 // concurrent reconciles converge on the same victim; the optimistic-lock
@@ -652,7 +652,7 @@ func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool 
 	return &chosen, nil
 }
 
-// markHuskPodClaimed stamps the agentrun.dev/claim label on a husk pod so it is
+// markHuskPodClaimed stamps the mitos.run/claim label on a husk pod so it is
 // not selected again. It uses an OPTIMISTIC-LOCK merge patch: the patch carries
 // the pod's resourceVersion, so the API server rejects it with a 409 Conflict if
 // the pod was modified (for instance, claimed by a racing reconcile) since this

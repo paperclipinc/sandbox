@@ -15,7 +15,7 @@ import (
 	v1beta1 "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-const testResource = "agentrun.dev/kvm"
+const testResource = "mitos.run/kvm"
 
 // startPluginServer serves the given Plugin over an in-memory bufconn and
 // returns a DevicePlugin client plus a cleanup func.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/observability"
+	"github.com/paperclipinc/mitos/internal/observability"
 	"go.opentelemetry.io/otel"
 )
 

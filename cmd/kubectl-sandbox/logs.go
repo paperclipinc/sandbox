@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,10 +17,10 @@ import (
 )
 
 // huskClaimLabel and huskLabel mirror the controller's husk pod labels: the pod
-// backing a claim carries agentrun.dev/claim=<claim> and agentrun.dev/husk=true.
+// backing a claim carries mitos.run/claim=<claim> and mitos.run/husk=true.
 const (
-	huskClaimLabel = "agentrun.dev/claim"
-	huskLabel      = "agentrun.dev/husk"
+	huskClaimLabel = "mitos.run/claim"
+	huskLabel      = "mitos.run/husk"
 )
 
 // podConsole is the husk stub pod console for a claim: the pod name and its log
@@ -77,7 +77,7 @@ func renderLogs(claim string, console podConsole) string {
 
 // huskPodConsole is the production huskConsoleFetcher: it builds a typed
 // clientset from the standard kubeconfig, finds the husk pod backing the claim
-// by its agentrun.dev/claim + agentrun.dev/husk labels, and streams that pod's
+// by its mitos.run/claim + mitos.run/husk labels, and streams that pod's
 // logs. A claim with no husk pod yields Found=false (not an error) so logs reads
 // the same on a mock control plane.
 func huskPodConsole(ctx context.Context, namespace, claim string) (podConsole, error) {

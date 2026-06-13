@@ -1,7 +1,7 @@
 {
-  "name": "@agentrun/sdk",
+  "name": "@mitos/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for the agent-run sandbox runtime: direct sandbox-server mode and Kubernetes cluster mode.",
+  "description": "TypeScript SDK for the mitos sandbox runtime: direct sandbox-server mode and Kubernetes cluster mode.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

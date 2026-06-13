@@ -21,8 +21,8 @@ package controller_test
 import (
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,8 +68,8 @@ func TestHuskPoolBuildsSnapshotAndPlacesPods(t *testing.T) {
 		Client:          c,
 		NodeRegistry:    reg,
 		EnableHuskPods:  true,
-		HuskStubImage:   "agent-run-husk-stub:test",
-		KVMResourceName: "agentrun.dev/kvm",
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
 	}
 
 	// Re-fetch the pool so SetControllerReference has the server-populated UID.
@@ -108,8 +108,8 @@ func TestHuskPoolBuildsSnapshotAndPlacesPods(t *testing.T) {
 	// Placement: the husk pod is pinned to the snapshot-holding node via
 	// nodeAffinity (kubernetes.io/hostname In [kvm-node-A]) AND keeps the kvm
 	// nodeSelector.
-	if p.Spec.NodeSelector["agentrun.dev/kvm"] != "true" {
-		t.Errorf("husk pod nodeSelector = %+v, want agentrun.dev/kvm=true", p.Spec.NodeSelector)
+	if p.Spec.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("husk pod nodeSelector = %+v, want mitos.run/kvm=true", p.Spec.NodeSelector)
 	}
 	aff := p.Spec.Affinity
 	if aff == nil || aff.NodeAffinity == nil || aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {

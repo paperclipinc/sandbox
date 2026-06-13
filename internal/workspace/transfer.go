@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // WorkspacePath is the guest directory the workspace transfer captures and

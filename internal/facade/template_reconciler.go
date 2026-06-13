@@ -14,27 +14,27 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 const (
-	// TemplateAnnotation is the bridge annotation stamped on our agentrun.dev
+	// TemplateAnnotation is the bridge annotation stamped on our mitos.run
 	// SandboxTemplate that links it back to the upstream
 	// extensions.agents.x-k8s.io SandboxTemplate it was created from. It records
 	// the bridge in the same single-annotation style as PoolAnnotation
 	// (docs/adr/0001-facade-and-naming.md): the value is the upstream
 	// SandboxTemplate name.
-	TemplateAnnotation = "agentrun.dev/template"
+	TemplateAnnotation = "mitos.run/template"
 
-	// WarmPoolAnnotation is the bridge annotation stamped on our agentrun.dev
+	// WarmPoolAnnotation is the bridge annotation stamped on our mitos.run
 	// SandboxPool that links it back to the upstream
 	// extensions.agents.x-k8s.io SandboxWarmPool it was created from. The value is
 	// the upstream SandboxWarmPool name.
-	WarmPoolAnnotation = "agentrun.dev/warmpool"
+	WarmPoolAnnotation = "mitos.run/warmpool"
 )
 
 // SandboxTemplateReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate onto our agentrun.dev
+// extensions.agents.x-k8s.io/v1alpha1 SandboxTemplate onto our mitos.run
 // SandboxTemplate. It owns exactly one of our SandboxTemplate objects per
 // upstream template (same name + namespace, owner-referenced for GC), mapping
 // the upstream podTemplate's first container (image, command, env) onto our
@@ -50,9 +50,9 @@ type SandboxTemplateReconciler struct {
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile ensures our agentrun.dev SandboxTemplate mirrors the upstream one.
+// Reconcile ensures our mitos.run SandboxTemplate mirrors the upstream one.
 // Deletion is handled by the owner-reference garbage collector: our template
 // carries an owner reference to the upstream template, so deleting theirs GCs
 // ours.

@@ -1,9 +1,9 @@
 // Command kvm-device-plugin is a Kubernetes device plugin that advertises the
-// KVM device (agentrun.dev/kvm) to the kubelet and injects /dev/kvm (and
+// KVM device (mitos.run/kvm) to the kubelet and injects /dev/kvm (and
 // /dev/net/tun) into containers that request it.
 //
 // It lets husk pods get /dev/kvm as a SCHEDULED resource instead of running
-// privileged: true. A pod requests agentrun.dev/kvm like any extended resource;
+// privileged: true. A pod requests mitos.run/kvm like any extended resource;
 // the scheduler only places it on a node whose plugin advertised healthy
 // capacity (a node with no /dev/kvm advertises zero and never gets the pod),
 // and the plugin injects the device node on Allocate. This is the
@@ -23,7 +23,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/paperclipinc/sandbox/internal/deviceplugin"
+	"github.com/paperclipinc/mitos/internal/deviceplugin"
 )
 
 // defaultKVMDevicePath is the default container path the plugin stat(2)s to
@@ -48,7 +48,7 @@ func main() {
 		kubeletDir    string
 		kvmDevicePath string
 	)
-	flag.StringVar(&resourceName, "resource-name", "agentrun.dev/kvm", "Extended resource name the plugin advertises; pods request it under resources.limits")
+	flag.StringVar(&resourceName, "resource-name", "mitos.run/kvm", "Extended resource name the plugin advertises; pods request it under resources.limits")
 	flag.IntVar(&deviceCount, "device-count", 0, "Number of synthetic device slots to advertise when /dev/kvm is present; 0 means auto (a sane default). /dev/kvm is shareable, so this is a soft per-node concurrency cap, not a physical device count")
 	flag.StringVar(&devicePaths, "device-paths", "/dev/kvm,/dev/net/tun", "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw)")
 	flag.StringVar(&kubeletDir, "kubelet-dir", "/var/lib/kubelet/device-plugins", "Kubelet device-plugins directory: the plugin serves its socket here and dials the kubelet registry socket (kubelet.sock) here")

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/mitos/internal/fork"
 )
 
 // TestServerListSandboxesMergesActivity drives two forks through the Server,

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // Verify-on-load design (issue #9):

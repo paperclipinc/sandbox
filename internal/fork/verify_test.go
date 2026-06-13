@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // writeFakeTemplate lays down fake mem/vmstate/rootfs files for a template in a

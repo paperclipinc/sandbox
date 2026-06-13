@@ -1,5 +1,5 @@
-// Public types for the agent-run TypeScript SDK. These mirror the Python SDK
-// (sdk/python/agent_run/types.py) with camelCased field names.
+// Public types for the mitos TypeScript SDK. These mirror the Python SDK
+// (sdk/python/mitos/types.py) with camelCased field names.
 
 /**
  * Fork policy for a volume: how the snapshot fork treats it.

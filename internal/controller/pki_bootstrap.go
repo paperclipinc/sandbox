@@ -7,7 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 
-	"github.com/paperclipinc/sandbox/internal/pki"
+	"github.com/paperclipinc/mitos/internal/pki"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,16 +18,16 @@ import (
 // Names of the Secrets that hold the control plane PKI material.
 const (
 	// CASecretName holds the CA certificate and key (keys ca.crt, ca.key).
-	CASecretName = "agent-run-ca"
+	CASecretName = "mitos-ca"
 	// ForkdTLSSecretName holds the forkd server leaf (keys tls.crt, tls.key);
 	// the daemonset mounts it together with the CA secret.
-	ForkdTLSSecretName = "agent-run-forkd-tls"
+	ForkdTLSSecretName = "mitos-forkd-tls"
 	// ControllerTLSSecretName holds the controller client leaf (keys
 	// tls.crt, tls.key); consumed in-process by EnsurePKI itself.
-	ControllerTLSSecretName = "agent-run-controller-tls"
+	ControllerTLSSecretName = "mitos-controller-tls"
 )
 
-const caOrganization = "agent-run"
+const caOrganization = "mitos"
 
 // EnsurePKI idempotently materializes the control plane PKI in the given
 // namespace: the CA secret plus the forkd server and controller client leaf

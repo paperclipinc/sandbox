@@ -27,7 +27,7 @@ RUN curl -fsSL -o /tmp/fc.tgz \
 
 COPY --from=builder /build/forkd /usr/local/bin/forkd
 
-VOLUME ["/var/lib/agent-run"]
+VOLUME ["/var/lib/mitos"]
 EXPOSE 9090 9091
 
 ENTRYPOINT ["/usr/local/bin/forkd"]

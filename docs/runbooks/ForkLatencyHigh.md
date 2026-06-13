@@ -2,10 +2,10 @@
 
 ## Signal
 
-`histogram_quantile(0.99, sum by (le) (rate(agentrun_fork_duration_seconds_bucket[5m]))) > 0.05`
+`histogram_quantile(0.99, sum by (le) (rate(mitos_fork_duration_seconds_bucket[5m]))) > 0.05`
 sustained for 10m.
 
-`agentrun_fork_duration_seconds` is a forkd histogram (buckets up to 100ms) of
+`mitos_fork_duration_seconds` is a forkd histogram (buckets up to 100ms) of
 the time to fork a sandbox from a snapshot. This alert fires on p99 fork latency
 over a cluster budget (50ms here).
 
@@ -31,10 +31,10 @@ baseline, not from the bare-metal target.
 
 - `kubectl sandbox top` for forkd node CPU / memory / IO pressure.
 - `kubectl sandbox ps` to see fork volume per node (is one node hot?).
-- Metrics: `agentrun_fork_duration_seconds_bucket` (the histogram; inspect p50
-  vs p99 to see whether it is a tail or a shift), `agentrun_active_sandboxes`
-  (load correlation), `agentrun_memory_shared_bytes` /
-  `agentrun_memory_unique_bytes` (CoW density: low sharing means more pages
+- Metrics: `mitos_fork_duration_seconds_bucket` (the histogram; inspect p50
+  vs p99 to see whether it is a tail or a shift), `mitos_active_sandboxes`
+  (load correlation), `mitos_memory_shared_bytes` /
+  `mitos_memory_unique_bytes` (CoW density: low sharing means more pages
   faulted per fork).
 - forkd logs on the slow node.
 

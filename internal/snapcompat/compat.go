@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // ErrIncompatible is wrapped by every compatibility refusal so callers can

@@ -2,8 +2,8 @@ package controller_test
 
 // Envtest coverage for the controller-level metrics. These assert the metric
 // VALUE moves when the real path runs: a GC orphan sweep bumps
-// agentrun_orphan_sweeps_total, and a claim that cannot place (no node with a
-// ready snapshot) bumps agentrun_claim_pending_total. The metric values are
+// mitos_orphan_sweeps_total, and a claim that cannot place (no node with a
+// ready snapshot) bumps mitos_claim_pending_total. The metric values are
 // read from controller-runtime's global Registry, where metrics.go registers
 // them.
 
@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -81,7 +81,7 @@ func TestOrphanSweepMetricIncrements(t *testing.T) {
 	}
 	defer stop()
 
-	before := counterValue(t, "agentrun_orphan_sweeps_total", nil)
+	before := counterValue(t, "mitos_orphan_sweeps_total", nil)
 
 	// Inject an orphan VM (no backing claim) old enough to exceed the grace.
 	const orphanID = "metrics-orphan-old"
@@ -105,7 +105,7 @@ func TestOrphanSweepMetricIncrements(t *testing.T) {
 		t.Fatalf("orphan %s not reaped; terminated = %v", orphanID, engine.TerminatedIDs())
 	}
 
-	after := counterValue(t, "agentrun_orphan_sweeps_total", nil)
+	after := counterValue(t, "mitos_orphan_sweeps_total", nil)
 	if after != before+1 {
 		t.Fatalf("orphan_sweeps_total = %v, want %v (before %v)", after, before+1, before)
 	}
@@ -115,7 +115,7 @@ func TestOrphanSweepMetricIncrements(t *testing.T) {
 // a ready snapshot. The claim reconciler sets it Pending and bumps the
 // pending-requeue counter.
 func TestClaimPendingMetricIncrements(t *testing.T) {
-	before := counterValue(t, "agentrun_claim_pending_total", nil)
+	before := counterValue(t, "mitos_claim_pending_total", nil)
 
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "pend-tmpl", Namespace: "default"},
@@ -164,7 +164,7 @@ func TestClaimPendingMetricIncrements(t *testing.T) {
 		t.Fatal("claim did not reach Pending within 15s")
 	}
 
-	after := counterValue(t, "agentrun_claim_pending_total", nil)
+	after := counterValue(t, "mitos_claim_pending_total", nil)
 	if after <= before {
 		t.Fatalf("claim_pending_total = %v, want > %v", after, before)
 	}

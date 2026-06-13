@@ -7,7 +7,7 @@
 // imported lazily inside KubeConfigApi, so a direct-mode consumer never pulls
 // the k8s client into its bundle.
 
-const API_GROUP = "agentrun.dev";
+const API_GROUP = "mitos.run";
 const API_VERSION = "v1alpha1";
 
 /** A Kubernetes custom object as a plain JSON shape. */

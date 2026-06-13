@@ -9,9 +9,9 @@
 **Tech Stack:** Go crypto/tls + crypto/x509 (no external PKI dependency), gRPC TransportCredentials, controller-runtime, protobuf regen, Python SDK.
 
 **Identities (constants, package `internal/pki`):**
-- CA secret `agent-run-ca`, server secret `agent-run-forkd-tls` (DNS SAN `forkd.agent-run`), client secret `agent-run-controller-tls` (DNS SAN `controller.agent-run`), all in the forkd namespace (default `agent-run`).
-- Client connections set `ServerName: "forkd.agent-run"` so one shared server cert works for every node regardless of dialed IP.
-- forkd authorizes a peer iff its verified leaf certificate carries DNS SAN `controller.agent-run`.
+- CA secret `mitos-ca`, server secret `mitos-forkd-tls` (DNS SAN `forkd.mitos`), client secret `mitos-controller-tls` (DNS SAN `controller.mitos`), all in the forkd namespace (default `mitos`).
+- Client connections set `ServerName: "forkd.mitos"` so one shared server cert works for every node regardless of dialed IP.
+- forkd authorizes a peer iff its verified leaf certificate carries DNS SAN `controller.mitos`.
 
 **Context for the implementer:**
 - forkd main: `cmd/forkd/main.go` (gRPC :9090 via `grpc.NewServer()`, HTTP :9091 via `daemon.ServeHTTP`). Controller dial: `internal/controller/node_registry.go:GetConnection` (insecure). Discovery dial: `internal/controller/forkd_discovery.go:refreshCapacity` (insecure).
@@ -40,7 +40,7 @@ import (
 )
 
 func TestIssueAndVerifyRoundTrip(t *testing.T) {
-	ca, err := NewCA("agent-run")
+	ca, err := NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestIssueAndVerifyRoundTrip(t *testing.T) {
 }
 
 func TestServerRejectsClientWithoutCert(t *testing.T) {
-	ca, _ := NewCA("agent-run")
+	ca, _ := NewCA("mitos")
 	server, _ := ca.Issue(ServerName)
 	serverTLS, _ := ServerTLSConfig(server.CertPEM, server.KeyPEM, ca.CertPEM())
 
@@ -121,15 +121,15 @@ func TestServerRejectsClientWithoutCert(t *testing.T) {
 }
 
 func TestIssueRejectsUnknownName(t *testing.T) {
-	ca, _ := NewCA("agent-run")
-	if _, err := ca.Issue("imposter.agent-run"); err == nil {
+	ca, _ := NewCA("mitos")
+	if _, err := ca.Issue("imposter.mitos"); err == nil {
 		t.Fatal("expected issuance restricted to known identities")
 	}
 }
 ```
 
 - [ ] Implement `internal/pki/pki.go`:
-  - Constants: `ServerName = "forkd.agent-run"`, `ControllerName = "controller.agent-run"`.
+  - Constants: `ServerName = "forkd.mitos"`, `ControllerName = "controller.mitos"`.
   - `type CA struct{ cert *x509.Certificate; key crypto.Signer; certPEM []byte }`; `NewCA(org string)` makes a 10-year ECDSA P-256 self-signed CA; `CertPEM() []byte`; `LoadCA(certPEM, keyPEM []byte) (*CA, error)`.
   - `type Leaf struct{ CertPEM, KeyPEM []byte }`; `(ca *CA) Issue(dnsName string) (*Leaf, error)`: 2-year ECDSA leaf with the single DNS SAN; reject names other than the two constants (defense against identity sprawl); also export `(ca *CA) KeyPEM() []byte` for persistence.
   - `ServerTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error)`: cert + `ClientAuth: tls.RequireAndVerifyClientCert` + ClientCAs pool + MinVersion TLS1.3.
@@ -168,12 +168,12 @@ func RequireControllerIdentity(ctx context.Context, req any, info *grpc.UnarySer
 
 ### Task 3: controller bootstraps the PKI and dials with mTLS
 
-**Files:** Create `internal/controller/pki_bootstrap.go` + test; modify `internal/controller/node_registry.go` (GetConnection), `internal/controller/forkd_discovery.go` (refreshCapacity), `cmd/controller/main.go`, `deploy/controller/deployment.yaml` (RBAC: secrets create/update in the forkd namespace), `deploy/daemon/daemonset.yaml` (mount `agent-run-forkd-tls` + CA, pass the three flags).
+**Files:** Create `internal/controller/pki_bootstrap.go` + test; modify `internal/controller/node_registry.go` (GetConnection), `internal/controller/forkd_discovery.go` (refreshCapacity), `cmd/controller/main.go`, `deploy/controller/deployment.yaml` (RBAC: secrets create/update in the forkd namespace), `deploy/daemon/daemonset.yaml` (mount `mitos-forkd-tls` + CA, pass the three flags).
 
-- [x] `EnsurePKI(ctx, client, namespace string) (*tls.Config, error)`: idempotently get-or-create the three Secrets (`agent-run-ca` with cert+key, `agent-run-forkd-tls`, `agent-run-controller-tls`); on conflict (parallel controllers) re-read. Returns the controller's `*tls.Config` (via `pki.ClientTLSConfig`) directly; the wrapper struct proved unnecessary. TDD with envtest (Secrets in the test namespace; second call returns identical material; tampered partial state gets healed or errors clearly: choose heal-by-recreate-leafs, never recreate the CA if present).
+- [x] `EnsurePKI(ctx, client, namespace string) (*tls.Config, error)`: idempotently get-or-create the three Secrets (`mitos-ca` with cert+key, `mitos-forkd-tls`, `mitos-controller-tls`); on conflict (parallel controllers) re-read. Returns the controller's `*tls.Config` (via `pki.ClientTLSConfig`) directly; the wrapper struct proved unnecessary. TDD with envtest (Secrets in the test namespace; second call returns identical material; tampered partial state gets healed or errors clearly: choose heal-by-recreate-leafs, never recreate the CA if present).
 - [x] `NodeRegistry` gains `TLS *tls.Config` field; `NodeInfo` also gains a per-node `TLS *tls.Config` and `GetConnection` prefers node TLS, then registry TLS, then insecure (deviation: node-level TLS keeps the suite's shared testRegistry usable for mixed TLS and insecure fakes; tests and mock paths construct without TLS). Same for `ForkdDiscovery.refreshCapacity` (ForkdDiscovery has a `TLS *tls.Config` field, stamps it onto discovered NodeInfo; both wired from main).
 - [x] `cmd/controller/main.go`: after manager construction, run `EnsurePKI` with a direct (non-cached) client before mgr.Start (controller-runtime's mgr.GetClient() cache is not started yet; use `client.New(mgr.GetConfig(), ...)`), set registry/discovery TLS. Flag `--disable-pki-bootstrap` for clusters that bring their own certs.
-- [x] Manifests: daemonset mounts secret `agent-run-forkd-tls` (cert/key) and `agent-run-ca` (ca.crt) as volumes, args gain the three flags; controller ClusterRole gains secrets create/update/patch scoped by resourceNames where possible (create cannot be name-scoped; document why in a comment).
+- [x] Manifests: daemonset mounts secret `mitos-forkd-tls` (cert/key) and `mitos-ca` (ca.crt) as volumes, args gain the three flags; controller ClusterRole gains secrets create/update/patch scoped by resourceNames where possible (create cannot be name-scoped; document why in a comment).
 - [x] envtest: claim e2e keeps using StartFakeForkdNode (no TLS) since registry TLS is nil in tests; ADDED `TestClaimReachesReadyOverMTLS` where the fake forkd (StartFakeForkdNodeTLS) serves TLS with pki certs and the registered NodeInfo carries the client config (node-level, not registry-level, so the suite's other insecure fakes keep working), claim still reaches Ready.
 - [x] Commit `feat: controller PKI bootstrap and mTLS dialing to forkd`.
 
@@ -188,7 +188,7 @@ func RequireControllerIdentity(ctx context.Context, req any, info *grpc.UnarySer
 - [x] `Server.Fork`/`ForkRunning` accept the token (plumb from gRPC request) and call `RegisterToken` after successful fork; `UnregisterSandbox` also clears the token.
 - [x] Controller: in the claim reconciler, before forkOnNode, mint `token := rand 32 bytes hex` (crypto/rand); pass through forkOnNode into ForkRequest; after Ready, create (or update) an owned Secret named `<claim-name>-sandbox-token` in the claim namespace with `token` + `endpoint` keys and ownerReference to the claim (GC on claim delete). Never put the token in status, conditions, events, or logs. Fork controller: mint per-fork tokens the same way and create `<forkID>-sandbox-token` Secrets owned by the SandboxFork.
 - [x] TDD: daemon test: fork with token, exec via HTTP with the bearer succeeds, without it 401, with a wrong token 401; envtest: claim Ready produces the owned Secret whose token round-trips against the fake forkd's HTTP API (StartFakeForkdNode needs to also start the HTTP handler on a listener; extend the helper).
-- [x] Python SDK (`sdk/python/agent_run/sandbox.py`): read the token Secret via the k8s API in `_wait_ready` (core v1 read, name `<claim>-sandbox-token`), send `Authorization: Bearer` on every HTTP call; tests with httpx MockTransport asserting the header. The direct-mode client (`direct.py`) is tokenless by design (sandbox-server AllowTokenless); note it in a comment.
+- [x] Python SDK (`sdk/python/mitos/sandbox.py`): read the token Secret via the k8s API in `_wait_ready` (core v1 read, name `<claim>-sandbox-token`), send `Authorization: Bearer` on every HTTP call; tests with httpx MockTransport asserting the header. The direct-mode client (`direct.py`) is tokenless by design (sandbox-server AllowTokenless); note it in a comment.
 - [x] Commit `feat: per-sandbox bearer tokens on the forkd sandbox API`.
 
 ---

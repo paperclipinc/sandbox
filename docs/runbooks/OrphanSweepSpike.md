@@ -2,9 +2,9 @@
 
 ## Signal
 
-`sum(rate(agentrun_orphan_sweeps_total[15m])) > 0` sustained for 15m.
+`sum(rate(mitos_orphan_sweeps_total[15m])) > 0` sustained for 15m.
 
-`agentrun_orphan_sweeps_total` is a controller counter incremented once per
+`mitos_orphan_sweeps_total` is a controller counter incremented once per
 forkd VM reaped by the garbage collector's orphan sweep (a VM with no owning
 claim). Steady reaping is a symptom: VMs are leaking and the GC is cleaning them
 up. The threshold is environment-tunable; a brief blip after a controller
@@ -24,9 +24,9 @@ restart is expected, sustained reaping is not.
   are VMs with no matching SandboxClaim.
 - `kubectl sandbox ls` to confirm the claim inventory.
 - `kubectl sandbox top` for node churn / pressure correlation.
-- Metrics: `agentrun_orphan_sweeps_total` (the rate driving this alert),
-  `agentrun_active_sandboxes` per node (does it match expected claims?),
-  `agentrun_claim_errors_total` (are claims failing mid-create and leaking?).
+- Metrics: `mitos_orphan_sweeps_total` (the rate driving this alert),
+  `mitos_active_sandboxes` per node (does it match expected claims?),
+  `mitos_claim_errors_total` (are claims failing mid-create and leaking?).
 - Controller GC logs and forkd logs around the sweep times (counts only, no
   secrets).
 

@@ -8,7 +8,7 @@
 // assertion inside it.
 //
 // The TLS handshake is the production handshake, not InsecureSkipVerify: the
-// holder serves a certificate whose SAN is pki.ServerName ("forkd.agent-run"),
+// holder serves a certificate whose SAN is pki.ServerName ("forkd.mitos"),
 // which is exactly the name the pull client pins via pki.ClientTLSConfig, so the
 // pinning the Task 1-2 note flagged is satisfied by issuing the holder a real
 // matching cert. Node B presents a CA-signed client identity (pki.ControllerName),
@@ -46,11 +46,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/pki"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/pki"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // peerToken is the shared bearer credential the holder gates its CAS with. It is

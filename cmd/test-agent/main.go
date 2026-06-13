@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // test-agent connects to a guest agent via Firecracker vsock UDS and exercises

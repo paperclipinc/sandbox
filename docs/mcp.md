@@ -1,6 +1,6 @@
-# MCP server (`agentrun-mcp`)
+# MCP server (`mitos-mcp`)
 
-`agentrun-mcp` exposes the agentrun sandbox lifecycle as [Model Context
+`mitos-mcp` exposes the mitos sandbox lifecycle as [Model Context
 Protocol](https://modelcontextprotocol.io) tools. Any MCP-speaking agent
 (Claude Desktop, an MCP client library, an agent framework with MCP support)
 can create sandboxes, run commands, read and write files, fork, and terminate,
@@ -44,7 +44,7 @@ The HTTP backend talks to a running [sandbox-server](../cmd/sandbox-server)
 over its REST API.
 
 ```bash
-agentrun-mcp \
+mitos-mcp \
   --server https://sandbox.example.internal \
   --token "$AGENTRUN_TOKEN" \
   --enable-workspace-tools=false
@@ -61,7 +61,7 @@ Flags and environment:
 ### Token scoping
 
 The launch-time token is the server's only credential. Every backend request
-carries it as `Authorization: Bearer <token>`, so `agentrun-mcp` can do exactly
+carries it as `Authorization: Bearer <token>`, so `mitos-mcp` can do exactly
 what that token authorizes on the sandbox-server and nothing more. Scope the
 token to scope the agent.
 
@@ -73,7 +73,7 @@ token is `set` or `unset`.
 
 ### Backend mapping and caveats
 
-`agentrun-mcp` ships with the HTTP backend, the simplest real backend: one
+`mitos-mcp` ships with the HTTP backend, the simplest real backend: one
 sandbox-server process, plain HTTP, one token.
 
 - `sandbox_create` issues `POST /v1/fork {template: <pool>, id: <generated>}`.
@@ -98,8 +98,8 @@ the binary and passes the backend URL and token through the environment:
 ```json
 {
   "mcpServers": {
-    "agentrun": {
-      "command": "/usr/local/bin/agentrun-mcp",
+    "mitos": {
+      "command": "/usr/local/bin/mitos-mcp",
       "env": {
         "AGENTRUN_SERVER": "https://sandbox.example.internal",
         "AGENTRUN_TOKEN": "your-scoped-token"

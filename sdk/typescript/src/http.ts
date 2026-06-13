@@ -1,4 +1,4 @@
-// HTTP transport for the agent-run TypeScript SDK. A thin wrapper over the
+// HTTP transport for the mitos TypeScript SDK. A thin wrapper over the
 // global fetch that attaches the per-sandbox bearer token, parses JSON, and
 // turns any non-2xx response into an AgentRunError with the token redacted from
 // the body. The token is held in memory only and is never logged.

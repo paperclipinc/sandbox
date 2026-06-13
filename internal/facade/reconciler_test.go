@@ -12,13 +12,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/facade"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/facade"
 )
 
 // newSandbox builds a minimal valid upstream Sandbox: podTemplate is required,
 // so it carries a single container. The optional annotations let a test set the
-// agentrun.dev/pool bridge annotation.
+// mitos.run/pool bridge annotation.
 func newSandbox(name string, annotations map[string]string, replicas *int32) *agentsv1alpha1.Sandbox {
 	return &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -66,7 +66,7 @@ func getSandbox(t *testing.T, name string) *agentsv1alpha1.Sandbox {
 }
 
 // TestFacadeCreatesClaimWithBridgeAnnotation: a Sandbox with the
-// agentrun.dev/pool annotation drives the facade to create our SandboxClaim,
+// mitos.run/pool annotation drives the facade to create our SandboxClaim,
 // bound to the annotated pool, owner-referenced to the Sandbox.
 func TestFacadeCreatesClaimWithBridgeAnnotation(t *testing.T) {
 	sb := newSandbox("facade-annotated", map[string]string{facade.PoolAnnotation: "my-pool"}, nil)
@@ -342,7 +342,7 @@ func TestFacadePauseResumeToggleStable(t *testing.T) {
 		if nudge.Annotations == nil {
 			nudge.Annotations = map[string]string{}
 		}
-		nudge.Annotations["test.agentrun.dev/nudge"] = "1"
+		nudge.Annotations["test.mitos.run/nudge"] = "1"
 	})
 	// Give the reconcile a moment, then assert the claim is still absent.
 	eventually(t, "idempotent re-reconcile keeps the claim released", claimAbsent)

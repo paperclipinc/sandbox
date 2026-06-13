@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // Runner runs an argv and returns its combined stdout. It is injected so

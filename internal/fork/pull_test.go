@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/firecracker"
 )
 
 // newPullEngine builds a minimal Engine that can pull templates without KVM. The

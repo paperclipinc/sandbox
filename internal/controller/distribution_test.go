@@ -6,9 +6,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/pki"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/pki"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -18,7 +18,7 @@ import (
 // requires an mTLS node).
 func distMTLSPair(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 	t.Helper()
-	ca, err := pki.NewCA("agent-run-test")
+	ca, err := pki.NewCA("mitos-test")
 	if err != nil {
 		t.Fatalf("NewCA: %v", err)
 	}

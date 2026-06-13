@@ -312,7 +312,7 @@ with:
 	cmd.Env = guestenv.Merge(os.Environ(), configured, req.Env)
 ```
 
-(import `"github.com/paperclipinc/sandbox/internal/guestenv"`.)
+(import `"github.com/paperclipinc/mitos/internal/guestenv"`.)
 
 - [ ] **Step 2: Cross-compile check**
 
@@ -386,7 +386,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/mitos/internal/fork"
 )
 
 // kvmReportingEngine wraps MockEngine but claims to be a real KVM engine,
@@ -541,7 +541,7 @@ First, add a settable `VsockDir` field to `MockEngine` (`internal/fork/mock.go`)
 ```go
 	vsockDir := e.VsockDir
 	if vsockDir == "" {
-		vsockDir = "/tmp/agent-run-mock"
+		vsockDir = "/tmp/mitos-mock"
 	}
 	// ... VsockPath: filepath.Sprintf-style join as today, rooted at vsockDir
 	VsockPath: fmt.Sprintf("%s/sandboxes/%s/vsock.sock", vsockDir, sandboxID),
@@ -655,7 +655,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `api/v1alpha1/types.go` (SandboxForkSpec)
-- Regenerate: `api/v1alpha1/zz_generated.deepcopy.go`, `deploy/crds/agentrun.dev_sandboxforks.yaml`
+- Regenerate: `api/v1alpha1/zz_generated.deepcopy.go`, `deploy/crds/mitos.run_sandboxforks.yaml`
 - Modify: `internal/controller/sandboxfork_controller.go`
 - Test: `internal/controller/fork_secrets_test.go` (new, package controller_test)
 
@@ -668,7 +668,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -860,7 +860,7 @@ Expected: both new tests PASS; the whole suite stays green (the e2e fork test in
 - [ ] **Step 6: Commit**
 
 ```bash
-git add api/v1alpha1/ deploy/crds/agentrun.dev_sandboxforks.yaml internal/controller/sandboxfork_controller.go internal/controller/fork_secrets_test.go
+git add api/v1alpha1/ deploy/crds/mitos.run_sandboxforks.yaml internal/controller/sandboxfork_controller.go internal/controller/fork_secrets_test.go
 git commit -m "feat: live forks of secret-holding sandboxes require explicit opt-in
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"

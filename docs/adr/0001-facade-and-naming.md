@@ -12,7 +12,7 @@ extension kinds `SandboxClaim`, `SandboxWarmPool`, `SandboxTemplate` in
 through that exact API on our fork engine: "implement their API, do not fork or
 shadow it."
 
-We already run our own engine through our own CRDs in group `agentrun.dev`
+We already run our own engine through our own CRDs in group `mitos.run`
 (`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`). Two questions
 had to be settled:
 
@@ -26,14 +26,14 @@ had to be settled:
 We implement the upstream API as a facade: a controller-runtime controller
 (`internal/facade`) that watches the upstream `agents.x-k8s.io/v1alpha1 Sandbox`
 and reconciles each onto our husk-backed run path (a `SandboxClaim` in our
-`agentrun.dev` group, bound to one of our pools). The facade runs as a SEPARATE
+`mitos.run` group, bound to one of our pools). The facade runs as a SEPARATE
 binary (`cmd/facade`) with its own manager, so it is opt-in and does not
 entangle our core controller (`cmd/controller`).
 
-The single bridge annotation `agentrun.dev/pool` on an upstream Sandbox selects
+The single bridge annotation `mitos.run/pool` on an upstream Sandbox selects
 which of our pools (the warm-pool source) fulfils it; when unset, the facade
 uses its configured `--default-pool`. All our extras (pools, warm pools,
-templates, fork policies, budgets) stay in our `agentrun.dev` group and are
+templates, fork policies, budgets) stay in our `mitos.run` group and are
 never grafted onto the upstream API surface.
 
 ### Toolchain path: vendored types after a go 1.26 bump (the faithful path)
@@ -98,10 +98,10 @@ Either path serves the same CRD: `agents.x-k8s.io/v1alpha1 Sandbox`.
 
 ## Decision 2: keep our nouns now, defer the rename to the API v2 migration
 
-Our `SandboxTemplate`/`SandboxClaim`/`SandboxPool` (group `agentrun.dev`) and
+Our `SandboxTemplate`/`SandboxClaim`/`SandboxPool` (group `mitos.run`) and
 their `Sandbox`/`SandboxClaim`/`SandboxWarmPool` (group `agents.x-k8s.io`) live
 in DIFFERENT API groups, so they do NOT collide at the apiserver: a cluster can
-serve both, and `kubectl get sandboxclaims.agentrun.dev` and
+serve both, and `kubectl get sandboxclaims.mitos.run` and
 `kubectl get sandboxclaims.extensions.agents.x-k8s.io` are distinct resources.
 The collision is purely cognitive: two unrelated `SandboxClaim` kinds confuse
 operators and readers.
@@ -119,7 +119,7 @@ Decision: DEFER the rename to the API v2 migration. Rationale:
   Doing it now (for the facade) and again at v2 (for the consolidation) is two
   breaking renames; doing it once, with v2, is one.
 - The facade does NOT need the rename to function: it already uses the distinct
-  `agents.x-k8s.io` group for the upstream surface and `agentrun.dev` for our
+  `agents.x-k8s.io` group for the upstream surface and `mitos.run` for our
   own, so there is no apiserver ambiguity to fix for the facade itself today.
 - v2 is where the noun set is reshaped anyway (v2-spec §5), so the rename lands
   naturally there as part of one migration with a documented upgrade path.

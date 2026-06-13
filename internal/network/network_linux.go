@@ -10,8 +10,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/netconf"
 )
 
 // linuxManager is the real, root-requiring Manager. It wires a real

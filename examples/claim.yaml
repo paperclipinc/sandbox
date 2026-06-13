@@ -1,4 +1,4 @@
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim
 metadata:
   name: agent-session-1

@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/eventfeed"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/eventfeed"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,7 +69,7 @@ func TestFeedEmitsRevisionCreatedAndEvent(t *testing.T) {
 	if found == nil {
 		t.Fatal("no revision.created CloudEvent emitted to the sink for the dehydrated revision")
 	}
-	if found.SpecVersion != "1.0" || found.Source != "agentrun.dev/controller" {
+	if found.SpecVersion != "1.0" || found.Source != "mitos.run/controller" {
 		t.Errorf("revision.created envelope wrong: specversion=%q source=%q", found.SpecVersion, found.Source)
 	}
 	data := found.Data.(eventfeed.RevisionCreatedData)

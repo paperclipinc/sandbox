@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // newTestTM builds a TemplateManager with an injected connectInit seam and a

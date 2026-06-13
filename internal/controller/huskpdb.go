@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,7 +52,7 @@ func huskPDBMinAvailable(replicas int32) int32 {
 
 // ensureHuskPDB creates or updates the pool's husk PodDisruptionBudget so a
 // node drain disrupts at most a bounded number of warm husk pods at once. The
-// PDB selects the pool's husk pods (agentrun.dev/pool=<name>,agentrun.dev/husk
+// PDB selects the pool's husk pods (mitos.run/pool=<name>,mitos.run/husk
 // =true) and is owner-referenced to the pool so Kubernetes garbage collection
 // deletes it when the pool is deleted. Idempotent: a second call updates the
 // minAvailable in place if Replicas changed.

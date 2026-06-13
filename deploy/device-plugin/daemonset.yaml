@@ -1,15 +1,15 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: agent-run-kvm-device-plugin
-  namespace: agent-run
+  name: mitos-kvm-device-plugin
+  namespace: mitos
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: kvm-device-plugin
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: agent-run
+      app.kubernetes.io/name: mitos
       app.kubernetes.io/component: kvm-device-plugin
   updateStrategy:
     type: RollingUpdate
@@ -18,13 +18,13 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: agent-run
+        app.kubernetes.io/name: mitos
         app.kubernetes.io/component: kvm-device-plugin
     spec:
       # No nodeSelector ON PURPOSE: the plugin runs on EVERY node and reflects
-      # scheduler truth, advertising agentrun.dev/kvm slots only where /dev/kvm
+      # scheduler truth, advertising mitos.run/kvm slots only where /dev/kvm
       # exists and zero elsewhere. Running everywhere (rather than gating on the
-      # agentrun.dev/kvm=true label forkd uses) means a node that gains /dev/kvm
+      # mitos.run/kvm=true label forkd uses) means a node that gains /dev/kvm
       # is covered automatically: the plugin re-registers and starts advertising
       # without a manual relabel. On a node without /dev/kvm it advertises zero,
       # so no pod requesting the resource is ever scheduled there.
@@ -36,9 +36,9 @@ spec:
         - operator: Exists
       containers:
         - name: kvm-device-plugin
-          image: ghcr.io/paperclipinc/sandbox-kvm-device-plugin:latest
+          image: ghcr.io/paperclipinc/mitos-kvm-device-plugin:latest
           args:
-            - --resource-name=agentrun.dev/kvm
+            - --resource-name=mitos.run/kvm
             # 0 = auto: advertise a sane slot count (100) where /dev/kvm exists.
             # /dev/kvm is shareable, so this is a soft per-node concurrency cap
             # on husk pods, not a physical device count.

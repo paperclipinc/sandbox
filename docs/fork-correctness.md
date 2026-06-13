@@ -170,7 +170,7 @@ makes pages unique.
 
 Required implementation:
 
-- `agentrun_memory_unique_bytes` (per-sandbox label) sampled periodically over
+- `mitos_memory_unique_bytes` (per-sandbox label) sampled periodically over
   the sandbox lifetime, not only at fork time. The current implementation
   samples `/proc/<pid>/smaps_rollup` once, at fork (`readMemoryStats`).
 - Published density numbers must include unique-memory-after-representative-

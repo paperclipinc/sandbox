@@ -74,7 +74,7 @@ trap:
 
 - (a) the Sandbox is ADMITTED by the upstream CRD (verbatim);
 - (b) the facade creates the bridged husk-backed `SandboxClaim` (owner reference
-  back to the Sandbox + the `agentrun.dev/pool` bridge annotation set to the
+  back to the Sandbox + the `mitos.run/pool` bridge annotation set to the
   default pool);
 - (c) the facade UPDATES the Sandbox status with a Ready condition reflecting the
   run-path state achievable on kind (Ready=False while the husk claim is Pending,
@@ -99,7 +99,7 @@ the extension mappings object-level:
   `SandboxPool` at replicas 1 pointing at the resolved template;
 - (i) their `SandboxClaim` (`my-secure-sandbox`, default warmpool policy) binds
   our claim from the template-matching pool (`sandboxwarmpool-example`), with the
-  `agentrun.dev/warmpool-policy=default` annotation;
+  `mitos.run/warmpool-policy=default` annotation;
 - (j) deleting their `SandboxClaim` GCs our claim (the live-apiserver
   owner-reference cascade).
 
@@ -202,7 +202,7 @@ maps.
    ports, command/args, volumes/volumeMounts, serviceAccountName, security
    context, multiple containers) are NOT yet honored per-Sandbox: the husk pool
    pins image and resources at pool-build time, and a Sandbox binds to a pool via
-   the `agentrun.dev/pool` bridge annotation. The manifests still apply unchanged
+   the `mitos.run/pool` bridge annotation. The manifests still apply unchanged
    and the facade bridges the claim. Closing this requires the pool/template
    extension mappings (a later slice).
 
@@ -280,19 +280,19 @@ maps.
      whose `templateRef` matches the resolved template (deterministic: lowest
      pool name). A specific pool `<name>` binds from our pool of that name (the
      pool the warm pool reconciler created under the same name, the bridge). The
-     resolved pool + policy are recorded on our claim via `agentrun.dev/pool` and
-     `agentrun.dev/warmpool-policy`. PROVEN-OBJECT-LEVEL-ON-KIND (envtest covers
+     resolved pool + policy are recorded on our claim via `mitos.run/pool` and
+     `mitos.run/warmpool-policy`. PROVEN-OBJECT-LEVEL-ON-KIND (envtest covers
      default + named; facade-conformance (i) covers default).
    - `none`: the upstream contract is "always create fresh sandboxes, no warm
      pool". JUSTIFIED-EXCEPTION: our engine has NO pool-less run path; every
      sandbox forks from a pool's template snapshot. So a `none` claim is forked
      from the resolved template's pool (the same resolution as `default`), with
-     the requested `none` recorded in `agentrun.dev/warmpool-policy`. This is an
+     the requested `none` recorded in `mitos.run/warmpool-policy`. This is an
      honest exception, not a silent remap: our engine cannot honor `none` as a
      pool-less fresh create, and that is stated.
    - Lifecycle: `lifecycle.ttlSecondsAfterFinished` maps onto our claim's
      `Spec.TTLSecondsAfterFinished`; `lifecycle.shutdownTime` (an absolute
-     expiry) is recorded on our claim via `agentrun.dev/shutdown-time` so it is
+     expiry) is recorded on our claim via `mitos.run/shutdown-time` so it is
      not silently dropped. JUSTIFIED-EXCEPTION: `lifecycle.shutdownPolicy`
      (Delete / DeleteForeground / Retain) governs the UPSTREAM claim object only;
      our facade enforces deletion via the owner-reference cascade (deleting their

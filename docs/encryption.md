@@ -22,7 +22,7 @@ Each scope gets its own LUKS2 container (`internal/storecrypt`):
 
 1. `Create` fallocates a sparse image file at `<dataDir>/enc/<scopeID>.img`,
    `cryptsetup luksFormat`s it as LUKS2, `luksOpen`s it to a dm-crypt device at
-   `/dev/mapper/agentrun-<scopeID>`, makes an ext4 filesystem on that device,
+   `/dev/mapper/mitos-<scopeID>`, makes an ext4 filesystem on that device,
    and mounts it at the scope's data directory.
 2. The engine then builds the template snapshot (mem, vmstate, rootfs) and any
    seed volumes INSIDE that mounted directory. Everything written there goes

@@ -74,7 +74,7 @@ controller.reconcileClaim         (controller)
   content address), `captured.path.count`, and `memory.snapshot.paired` (a
   bool). Names, a digest, a count, and a bool only; no secret value.
 - The active reconcile trace id is stamped on the new revision as the
-  `agentrun.dev/trace-id` annotation BEFORE the revision is created, but only
+  `mitos.run/trace-id` annotation BEFORE the revision is created, but only
   when tracing is enabled (the trace id is valid). With tracing off (the no-op
   provider) the annotation is omitted: a fake all-zero id is never written.
 - The same trace id rides the `revision.created` feed CloudEvent as its
@@ -90,7 +90,7 @@ OPEN.
 
 Spans carry only ids (claim name/namespace, pool, node, snapshot id, sandbox
 id, workspace and revision names, the contentManifest digest), counts, and
-timings. The `agentrun.dev/trace-id` annotation and the feed `traceId` field
+timings. The `mitos.run/trace-id` annotation and the feed `traceId` field
 are opaque correlation ids, not secrets. No span attribute, annotation, or feed
 field carries a secret value, env value, file content, or token.
 
@@ -102,7 +102,7 @@ field carries a secret value, env value, file content, or token.
 - Cross-process trace-id propagation over gRPC is asserted: a server span shares
   the client span's trace id.
 - The trace-to-revision link is asserted in CI: the reconcile trace id is
-  stamped on the WorkspaceRevision (`agentrun.dev/trace-id`) and equals the
+  stamped on the WorkspaceRevision (`mitos.run/trace-id`) and equals the
   `workspace.dehydrate` span's trace id, the span is a child of the reconcile
   span with the expected attributes and no secret values, the annotation is
   omitted when tracing is off, and the `revision.created` feed event carries the
@@ -164,7 +164,7 @@ bound only keeps records small.
 Auditing is off by default. Enable it on forkd:
 
 ```
-forkd --audit-log=/var/log/agentrun/audit.jsonl   # append to a file
+forkd --audit-log=/var/log/mitos/audit.jsonl   # append to a file
 forkd --audit-log=-                                # or "stderr": write to stderr
 ```
 
@@ -190,23 +190,23 @@ reason codes only.
 
 | Metric | Type | Meaning |
 |--------|------|---------|
-| `agentrun_fork_duration_seconds` | histogram | Time to fork a sandbox from snapshot, as measured by forkd. |
-| `agentrun_active_sandboxes` | gauge | Currently running sandboxes on this node. |
-| `agentrun_memory_shared_bytes` | gauge | CoW-aware shared memory: each template's shared page set counted once. |
-| `agentrun_memory_unique_bytes` | gauge | Per-fork unique (dirty-page) memory summed over all sandboxes. |
-| `agentrun_cow_memory_savings_bytes` | gauge | Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware). |
-| `agentrun_metered_disk_bytes` | gauge | CoW-aware metered backing storage: template volume seeds counted once. |
+| `mitos_fork_duration_seconds` | histogram | Time to fork a sandbox from snapshot, as measured by forkd. |
+| `mitos_active_sandboxes` | gauge | Currently running sandboxes on this node. |
+| `mitos_memory_shared_bytes` | gauge | CoW-aware shared memory: each template's shared page set counted once. |
+| `mitos_memory_unique_bytes` | gauge | Per-fork unique (dirty-page) memory summed over all sandboxes. |
+| `mitos_cow_memory_savings_bytes` | gauge | Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware). |
+| `mitos_metered_disk_bytes` | gauge | CoW-aware metered backing storage: template volume seeds counted once. |
 
 ### Controller-level
 
 | Metric | Type | Meaning |
 |--------|------|---------|
-| `agentrun_claim_pending_total` | counter | Times a claim was requeued because no node had a ready snapshot (the claim stayed Pending). |
-| `agentrun_orphan_sweeps_total` | counter | Orphan sandbox VMs terminated by the garbage collector. |
-| `agentrun_claim_errors_total{pool,reason}` | counter | Claims that failed terminally, by pool and coarse reason (`fork`, `secret`, `volume`, `token`). |
-| `agentrun_pool_ready_snapshots{pool}` | gauge | Ready snapshots per pool, as of the last pool reconcile. |
+| `mitos_claim_pending_total` | counter | Times a claim was requeued because no node had a ready snapshot (the claim stayed Pending). |
+| `mitos_orphan_sweeps_total` | counter | Orphan sandbox VMs terminated by the garbage collector. |
+| `mitos_claim_errors_total{pool,reason}` | counter | Claims that failed terminally, by pool and coarse reason (`fork`, `secret`, `volume`, `token`). |
+| `mitos_pool_ready_snapshots{pool}` | gauge | Ready snapshots per pool, as of the last pool reconcile. |
 
-Counter versus gauge for pending: `agentrun_claim_pending_total` is a counter of
+Counter versus gauge for pending: `mitos_claim_pending_total` is a counter of
 pending-requeue EVENTS, not a live gauge of currently-pending claims. A counter
 is exact and lock-free to bump at the requeue site; an honest live gauge of
 currently-pending claims would need a periodic recount with its own staleness
@@ -228,7 +228,7 @@ conditions/reason-code catalogue that ride on these metrics are shipped; see
 
 ## `kubectl sandbox` plugin
 
-The `kubectl-sandbox` binary is a kubectl plugin that lists agentrun.dev sandbox
+The `kubectl-sandbox` binary is a kubectl plugin that lists mitos.run sandbox
 objects. It resolves the cluster connection from the standard kubeconfig
 resolution (`KUBECONFIG`, `--kubeconfig`, or in-cluster).
 

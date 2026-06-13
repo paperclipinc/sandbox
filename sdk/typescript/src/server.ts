@@ -1,7 +1,7 @@
 // Direct client for the standalone sandbox-server (cmd/sandbox-server). No
 // Kubernetes required. Tokenless by design: the standalone server runs its
 // sandbox API with AllowTokenless, so no bearer token is sent. Mirrors the
-// Python SandboxServer (sdk/python/agent_run/direct.py).
+// Python SandboxServer (sdk/python/mitos/direct.py).
 
 import { HttpClient, validSandboxId } from "./http.js";
 import { Sandbox } from "./sandbox.js";

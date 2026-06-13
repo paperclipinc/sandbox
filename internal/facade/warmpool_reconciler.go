@@ -12,11 +12,11 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 // SandboxWarmPoolReconciler maps an upstream
-// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our agentrun.dev
+// extensions.agents.x-k8s.io/v1alpha1 SandboxWarmPool onto our mitos.run
 // SandboxPool. It owns exactly one of our SandboxPool objects per upstream
 // warm pool (same name + namespace, owner-referenced for GC), setting
 // Spec.Replicas from their spec.replicas (re-read EVERY reconcile so an HPA that
@@ -36,10 +36,10 @@ type SandboxWarmPoolReconciler struct {
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools/status,verbs=get
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools/status,verbs=get
 
-// Reconcile ensures our agentrun.dev SandboxPool mirrors the upstream warm pool
+// Reconcile ensures our mitos.run SandboxPool mirrors the upstream warm pool
 // at the requested replicas and mirrors our pool status back. Deletion is
 // handled by the owner-reference garbage collector.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -90,13 +90,13 @@ func (r *SandboxWarmPoolReconciler) ensurePool(ctx context.Context, src *extv1al
 }
 
 // huskPoolLabel and huskLabel are the labels our controller stamps on every
-// husk pod of a pool (controller.buildHuskPod): agentrun.dev/pool=<pool-name>
-// plus agentrun.dev/husk=true. The mirrored scale selector below is built from
+// husk pod of a pool (controller.buildHuskPod): mitos.run/pool=<pool-name>
+// plus mitos.run/husk=true. The mirrored scale selector below is built from
 // exactly these so it matches the real husk pods; the values MUST track
 // internal/controller/huskpod.go.
 const (
-	huskPoolLabel = "agentrun.dev/pool"
-	huskLabel     = "agentrun.dev/husk"
+	huskPoolLabel = "mitos.run/pool"
+	huskLabel     = "mitos.run/husk"
 )
 
 // mirrorStatus writes our pool's warm-slot counts back into the upstream warm
@@ -108,8 +108,8 @@ func (r *SandboxWarmPoolReconciler) mirrorStatus(ctx context.Context, src *extv1
 	wantReplicas := pool.Spec.Replicas
 	wantReady := pool.Status.ReadySnapshots
 	// The scale-subresource selector must match the pool's husk pods, NOT a
-	// agentrun.dev/warmpool label (no pod carries one). buildHuskPod labels each
-	// husk pod agentrun.dev/pool=<pool-name>,agentrun.dev/husk=true, and our pool
+	// mitos.run/warmpool label (no pod carries one). buildHuskPod labels each
+	// husk pod mitos.run/pool=<pool-name>,mitos.run/husk=true, and our pool
 	// shares the warm pool's name, so build the selector from those exact keys.
 	// A wrong key matches zero pods and breaks HPA pod-resource-metric reads.
 	wantSelector := fmt.Sprintf("%s=%s,%s=true", huskPoolLabel, pool.Name, huskLabel)

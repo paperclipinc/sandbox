@@ -41,13 +41,13 @@ protoc --version   # expect: libprotoc 2x.x
 In `proto/forkd.proto` replace:
 
 ```proto
-option go_package = "github.com/paperclipinc/sandbox/proto/forkd";
+option go_package = "github.com/paperclipinc/mitos/proto/forkd";
 ```
 
 with:
 
 ```proto
-option go_package = "github.com/paperclipinc/sandbox/proto/forkd;forkdpb";
+option go_package = "github.com/paperclipinc/mitos/proto/forkd;forkdpb";
 ```
 
 - [x] **Step 3: Update the Makefile proto target**
@@ -57,8 +57,8 @@ Replace the existing `proto:` target with:
 ```makefile
 proto:
 	protoc \
-	  --go_out=. --go_opt=module=github.com/paperclipinc/sandbox \
-	  --go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/sandbox \
+	  --go_out=. --go_opt=module=github.com/paperclipinc/mitos \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/paperclipinc/mitos \
 	  proto/forkd.proto
 ```
 
@@ -261,7 +261,7 @@ func (e *MockEngine) ForkRunning(sourceSandboxID, newSandboxID string, pauseSour
 		ForkTimeMs:   float64(elapsed.Microseconds()) / 1000.0,
 		MemoryUnique: sandbox.MemoryUnique,
 		MemoryShared: sandbox.MemoryShared,
-		VsockPath:    fmt.Sprintf("/tmp/agent-run-mock/sandboxes/%s/vsock.sock", newSandboxID),
+		VsockPath:    fmt.Sprintf("/tmp/mitos-mock/sandboxes/%s/vsock.sock", newSandboxID),
 	}, nil
 }
 ```
@@ -313,8 +313,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/fork"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -430,8 +430,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/fork"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -537,7 +537,7 @@ func RegisterForkDaemonServer(s *grpc.Server, srv *Server) {
 }
 ```
 
-(add `forkdpb "github.com/paperclipinc/sandbox/proto/forkd"` to imports) and fix the hardcoded vsock path in `Server.Fork` to use the engine's answer:
+(add `forkdpb "github.com/paperclipinc/mitos/proto/forkd"` to imports) and fix the hardcoded vsock path in `Server.Fork` to use the engine's answer:
 
 ```go
 	// Connect to the guest agent so exec/files work
@@ -646,8 +646,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/fork"
 	"google.golang.org/grpc"
 )
 
@@ -746,7 +746,7 @@ import (
 	"context"
 	"fmt"
 
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 )
 
 // forkOnNode asks the forkd on the given node to fork a sandbox from a snapshot.
@@ -925,7 +925,7 @@ func (r *SandboxPoolReconciler) nodeDistribution(templateID string) map[string]i
 }
 ```
 
-(imports: add `errors` and `forkdpb "github.com/paperclipinc/sandbox/proto/forkd"`.)
+(imports: add `errors` and `forkdpb "github.com/paperclipinc/mitos/proto/forkd"`.)
 
 Update `Reconcile` to use them: replace the deficit block and status lines:
 
@@ -989,8 +989,8 @@ package controller
 import (
 	"net"
 
-	"github.com/paperclipinc/sandbox/internal/daemon"
-	"github.com/paperclipinc/sandbox/internal/fork"
+	"github.com/paperclipinc/mitos/internal/daemon"
+	"github.com/paperclipinc/mitos/internal/fork"
 	"google.golang.org/grpc"
 )
 
@@ -1039,8 +1039,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -1197,7 +1197,7 @@ import (
 	"fmt"
 	"time"
 
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -1211,7 +1211,7 @@ const forkdComponentLabel = "app.kubernetes.io/component"
 type ForkdDiscovery struct {
 	Client    client.Client
 	Registry  *NodeRegistry
-	Namespace string        // namespace forkd runs in, e.g. "agent-run"
+	Namespace string        // namespace forkd runs in, e.g. "mitos"
 	Interval  time.Duration // default 15s
 	GRPCPort  int           // default 9090
 	HTTPPort  int           // default 9091
@@ -1320,7 +1320,7 @@ Delete `StartDiscovery` from `node_registry.go` (and its mock-node block; `cmd/c
 ```go
 	discoveryNamespace := os.Getenv("FORKD_NAMESPACE")
 	if discoveryNamespace == "" {
-		discoveryNamespace = "agent-run"
+		discoveryNamespace = "mitos-system"
 	}
 	if err := mgr.Add(&controller.ForkdDiscovery{
 		Client:    mgr.GetClient(),
@@ -1359,7 +1359,7 @@ git commit -m "feat: forkd pod discovery with capacity heartbeats"
 `Sandbox.exec`/`files.*` post to `{endpoint}/exec` and `{endpoint}/files/read` with no sandbox ID; forkd serves `POST /v1/exec` etc. and routes by the `sandbox` field. Fix the SDK to (a) hit `/v1/...`, (b) send `"sandbox": <sandboxID from claim status>`.
 
 **Files:**
-- Modify: `sdk/python/agent_run/sandbox.py`
+- Modify: `sdk/python/mitos/sandbox.py`
 - Test: `sdk/python/tests/test_sandbox.py` (append; follow the existing test style in that file; read it first)
 
 - [x] **Step 1: Read the existing tests to match their fixtures**
@@ -1372,8 +1372,8 @@ Match whatever mocking approach is already used (the suite passes today without 
 ```python
 import httpx
 
-from agent_run.sandbox import Sandbox
-from agent_run.types import SandboxPhase
+from mitos.sandbox import Sandbox
+from mitos.types import SandboxPhase
 
 
 def _ready_sandbox(transport: httpx.MockTransport) -> Sandbox:

@@ -34,10 +34,10 @@ COPY --from=builder /build/husk-stub /usr/local/bin/husk-stub
 
 # The guest KERNEL is NOT baked into this image. Like forkd's snapshot/data
 # artifacts, the kernel is a runtime artifact provided to the pod via a volume
-# mount under /var/lib/agent-run (the controller-built husk pod points
-# --kernel at /var/lib/agent-run/kernel/vmlinux). This keeps the image
+# mount under /var/lib/mitos (the controller-built husk pod points
+# --kernel at /var/lib/mitos/kernel/vmlinux). This keeps the image
 # kernel-agnostic; the running pod + its volume layout are exercised in the
 # kind-e2e slice.
-VOLUME ["/var/lib/agent-run", "/run/husk"]
+VOLUME ["/var/lib/mitos", "/run/husk"]
 
 ENTRYPOINT ["/usr/local/bin/husk-stub"]

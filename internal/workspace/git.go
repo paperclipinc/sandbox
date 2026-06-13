@@ -17,9 +17,9 @@ import (
 // machine-produced state, not a human author; a fixed identity keeps the commit
 // reproducible and clearly attributed to the engine.
 const (
-	rendezvousAuthorName  = "agentrun rendezvous"
-	rendezvousAuthorEmail = "rendezvous@agentrun.dev"
-	rendezvousMessage     = "agentrun: workspace rendezvous"
+	rendezvousAuthorName  = "mitos rendezvous"
+	rendezvousAuthorEmail = "rendezvous@mitos.run"
+	rendezvousMessage     = "mitos: workspace rendezvous"
 )
 
 // RenderBranch renders a per-attempt branch name from a text/template using the

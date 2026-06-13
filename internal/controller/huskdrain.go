@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,7 +17,7 @@ import (
 //
 // A husk pod backing an ACTIVE claim can disappear under the claim: a node
 // drain, an eviction, a spot reclaim, or an operator kubectl delete. The claim
-// has Status.Node/Endpoint set and the pod carries agentrun.dev/claim=<claim>.
+// has Status.Node/Endpoint set and the pod carries mitos.run/claim=<claim>.
 // When that pod is GONE or terminating, the in-VM state is lost; the claim must
 // not keep advertising a dead endpoint. The drain policy on the pool governs
 // what happens next:
@@ -42,7 +42,7 @@ import (
 //      claimed husk pod still exists and is not terminating (checkHuskPodLost).
 //      A gone/terminating pod re-pends the claim immediately.
 //   2. A Watches(&corev1.Pod{}) mapping enqueues the claim named in a husk pod's
-//      agentrun.dev/claim label on any pod event (huskPodToClaim), so a pod
+//      mitos.run/claim label on any pod event (huskPodToClaim), so a pod
 //      delete promptly reconciles the claim instead of waiting for the claim's
 //      own requeue. The Ready early-return in Reconcile routes through the loss
 //      check before the lifetime path, so the enqueued reconcile re-pends.
@@ -195,7 +195,7 @@ func (r *SandboxClaimReconciler) rependOnHuskPodLost(ctx context.Context, claim 
 }
 
 // huskPodToClaim maps a husk pod event to a reconcile of the claim named in its
-// agentrun.dev/claim label, so a pod delete/eviction promptly reconciles the
+// mitos.run/claim label, so a pod delete/eviction promptly reconciles the
 // active claim (which then re-pends). A husk pod with no claim label (a dormant
 // slot) maps to nothing; the pool's Owns(pods) handles dormant self-heal.
 func huskPodToClaim(_ context.Context, obj client.Object) []ctrl.Request {

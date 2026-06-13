@@ -18,7 +18,7 @@ import (
 
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 	// a documented justified exception: our fork-from-snapshot engine has no
 	// pool-less run path, so a none claim is still forked from the resolved
 	// template's pool snapshot. See docs/facade-conformance.md.
-	WarmPoolPolicyAnnotation = "agentrun.dev/warmpool-policy"
+	WarmPoolPolicyAnnotation = "mitos.run/warmpool-policy"
 
 	// claimReadyConditionType is the upstream SandboxClaim condition the facade
 	// mirrors our claim's readiness into. Upstream uses Ready/Bound style
@@ -41,7 +41,7 @@ const (
 )
 
 // SandboxClaimReconciler maps an upstream extensions.agents.x-k8s.io/v1alpha1
-// SandboxClaim onto our agentrun.dev SandboxClaim (the fork-from-snapshot run
+// SandboxClaim onto our mitos.run SandboxClaim (the fork-from-snapshot run
 // path, #18). It owns exactly one of our SandboxClaim objects per upstream claim
 // (same name + namespace, owner-referenced for GC), resolving the pool to fork
 // from per the upstream warmpool policy:
@@ -56,7 +56,7 @@ const (
 //     templateRef matches the resolved template (deterministic: lowest pool name).
 //   - <name>: bind from that specific warm pool. The pool is our pool created by
 //     the warm pool reconciler under the same name (bridge annotation
-//     agentrun.dev/warmpool).
+//     mitos.run/warmpool).
 //
 // It mirrors the upstream status (the bound sandbox name, podIPs, and a Ready
 // condition derived from our claim phase) and handles deletion via the owner
@@ -73,8 +73,8 @@ type SandboxClaimReconciler struct {
 
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch
 
 // Reconcile drives the upstream SandboxClaim -> our fork-from-snapshot claim
 // lifecycle. Deletion is handled by the owner-reference garbage collector.
@@ -102,7 +102,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.mirror(ctx, &src, claimStatusUpdate{
 			status:  metav1.ConditionFalse,
 			reason:  "NoPool",
-			message: fmt.Sprintf("no agentrun.dev pool resolves for template %q under warmpool policy %q; create a SandboxWarmPool (or our SandboxPool) for the template", src.Spec.TemplateRef.Name, policy),
+			message: fmt.Sprintf("no mitos.run pool resolves for template %q under warmpool policy %q; create a SandboxWarmPool (or our SandboxPool) for the template", src.Spec.TemplateRef.Name, policy),
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -141,7 +141,7 @@ func warmPoolPolicy(src *extv1alpha1.SandboxClaim) extv1alpha1.WarmPoolPolicy {
 	return *src.Spec.WarmPool
 }
 
-// resolvePool resolves the agentrun.dev pool a claim forks from per the upstream
+// resolvePool resolves the mitos.run pool a claim forks from per the upstream
 // warmpool policy. Returns the empty string when no pool resolves (the caller
 // surfaces a not-ready condition).
 //
@@ -186,7 +186,7 @@ func (r *SandboxClaimReconciler) resolvePool(ctx context.Context, src *extv1alph
 // claim is named after the upstream claim, lives in the same namespace, is
 // owner-referenced to it, and binds to the resolved pool. From the upstream
 // lifecycle, ttlSecondsAfterFinished maps onto our claim's TTL; shutdownTime is
-// recorded via the agentrun.dev/shutdown-time annotation (not mapped to a claim
+// recorded via the mitos.run/shutdown-time annotation (not mapped to a claim
 // Timeout). additionalPodMetadata annotations are propagated where our claim
 // supports them.
 func (r *SandboxClaimReconciler) ensureClaim(ctx context.Context, src *extv1alpha1.SandboxClaim, pool string, policy extv1alpha1.WarmPoolPolicy) (*runv1alpha1.SandboxClaim, error) {
@@ -256,7 +256,7 @@ func applyLifecycle(claim *runv1alpha1.SandboxClaim, lc *extv1alpha1.Lifecycle) 
 		if claim.Annotations == nil {
 			claim.Annotations = map[string]string{}
 		}
-		claim.Annotations["agentrun.dev/shutdown-time"] = lc.ShutdownTime.UTC().Format("2006-01-02T15:04:05Z")
+		claim.Annotations["mitos.run/shutdown-time"] = lc.ShutdownTime.UTC().Format("2006-01-02T15:04:05Z")
 	}
 }
 

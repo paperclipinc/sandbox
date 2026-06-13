@@ -2,23 +2,23 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 # Production install: `kubectl apply -k deploy/` lays down the CRDs, the
-# agent-run namespace, the controller (Deployment + RBAC) and the forkd
-# DaemonSet. forkd only schedules onto nodes labeled agentrun.dev/kvm=true
+# mitos namespace, the controller (Deployment + RBAC) and the forkd
+# DaemonSet. forkd only schedules onto nodes labeled mitos.run/kvm=true
 # (see deploy/talos/), so the DaemonSet stays Pending until KVM workers join.
-# The dev MOCK overlay (deploy/dev/) is separate and is what `agentrun dev up`
+# The dev MOCK overlay (deploy/dev/) is separate and is what `mitos dev up`
 # applies; it does not consume this base.
 resources:
-  - crds/agentrun.dev_sandboxtemplates.yaml
-  - crds/agentrun.dev_sandboxpools.yaml
-  - crds/agentrun.dev_sandboxclaims.yaml
-  - crds/agentrun.dev_sandboxforks.yaml
+  - crds/mitos.run_sandboxtemplates.yaml
+  - crds/mitos.run_sandboxpools.yaml
+  - crds/mitos.run_sandboxclaims.yaml
+  - crds/mitos.run_sandboxforks.yaml
   - controller/namespace.yaml
   - rbac/serviceaccount.yaml
   - rbac/clusterrole.yaml
   - rbac/clusterrolebinding.yaml
   - controller/deployment.yaml
   - daemon/daemonset.yaml
-  # The KVM device plugin runs on every node and advertises agentrun.dev/kvm
+  # The KVM device plugin runs on every node and advertises mitos.run/kvm
   # only where /dev/kvm exists, so husk pods can request KVM as a scheduled
   # resource instead of privileged: true (the PSA-restricted path). It does
   # NOT replace forkd's privileged /dev/kvm hostPath in this base; that

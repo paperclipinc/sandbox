@@ -4,9 +4,9 @@ package controller_test
 //
 // When tracing is enabled, dehydrateOnTerminate starts a workspace.dehydrate
 // child span of controller.reconcileClaim and stamps the active trace id onto
-// the new WorkspaceRevision via the agentrun.dev/trace-id annotation. These
+// the new WorkspaceRevision via the mitos.run/trace-id annotation. These
 // tests assert:
-//   - the new revision's agentrun.dev/trace-id annotation equals the reconcile
+//   - the new revision's mitos.run/trace-id annotation equals the reconcile
 //     trace id;
 //   - a workspace.dehydrate span exists as a child of the claim reconcile span
 //     with the expected content-pointer attributes and no secret values;
@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/observability"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/observability"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const traceIDAnnotationKey = "agentrun.dev/trace-id"
+const traceIDAnnotationKey = "mitos.run/trace-id"
 
 // TestDehydrateStampsTraceIDOnRevision drives a claim-with-workspace to terminate
 // with the in-memory span recorder installed and asserts the trace id is stamped
@@ -70,7 +70,7 @@ func TestDehydrateStampsTraceIDOnRevision(t *testing.T) {
 
 	stamped := head.Annotations[traceIDAnnotationKey]
 	if stamped == "" {
-		t.Fatal("revision has no agentrun.dev/trace-id annotation with tracing enabled")
+		t.Fatal("revision has no mitos.run/trace-id annotation with tracing enabled")
 	}
 
 	// Find the workspace.dehydrate span that produced THIS revision, then require

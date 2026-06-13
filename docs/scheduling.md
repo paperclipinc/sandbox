@@ -113,10 +113,10 @@ The claim reconciler then:
    overcommit policy") and the remediation ("the claim will retry; scale out
    nodes or raise the overcommit factor").
 2. Stamps the first-pending instant on a durable annotation
-   (`agentrun.dev/capacity-pending-since`) and requeues with a bounded backoff.
+   (`mitos.run/capacity-pending-since`) and requeues with a bounded backoff.
    The annotation, not a condition timestamp, is the deadline anchor: it changes
    only when the claim enters or leaves the capacity-pending state.
-3. Bumps `agentrun_claim_pending_total`. This counter is the backpressure
+3. Bumps `mitos_claim_pending_total`. This counter is the backpressure
    signal a cluster-autoscaler or capacity-planning dashboard reads.
 
 A claim that becomes admittable before the deadline (a node frees memory or a
@@ -126,7 +126,7 @@ cleared so a later shortage starts a fresh clock.
 A claim that stays capacity-pending longer than `--max-pending-duration`
 (default 5m) FAILS cleanly: `Phase = Failed`, a `Ready=False` condition with
 reason `CapacityExhausted` and an actionable message, `FinishedAt` stamped for
-GC, and `agentrun_claim_errors_total{reason="capacity"}` bumped. Failing after a
+GC, and `mitos_claim_errors_total{reason="capacity"}` bumped. Failing after a
 bounded wait is the boring, honest behavior: the claim does not hang forever and
 the controller never forces a placement that would OOM a node.
 

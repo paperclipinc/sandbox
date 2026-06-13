@@ -17,7 +17,7 @@ import (
 // socketName is the basename of the unix socket the plugin serves on, placed
 // under the kubelet device-plugins directory. The kubelet registers the plugin
 // by this endpoint basename (RegisterRequest.Endpoint).
-const socketName = "agentrun-kvm.sock"
+const socketName = "mitos-kvm.sock"
 
 // retryInterval is how long Run waits before re-serving and re-registering
 // after the serve loop returns (the kubelet restarted, or the socket vanished).

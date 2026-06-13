@@ -1,4 +1,4 @@
-from agent_run.types import ExecResult, FileInfo, ForkPolicy, SandboxPhase, PoolStatus
+from mitos.types import ExecResult, FileInfo, ForkPolicy, SandboxPhase, PoolStatus
 
 
 def test_fork_policy_values():

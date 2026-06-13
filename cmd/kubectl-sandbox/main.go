@@ -1,4 +1,4 @@
-// Command kubectl-sandbox is a kubectl plugin that lists agentrun.dev sandbox
+// Command kubectl-sandbox is a kubectl plugin that lists mitos.run sandbox
 // objects. Installed as "kubectl-sandbox" on PATH, it is invoked as
 // "kubectl sandbox <subcommand>".
 //
@@ -24,8 +24,8 @@ import (
 	"os"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cli/sandboxtable"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cli/sandboxtable"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,7 +38,7 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
-const usage = `kubectl sandbox: inspect and operate agentrun.dev sandbox objects
+const usage = `kubectl sandbox: inspect and operate mitos.run sandbox objects
 
 Usage:
   kubectl sandbox ls [-n namespace] [-A]         list SandboxClaims

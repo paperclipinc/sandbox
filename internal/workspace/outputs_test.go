@@ -5,8 +5,8 @@ import (
 	"sort"
 	"testing"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 func TestCapturePaths(t *testing.T) {

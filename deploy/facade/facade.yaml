@@ -6,19 +6,19 @@
 #
 #   kubectl apply -f deploy/facade/facade.yaml
 #
-# It assumes the agent-run namespace and our agentrun.dev CRDs already exist
+# It assumes the mitos namespace and our mitos.run CRDs already exist
 # (from the base install) and that the upstream agents.x-k8s.io Sandbox CRD is
 # installed (from third_party/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml
 # or the upstream helm chart). The facade maps each Sandbox onto our husk-backed
-# SandboxClaim via the agentrun.dev/pool bridge annotation (or --default-pool).
+# SandboxClaim via the mitos.run/pool bridge annotation (or --default-pool).
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: agent-run-facade
-  namespace: agent-run
+  name: mitos-facade
+  namespace: mitos
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: facade
 ---
 # Facade ClusterRole. Every rule is justified by a client call in
@@ -26,9 +26,9 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agent-run-facade
+  name: mitos-facade
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: facade
 rules:
   # The upstream Sandbox the facade watches and whose status it mirrors.
@@ -74,7 +74,7 @@ rules:
   # Our run-path objects the facade creates, owns, and terminates: the claim it
   # bridges plus the template and pool the extension reconcilers map.
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims
       - sandboxtemplates
@@ -88,7 +88,7 @@ rules:
       - update
       - watch
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxpools/status
     verbs:
@@ -97,26 +97,26 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: agent-run-facade
+  name: mitos-facade
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: facade
 subjects:
   - kind: ServiceAccount
-    name: agent-run-facade
-    namespace: agent-run
+    name: mitos-facade
+    namespace: mitos
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: agent-run-facade
+  name: mitos-facade
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-run-facade
-  namespace: agent-run
+  name: mitos-facade
+  namespace: mitos
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: facade
 spec:
   # Single instance: leader election is off in cmd/facade for now (the facade is
@@ -124,24 +124,24 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: agent-run
+      app.kubernetes.io/name: mitos
       app.kubernetes.io/component: facade
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: agent-run
+        app.kubernetes.io/name: mitos
         app.kubernetes.io/component: facade
     spec:
-      serviceAccountName: agent-run-facade
+      serviceAccountName: mitos-facade
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: facade
-          image: ghcr.io/paperclipinc/sandbox-facade:latest
-          # --default-pool is the agentrun.dev pool a Sandbox binds to when it
-          # carries no agentrun.dev/pool bridge annotation. Set it to one of your
+          image: ghcr.io/paperclipinc/mitos-facade:latest
+          # --default-pool is the mitos.run pool a Sandbox binds to when it
+          # carries no mitos.run/pool bridge annotation. Set it to one of your
           # pools; a Sandbox with neither the annotation nor a default reports
           # NotReady with remediation text rather than creating an unbindable
           # claim.

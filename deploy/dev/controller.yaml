@@ -8,27 +8,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-run-controller
-  namespace: agent-run
+  name: mitos-controller
+  namespace: mitos
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: controller
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: agent-run
+      app.kubernetes.io/name: mitos
       app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: agent-run
+        app.kubernetes.io/name: mitos
         app.kubernetes.io/component: controller
     spec:
-      serviceAccountName: agent-run-controller
+      serviceAccountName: mitos-controller
       containers:
         - name: controller
-          image: agent-run-controller:ci
+          image: mitos-controller:ci
           imagePullPolicy: IfNotPresent
           args:
             - --metrics-bind-address=:8080
@@ -62,29 +62,29 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: agent-run-controller
-  namespace: agent-run
+  name: mitos-controller
+  namespace: mitos
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agent-run-controller
+  name: mitos-controller
 rules:
   # workspaces + workspacerevisions: the Workspace reconciler owns the revision
   # DAG, and the claim reconciler (W4 slice 2) reads a bound workspace's head for
   # hydrate (get) and creates a dehydrated revision on terminate (create). A
   # missing list/watch here silently stalls the manager (the slice-1 lesson), so
   # the dev mock overlay carries the same grants as the base ClusterRole.
-  - apiGroups: ["agentrun.dev"]
+  - apiGroups: ["mitos.run"]
     resources: ["sandboxtemplates", "sandboxpools", "sandboxclaims", "sandboxforks", "workspaces", "workspacerevisions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["agentrun.dev"]
+  - apiGroups: ["mitos.run"]
     resources: ["sandboxpools/status", "sandboxclaims/status", "sandboxforks/status", "workspaces/status", "workspacerevisions/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["agentrun.dev"]
+  - apiGroups: ["mitos.run"]
     resources: ["sandboxclaims/finalizers", "sandboxforks/finalizers"]
     verbs: ["update"]
-  - apiGroups: ["agentrun.dev"]
+  - apiGroups: ["mitos.run"]
     resources: ["sandboxpools/scale"]
     verbs: ["get", "update"]
   - apiGroups: [""]
@@ -109,12 +109,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: agent-run-controller
+  name: mitos-controller
 subjects:
   - kind: ServiceAccount
-    name: agent-run-controller
-    namespace: agent-run
+    name: mitos-controller
+    namespace: mitos
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: agent-run-controller
+  name: mitos-controller

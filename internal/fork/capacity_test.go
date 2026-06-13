@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/metering"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/metering"
 )
 
 func TestHostMemTotalBytes(t *testing.T) {

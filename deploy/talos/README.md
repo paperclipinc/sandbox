@@ -18,8 +18,8 @@ Firecracker requires hardware virtualization exposed to the OS as `/dev/kvm`.
 ## Files
 
 - `worker-kvm.yaml`: a patch over the generated worker config. Loads the KVM /
-  vsock / tun kernel modules, labels the node `agentrun.dev/kvm=true`, and
-  mounts a data partition at `/var/lib/agent-run`.
+  vsock / tun kernel modules, labels the node `mitos.run/kvm=true`, and
+  mounts a data partition at `/var/lib/mitos`.
 - `controlplane.yaml`: a tiny optional patch over the generated control-plane
   config (just a role label). A stock Talos control plane needs no KVM.
 
@@ -29,10 +29,10 @@ Firecracker requires hardware virtualization exposed to the OS as `/dev/kvm`.
   give Firecracker `/dev/kvm` (the vendor module for the absent CPU just fails
   to load); `vhost_vsock` is the host side of the guest-agent vsock transport;
   `tun` backs the per-sandbox tap devices forkd creates.
-- **Node label** (`machine.nodeLabels: agentrun.dev/kvm: "true"`): the forkd
+- **Node label** (`machine.nodeLabels: mitos.run/kvm: "true"`): the forkd
   DaemonSet in `deploy/daemon/daemonset.yaml` has `nodeSelector
-  agentrun.dev/kvm: "true"`, so forkd only schedules onto labeled KVM workers.
-- **Data partition** at `/var/lib/agent-run`: this is forkd's `--data-dir`.
+  mitos.run/kvm: "true"`, so forkd only schedules onto labeled KVM workers.
+- **Data partition** at `/var/lib/mitos`: this is forkd's `--data-dir`.
   Snapshots, rootfs images, and the jailer chroot base all live here and must
   share one filesystem so forkd can hard-link them into each per-VM chroot
   (forkd refuses to start if they straddle filesystems). On a Hetzner AX node

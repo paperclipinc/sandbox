@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,7 +23,7 @@ const forkdComponentLabel = "app.kubernetes.io/component"
 type ForkdDiscovery struct {
 	Client    client.Client
 	Registry  *NodeRegistry
-	Namespace string        // namespace forkd runs in, e.g. "agent-run"
+	Namespace string        // namespace forkd runs in, e.g. "mitos"
 	Interval  time.Duration // default 15s
 	GRPCPort  int           // default 9090
 	HTTPPort  int           // default 9091

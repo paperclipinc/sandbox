@@ -1,4 +1,4 @@
-// Public API for the agent-run TypeScript SDK.
+// Public API for the mitos TypeScript SDK.
 
 export type {
   ForkPolicy,

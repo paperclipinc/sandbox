@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/snapcompat"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // entropySize is the number of crypto/rand bytes generated per activation and

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/snapcompat"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/snapcompat"
 )
 
 // goodEnv is the host environment the test engine claims to run.

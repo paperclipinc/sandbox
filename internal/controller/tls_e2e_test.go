@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
-	"github.com/paperclipinc/sandbox/internal/pki"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
+	"github.com/paperclipinc/mitos/internal/pki"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -16,7 +16,7 @@ import (
 // client TLS configs, exactly what EnsurePKI materializes from Secrets.
 func newTestMTLSPair(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 	t.Helper()
-	ca, err := pki.NewCA("agent-run-test")
+	ca, err := pki.NewCA("mitos-test")
 	if err != nil {
 		t.Fatal(err)
 	}

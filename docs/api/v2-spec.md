@@ -1,4 +1,4 @@
-# paperclipinc/sandbox: API Specification v2
+# paperclipinc/mitos: API Specification v2
 
 Supersedes v1. Same engine, same load-bearing rule, re-weighted for the three personas in priority order: **the application developer** (adoption is won here), **the agent itself** (the genuinely new user of 2026), **the platform operator** (governance lives here). The Kubernetes layer remains the implementation substrate and the operator's interface; it is no longer the cover page.
 
@@ -14,9 +14,9 @@ Supersedes v1. Same engine, same load-bearing rule, re-weighted for the three pe
 
 ```bash
 # Local mode: kind + controller + a default pool, one command.
-curl -fsSL https://get.agentrun.dev | sh
-agentrun dev up                      # laptop needs /dev/kvm; falls back to slow-mode with a warning
-agentrun run python -c "print('hello')"   # first exec. Done.
+curl -fsSL https://get.mitos.run | sh
+mitos dev up                      # laptop needs /dev/kvm; falls back to slow-mode with a warning
+mitos run python -c "print('hello')"   # first exec. Done.
 ```
 
 Against a real cluster, the same CLI targets it via kubeconfig. There is no step where a new user writes YAML, names a pool, or learns what a husk is. Defaults are lazy: the first `sandbox("python")` against a cluster with no matching pool creates a sensible default pool (admin-disableable) rather than erroring.
@@ -26,7 +26,7 @@ Against a real cluster, the same CLI targets it via kubeconfig. There is no step
 The common path is three lines. Fork and lineage are the upgrade path, not a separate paradigm. Every SDK call maps 1:1 to a declarative object operation or a runtime RPC; no hidden magic; debugging the SDK is debugging the system.
 
 ```python
-from agentrun import AgentRun
+from mitos import AgentRun
 
 c = AgentRun()                                   # local dev, kubeconfig, or in-cluster; autodetected
 
@@ -60,7 +60,7 @@ term = sb.pty(); term.send("vim notes.md\n")
 ```
 
 ```typescript
-import { AgentRun } from 'agentrun';
+import { AgentRun } from 'mitos';
 const c = new AgentRun();
 const sb = await c.sandbox('node', { workspace: 'proj-x' });
 const { stdout } = await sb.exec('node build.js');
@@ -68,16 +68,16 @@ const forks = await sb.fork(2);
 const rev = await sb.terminate({ outputs: ['/workspace/dist'] });
 ```
 
-**Compatibility shims** (separate packages, same engine): `agentrun-e2b` (drop-in `Sandbox` class) and an OpenAI code-interpreter-shaped HTTP endpoint, so LangChain/LlamaIndex/Vercel-AI users swap one import.
+**Compatibility shims** (separate packages, same engine): `mitos-e2b` (drop-in `Sandbox` class) and an OpenAI code-interpreter-shaped HTTP endpoint, so LangChain/LlamaIndex/Vercel-AI users swap one import.
 
 ### 1.3 CLI verbs (flyctl-grade; kubectl never required)
 
 ```
-agentrun run <cmd>                  one-shot: sandbox → exec → terminate
-agentrun sandbox create|ls|exec|fork|terminate|top|ps|logs
-agentrun ws log|diff|revert|branch <workspace>
-agentrun pool ls|create|refresh     (operator-leaning, still available)
-agentrun dev up|down                local environment
+mitos run <cmd>                  one-shot: sandbox → exec → terminate
+mitos sandbox create|ls|exec|fork|terminate|top|ps|logs
+mitos ws log|diff|revert|branch <workspace>
+mitos pool ls|create|refresh     (operator-leaning, still available)
+mitos dev up|down                local environment
 ```
 
 Idempotency: every creating CLI/SDK call accepts/derives an idempotency key; agents and scripts retry aggressively and must never double-create.
@@ -90,15 +90,15 @@ Agents are first-class API consumers. Three commitments follow.
 
 ### 2.1 MCP server
 
-`agentrun-mcp` exposes the surface as tools, scoped by the token it is launched with: `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_fork`, `sandbox_checkpoint`, `workspace_log`, `workspace_diff`, `workspace_revert`. Any MCP-speaking agent integrates with zero SDK work. Tool schemas are published and versioned; the server advertises its capability budget (§3) so orchestrators can reason about what their agents may do.
+`mitos-mcp` exposes the surface as tools, scoped by the token it is launched with: `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_fork`, `sandbox_checkpoint`, `workspace_log`, `workspace_diff`, `workspace_revert`. Any MCP-speaking agent integrates with zero SDK work. Tool schemas are published and versioned; the server advertises its capability budget (§3) so orchestrators can reason about what their agents may do.
 
 ### 2.2 In-guest self-service endpoint
 
-Inside every sandbox: `AGENTRUN_SOCKET=/run/agentrun.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
+Inside every sandbox: `AGENTRUN_SOCKET=/run/mitos.sock` (vsock-backed), speaking the same runtime protocol with the sandbox's own attenuated token. The agent can checkpoint itself before a risky operation, fork itself for tree search, watch its own budget, and read its own vitals, without any network egress and without an external orchestrator round-trip.
 
 ```python
 # from inside the sandbox: e.g. an agent doing best-of-N over its own state
-import agentrun.guest as me
+import mitos.guest as me
 ckpt = me.checkpoint(label="before-refactor")
 forks = me.fork(3)                       # budget-gated; see §3
 ...
@@ -172,14 +172,14 @@ Still absent on purpose: `Delete` of *other* sandboxes, pool mutation, workspace
 
 ---
 
-## 5. The declarative layer (three nouns, `agentrun.dev/v1alpha1`)
+## 5. The declarative layer (three nouns, `mitos.run/v1alpha1`)
 
 The operator's interface and the substrate everything above compiles to. **Pools prepare, Sandboxes run, Workspaces persist.** (v1's `SandboxTemplate` is inlined into the pool with an optional `templateRef` for reuse, the Deployment-embeds-PodSpec pattern; v1's `SandboxFork` is folded into `Sandbox` via `source.fromSandbox` + `replicas`, making fork and lineage the same concept, which in the engine they are.)
 
 ### SandboxPool
 
 ```yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxPool
 metadata: { name: python-agent }
 spec:
@@ -201,7 +201,7 @@ status:
 ### Sandbox
 
 ```yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: Sandbox
 metadata: { name: heartbeat-7f3a }
 spec:
@@ -239,7 +239,7 @@ status:
 ### Workspace
 
 ```yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: Workspace
 metadata: { name: proj-x }
 spec:
@@ -259,10 +259,10 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 ## 6. Integration surfaces
 
-- **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `agentrun.dev/pool` only.
+- **agents.x-k8s.io facade**: the SIG kinds accepted verbatim, fulfilled by this engine (podTemplate → husk pods; pause/resume → memory snapshot/restore); vendored upstream e2e in CI; bridge annotation `mitos.run/pool` only.
 - **Paperclip provider** (`@paperclipinc/plugin-sandbox`): provision→Sandbox, install-commands→pool init, lease→ttl/idle, teardown→terminate-with-outputs; honors `executionMode` enforcement.
 - **kubectl plugin** (operator persona): `kubectl sandbox ps|top|logs|exec|tree <name>`; `tree` renders the fork/lineage DAG.
-- **Eventing**: CloudEvents (`dev.agentrun.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
+- **Eventing**: CloudEvents (`dev.mitos.workspace.revision.created`, `…sandbox.phase.changed`) over webhook/NATS for indexers (reference consumer: the turbovec-based CI indexer), billing, and dashboards; mirrored as Kubernetes Events on-cluster.
 
 ---
 

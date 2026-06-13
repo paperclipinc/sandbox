@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/pki"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/pki"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -29,7 +29,7 @@ import (
 // interceptor installed.
 func newAuthzPKI(t *testing.T) (*pki.CA, string) {
 	t.Helper()
-	ca, err := pki.NewCA("agent-run")
+	ca, err := pki.NewCA("mitos")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +161,8 @@ func issueImposterLeaf(t *testing.T, ca *pki.CA) (certPEM, keyPEM []byte) {
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(42),
-		Subject:               pkix.Name{CommonName: "imposter.agent-run"},
-		DNSNames:              []string{"imposter.agent-run"},
+		Subject:               pkix.Name{CommonName: "imposter.mitos"},
+		DNSNames:              []string{"imposter.mitos"},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,

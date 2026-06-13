@@ -27,8 +27,8 @@ func TestNewRevisionCreatedEnvelope(t *testing.T) {
 	if e.Type != TypeRevisionCreated {
 		t.Errorf("type = %q, want %q", e.Type, TypeRevisionCreated)
 	}
-	if e.Source != "agentrun.dev/controller" {
-		t.Errorf("source = %q, want agentrun.dev/controller", e.Source)
+	if e.Source != "mitos.run/controller" {
+		t.Errorf("source = %q, want mitos.run/controller", e.Source)
 	}
 	if e.Subject != "ns/ws-abc" {
 		t.Errorf("subject = %q", e.Subject)

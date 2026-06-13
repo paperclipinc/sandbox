@@ -1,4 +1,4 @@
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: python-agent
@@ -31,7 +31,7 @@ spec:
       - "api.anthropic.com:443"
       - "pypi.org:443"
 ---
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxPool
 metadata:
   name: python-agent-pool

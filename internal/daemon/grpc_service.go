@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/observability"
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/observability"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
@@ -14,7 +14,7 @@ import (
 )
 
 // tracer is the forkd component tracer; no-op unless tracing is configured.
-var tracer = observability.Tracer("agentrun-forkd")
+var tracer = observability.Tracer("mitos-forkd")
 
 // grpcService implements forkdpb.ForkDaemonServer over Server.
 // Exec returns Unimplemented with a pointer to the HTTP sandbox API on the

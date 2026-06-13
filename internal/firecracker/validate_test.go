@@ -28,16 +28,16 @@ func TestValidateVMID(t *testing.T) {
 }
 
 func TestGuardExportPath(t *testing.T) {
-	root := "/var/lib/agent-run"
+	root := "/var/lib/mitos"
 	cases := []struct {
 		path string
 		ok   bool
 	}{
-		{"/var/lib/agent-run", true},
-		{"/var/lib/agent-run/templates/sb-1/snapshot/mem", true},
-		{"/var/lib/agent-run/../etc/passwd", false},
+		{"/var/lib/mitos", true},
+		{"/var/lib/mitos/templates/sb-1/snapshot/mem", true},
+		{"/var/lib/mitos/../etc/passwd", false},
 		{"/etc/passwd", false},
-		{"/var/lib/agent-run-evil/mem", false},
+		{"/var/lib/mitos-evil/mem", false},
 	}
 	for _, tc := range cases {
 		err := guardExportPath(tc.path, root)

@@ -11,12 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
-	"github.com/paperclipinc/sandbox/internal/volume"
-	"github.com/paperclipinc/sandbox/internal/vsock"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/volume"
+	"github.com/paperclipinc/mitos/internal/vsock"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -28,28 +28,28 @@ import (
 
 var (
 	forkDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "agentrun_fork_duration_seconds",
+		Name:    "mitos_fork_duration_seconds",
 		Help:    "Time to fork a sandbox from snapshot",
 		Buckets: []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1},
 	})
 	activeSandboxes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentrun_active_sandboxes",
+		Name: "mitos_active_sandboxes",
 		Help: "Number of currently running sandboxes on this node",
 	})
 	memoryShared = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentrun_memory_shared_bytes",
+		Name: "mitos_memory_shared_bytes",
 		Help: "CoW-aware shared memory: each template's shared page set counted once",
 	})
 	memoryUnique = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentrun_memory_unique_bytes",
+		Name: "mitos_memory_unique_bytes",
 		Help: "Per-fork unique memory (dirty pages) summed over all sandboxes",
 	})
 	cowMemorySavings = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentrun_cow_memory_savings_bytes",
+		Name: "mitos_cow_memory_savings_bytes",
 		Help: "Memory the CoW model reveals is not consumed per-fork (naive minus CoW-aware)",
 	})
 	meteredDisk = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "agentrun_metered_disk_bytes",
+		Name: "mitos_metered_disk_bytes",
 		Help: "CoW-aware metered backing storage: template volume seeds counted once",
 	})
 )

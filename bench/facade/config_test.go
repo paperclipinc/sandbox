@@ -73,7 +73,7 @@ func TestSandboxReadyPredicate(t *testing.T) {
 }
 
 // TestSandboxSpecBound: the Sandbox the harness applies carries the
-// agentrun.dev/pool bridge annotation so the facade binds it to the configured
+// mitos.run/pool bridge annotation so the facade binds it to the configured
 // pool (not the facade default).
 func TestSandboxSpecBound(t *testing.T) {
 	h := &harness{cfg: config{name: "n", namespace: "ns", pool: "p", image: "busybox:stable"}}

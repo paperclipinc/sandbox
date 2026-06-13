@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"

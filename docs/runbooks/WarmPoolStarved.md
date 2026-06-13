@@ -2,9 +2,9 @@
 
 ## Signal
 
-`min by (pool) (agentrun_pool_ready_snapshots) < 1` sustained for 10m.
+`min by (pool) (mitos_pool_ready_snapshots) < 1` sustained for 10m.
 
-`agentrun_pool_ready_snapshots{pool}` is a controller gauge that mirrors
+`mitos_pool_ready_snapshots{pool}` is a controller gauge that mirrors
 `SandboxPool.Status.ReadySnapshots`, set each pool reconcile. The desired-vs-ready
 signal: a healthy pool holds this at its desired warm count. Near zero means the
 warm pool is starved and the next claim into that pool cold-forks or pends. The
@@ -27,9 +27,9 @@ count or a low-water mark.
   pending/failed reason. See `docs/conditions.md`.
 - `kubectl sandbox ps` / `kubectl sandbox top` to see whether holder nodes are
   present and have headroom.
-- Metrics: `agentrun_pool_ready_snapshots{pool}` (the gauge driving this alert),
-  `agentrun_claim_pending_total` (are claims pending as a result?),
-  `agentrun_claim_errors_total{reason="fork"}` (are snapshot builds erroring?).
+- Metrics: `mitos_pool_ready_snapshots{pool}` (the gauge driving this alert),
+  `mitos_claim_pending_total` (are claims pending as a result?),
+  `mitos_claim_errors_total{reason="fork"}` (are snapshot builds erroring?).
 
 ## Remediation
 

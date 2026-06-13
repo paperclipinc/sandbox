@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
 )
 
 // containerManager is the narrow seam the engine uses for per-scope encrypted

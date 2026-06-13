@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/facade"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/facade"
 )
 
 var (
@@ -35,7 +35,7 @@ var (
 
 // TestMain stands up an envtest apiserver with BOTH the upstream
 // agents.x-k8s.io Sandbox CRD (vendored under third_party/agent-sandbox) and
-// our agentrun.dev CRDs installed, then runs the facade reconciler against it.
+// our mitos.run CRDs installed, then runs the facade reconciler against it.
 // This proves the Sandbox -> husk run-path lifecycle end to end.
 func TestMain(m *testing.M) {
 	testCtx, cancel = context.WithCancel(context.Background())
@@ -57,7 +57,7 @@ func TestMain(m *testing.M) {
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
-			// Our agentrun.dev CRDs (the SandboxClaim the facade creates).
+			// Our mitos.run CRDs (the SandboxClaim the facade creates).
 			filepath.Join("..", "..", "deploy", "crds"),
 			// The vendored upstream agents.x-k8s.io Sandbox CRD.
 			filepath.Join("..", "..", "third_party", "agent-sandbox", "crds"),

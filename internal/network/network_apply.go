@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/netconf"
 )
 
 // runner executes one host command with the given argv and optional stdin. It

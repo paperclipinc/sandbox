@@ -54,7 +54,7 @@ unsupported and returns an error rather than producing a colliding VM.
 
 ## nftables dispatch model
 
-All sandboxes on a node share ONE `inet` table (`agentrun_egress`) so that
+All sandboxes on a node share ONE `inet` table (`mitos_egress`) so that
 adding or removing one sandbox never disturbs another's traffic. The shape:
 
 - **One shared table** with **one base chain** hooked on the `forward` path,

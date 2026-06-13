@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/netconf"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/netconf"
 )
 
 type recordedCall struct {

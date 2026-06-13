@@ -13,7 +13,7 @@ set -euo pipefail
 #   /usr/bin/python3   → Python 3 (optional, for python template)
 #   /workspace/        → agent working directory
 
-OUTPUT="${1:-/tmp/agent-run-rootfs.ext4}"
+OUTPUT="${1:-/tmp/mitos-rootfs.ext4}"
 SIZE_MB="${2:-512}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

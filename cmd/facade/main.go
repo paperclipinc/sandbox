@@ -5,8 +5,8 @@
 // engine.
 //
 // The facade watches upstream Sandbox objects and maps each onto our
-// husk-backed run path (a SandboxClaim in our agentrun.dev group bound to one
-// of our pools via the agentrun.dev/pool bridge annotation), mirroring the
+// husk-backed run path (a SandboxClaim in our mitos.run group bound to one
+// of our pools via the mitos.run/pool bridge annotation), mirroring the
 // claim's readiness back into the Sandbox status. See
 // docs/adr/0001-facade-and-naming.md and docs/facade-conformance.md.
 package main
@@ -26,8 +26,8 @@ import (
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/facade"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/facade"
 )
 
 var scheme = runtime.NewScheme()
@@ -35,7 +35,7 @@ var scheme = runtime.NewScheme()
 func init() {
 	// Register the upstream agents.x-k8s.io scheme (the core Sandbox we watch),
 	// the upstream extensions.agents.x-k8s.io scheme (the SandboxTemplate /
-	// SandboxWarmPool / SandboxClaim extension kinds we map), and our agentrun.dev
+	// SandboxWarmPool / SandboxClaim extension kinds we map), and our mitos.run
 	// scheme (the template/pool/claim objects we create), plus core/v1.
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
@@ -51,7 +51,7 @@ func main() {
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8083", "The address the probe endpoint binds to.")
-	flag.StringVar(&defaultPool, "default-pool", "", "agentrun.dev pool an upstream Sandbox binds to when it carries no agentrun.dev/pool bridge annotation. Required to fulfil annotation-less Sandboxes; a Sandbox with neither the annotation nor a default reports NotReady with remediation text.")
+	flag.StringVar(&defaultPool, "default-pool", "", "mitos.run pool an upstream Sandbox binds to when it carries no mitos.run/pool bridge annotation. Required to fulfil annotation-less Sandboxes; a Sandbox with neither the annotation nor a default reports NotReady with remediation text.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "DNS cluster domain used to derive the upstream Sandbox status.serviceFQDN (<name>.<namespace>.svc.<domain>). Empty disables the derived FQDN.")
 	flag.Parse()
 
@@ -83,7 +83,7 @@ func main() {
 	}
 
 	// The extension reconcilers map the upstream extensions.agents.x-k8s.io kinds
-	// onto our agentrun.dev objects: their SandboxTemplate to our template and
+	// onto our mitos.run objects: their SandboxTemplate to our template and
 	// their SandboxWarmPool to our pool. They run in the same opt-in facade
 	// manager as the core Sandbox reconciler.
 	if err := (&facade.SandboxTemplateReconciler{

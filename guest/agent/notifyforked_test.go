@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // TestMountVolumesEmpty proves an empty mount table mounts nothing.

@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/husk"
-	"github.com/paperclipinc/sandbox/internal/observability"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/husk"
+	"github.com/paperclipinc/mitos/internal/observability"
+	"github.com/paperclipinc/mitos/internal/vsock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +28,7 @@ import (
 )
 
 // tracer is the controller component tracer; no-op unless tracing is configured.
-var tracer = observability.Tracer("agentrun-controller")
+var tracer = observability.Tracer("mitos-controller")
 
 // DefaultMaxPendingDuration bounds how long a claim may stay Pending for lack of
 // node capacity before the reconciler gives up and fails it with an actionable
@@ -41,7 +41,7 @@ const DefaultMaxPendingDuration = 5 * time.Minute
 // any unrelated condition churn, whereas this annotation only changes when the
 // claim enters or leaves the capacity-pending state. Cleared on successful
 // placement so a later capacity shortage starts a fresh clock.
-const pendingSinceAnnotation = "agentrun.dev/capacity-pending-since"
+const pendingSinceAnnotation = "mitos.run/capacity-pending-since"
 
 // capacityPendingRequeue is the backoff between capacity-pending retries: long
 // enough not to hot-loop a full cluster, short enough to place a claim promptly
@@ -177,12 +177,12 @@ func (r *SandboxClaimReconciler) maxPendingDuration() time.Duration {
 // SandboxClaim ownership: get/list/watch to reconcile, update to write the
 // terminate finalizer, delete for the garbage collector's TTL sweep of
 // finished claims. status writes phase, conditions, and FinishedAt.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxclaims/finalizers,verbs=update
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxclaims/finalizers,verbs=update
 // SandboxTemplate and SandboxPool are read-only inputs to claim placement.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxpools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxpools,verbs=get;list;watch
 // Secrets: get/list to read mounted secrets referenced by a sandbox and to
 // reconcile the per-sandbox token Secret; create/update to mint and heal that
 // token Secret (and the controller's PKI Secrets, see EnsurePKI); delete to
@@ -586,7 +586,7 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		activate = ActivateHuskPod
 	}
 
-	// Claim the dormant pod BEFORE activating it: stamp the agentrun.dev/claim
+	// Claim the dormant pod BEFORE activating it: stamp the mitos.run/claim
 	// label under an OPTIMISTIC LOCK. This is the mutual-exclusion commit. Two
 	// concurrent claims may both select the same dormant pod, but the
 	// resourceVersion-guarded patch lets exactly one win; the loser gets a 409
@@ -984,7 +984,7 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.For(&v1alpha1.SandboxClaim{})
 	}
 	// In husk mode, watch husk pods and map a pod event to the claim named in its
-	// agentrun.dev/claim label. A husk pod delete (drain, eviction, kubectl
+	// mitos.run/claim label. A husk pod delete (drain, eviction, kubectl
 	// delete) then promptly reconciles the active claim, which re-pends per the
 	// pool's DrainPolicy instead of waiting for the claim's own periodic requeue.
 	// The mapped reconcile re-Gets the claim and routes through checkHuskPodLost,

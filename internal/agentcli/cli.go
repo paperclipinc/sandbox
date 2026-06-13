@@ -6,18 +6,18 @@ import (
 	"io"
 )
 
-const usage = `agentrun: snapshot-fork sandboxes for AI agents
+const usage = `mitos: snapshot-fork sandboxes for AI agents
 
 Usage:
-  agentrun run <command> [--pool P] [--timeout N]   create a sandbox, run the
+  mitos run <command> [--pool P] [--timeout N]   create a sandbox, run the
                                                     command, terminate, and exit
                                                     with the command's exit code
-  agentrun sandbox create [--pool P]                create a sandbox, print its id
-  agentrun sandbox ls [-n namespace] [-A]           list sandboxes
-  agentrun sandbox exec <id> <command...>           run a command in a sandbox
-  agentrun sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
-  agentrun sandbox terminate <id>                   destroy a sandbox
-  agentrun dev up | down                            bring a local kind dev
+  mitos sandbox create [--pool P]                create a sandbox, print its id
+  mitos sandbox ls [-n namespace] [-A]           list sandboxes
+  mitos sandbox exec <id> <command...>           run a command in a sandbox
+  mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
+  mitos sandbox terminate <id>                   destroy a sandbox
+  mitos dev up | down                            bring a local kind dev
                                                     cluster up or down
 
 Flags:
@@ -38,7 +38,7 @@ Flags:
 //	1  a backend or runtime error
 //
 // For run, the exit code is the executed command's exit code so callers can
-// chain agentrun in shell pipelines.
+// chain mitos in shell pipelines.
 func Run(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(errw, usage)

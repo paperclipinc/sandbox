@@ -1,4 +1,4 @@
-# Grafana dashboard for the agentrun.dev control plane, wrapped in a ConfigMap.
+# Grafana dashboard for the mitos.run control plane, wrapped in a ConfigMap.
 #
 # The grafana_dashboard: "1" label is the Grafana sidecar convention: a Grafana
 # deployment running the kiwigrid/k8s-sidecar (the kube-prometheus-stack default)
@@ -12,13 +12,13 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: agentrun-grafana-dashboard
+  name: mitos-grafana-dashboard
   labels:
     grafana_dashboard: "1"
-    app.kubernetes.io/name: agentrun
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: monitoring
 data:
-  agentrun-control-plane.json: |-
+  mitos-control-plane.json: |-
     {
       "annotations": {
         "list": [
@@ -44,7 +44,7 @@ data:
       "refresh": "30s",
       "schemaVersion": 39,
       "tags": [
-        "agentrun",
+        "mitos",
         "sandbox"
       ],
       "templating": {
@@ -66,8 +66,8 @@ data:
       },
       "timepicker": {},
       "timezone": "",
-      "title": "agentrun control plane",
-      "uid": "agentrun-control-plane",
+      "title": "mitos control plane",
+      "uid": "mitos-control-plane",
       "version": 1,
       "weekStart": "",
       "panels": [
@@ -102,7 +102,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "histogram_quantile(0.50, sum by (le) (rate(agentrun_fork_duration_seconds_bucket[5m])))",
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(mitos_fork_duration_seconds_bucket[5m])))",
               "legendFormat": "p50",
               "refId": "A"
             },
@@ -111,7 +111,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "histogram_quantile(0.99, sum by (le) (rate(agentrun_fork_duration_seconds_bucket[5m])))",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(mitos_fork_duration_seconds_bucket[5m])))",
               "legendFormat": "p99",
               "refId": "B"
             }
@@ -148,7 +148,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(agentrun_active_sandboxes)",
+              "expr": "sum(mitos_active_sandboxes)",
               "legendFormat": "active sandboxes",
               "refId": "A"
             }
@@ -185,7 +185,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(agentrun_memory_shared_bytes)",
+              "expr": "sum(mitos_memory_shared_bytes)",
               "legendFormat": "shared (counted once)",
               "refId": "A"
             },
@@ -194,7 +194,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(agentrun_memory_unique_bytes)",
+              "expr": "sum(mitos_memory_unique_bytes)",
               "legendFormat": "unique (per-fork dirty)",
               "refId": "B"
             },
@@ -203,7 +203,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(agentrun_cow_memory_savings_bytes)",
+              "expr": "sum(mitos_cow_memory_savings_bytes)",
               "legendFormat": "CoW savings",
               "refId": "C"
             }
@@ -240,7 +240,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(agentrun_metered_disk_bytes)",
+              "expr": "sum(mitos_metered_disk_bytes)",
               "legendFormat": "metered disk",
               "refId": "A"
             }
@@ -253,7 +253,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Rate of claim requeues for no node with a ready snapshot (capacity exhaustion signal). agentrun_claim_pending_total is a counter; this panel shows its rate.",
+          "description": "Rate of claim requeues for no node with a ready snapshot (capacity exhaustion signal). mitos_claim_pending_total is a counter; this panel shows its rate.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -277,7 +277,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(rate(agentrun_claim_pending_total[5m]))",
+              "expr": "sum(rate(mitos_claim_pending_total[5m]))",
               "legendFormat": "pending requeues/s",
               "refId": "A"
             }
@@ -290,7 +290,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Terminal claim failures split by pool and coarse reason (fork, secret, volume, token). agentrun_claim_errors_total is a counter; this panel shows its rate.",
+          "description": "Terminal claim failures split by pool and coarse reason (fork, secret, volume, token). mitos_claim_errors_total is a counter; this panel shows its rate.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -314,7 +314,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum by (pool, reason) (rate(agentrun_claim_errors_total[5m]))",
+              "expr": "sum by (pool, reason) (rate(mitos_claim_errors_total[5m]))",
               "legendFormat": "{{pool}} / {{reason}}",
               "refId": "A"
             }
@@ -351,7 +351,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "agentrun_pool_ready_snapshots",
+              "expr": "mitos_pool_ready_snapshots",
               "legendFormat": "{{pool}}",
               "refId": "A"
             }
@@ -364,7 +364,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Rate of orphan sandbox VMs reaped by the garbage collector. A sustained nonzero rate means VMs are leaking and being cleaned up. agentrun_orphan_sweeps_total is a counter; this panel shows its rate.",
+          "description": "Rate of orphan sandbox VMs reaped by the garbage collector. A sustained nonzero rate means VMs are leaking and being cleaned up. mitos_orphan_sweeps_total is a counter; this panel shows its rate.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -388,7 +388,7 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "sum(rate(agentrun_orphan_sweeps_total[15m]))",
+              "expr": "sum(rate(mitos_orphan_sweeps_total[15m]))",
               "legendFormat": "orphan sweeps/s",
               "refId": "A"
             }

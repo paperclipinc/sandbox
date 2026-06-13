@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/paperclipinc/sandbox/blob/main/SECURITY.md
+    url: https://github.com/paperclipinc/mitos/blob/main/SECURITY.md
     about: Do not file public issues for vulnerabilities; use private reporting as described in SECURITY.md.

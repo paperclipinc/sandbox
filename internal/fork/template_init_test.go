@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/firecracker"
 )
 
 // newTestEngine builds an Engine without KVM by populating it directly and

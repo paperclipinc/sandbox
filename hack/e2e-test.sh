@@ -30,7 +30,7 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      agentrun.dev/kvm: "true"
+      mitos.run/kvm: "true"
 EOF
 
 log "Installing CRDs"
@@ -42,17 +42,17 @@ sleep 3
 # --- Test 1: CRDs are installed ---
 log "Test 1: CRDs installed"
 for crd in sandboxtemplates sandboxpools sandboxclaims sandboxforks; do
-    if kubectl get crd "${crd}.agentrun.dev" &>/dev/null; then
-        pass "CRD ${crd}.agentrun.dev exists"
+    if kubectl get crd "${crd}.mitos.run" &>/dev/null; then
+        pass "CRD ${crd}.mitos.run exists"
     else
-        fail "CRD ${crd}.agentrun.dev not found"
+        fail "CRD ${crd}.mitos.run not found"
     fi
 done
 
 # --- Test 2: Create SandboxTemplate ---
 log "Test 2: Create SandboxTemplate"
 cat <<EOF | kubectl apply -f -
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: test-python
@@ -83,7 +83,7 @@ fi
 # --- Test 3: Create SandboxPool ---
 log "Test 3: Create SandboxPool"
 cat <<EOF | kubectl apply -f -
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxPool
 metadata:
   name: test-pool
@@ -112,7 +112,7 @@ fi
 # --- Test 4: Create SandboxClaim ---
 log "Test 4: Create SandboxClaim"
 cat <<EOF | kubectl apply -f -
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim
 metadata:
   name: test-claim
@@ -142,7 +142,7 @@ fi
 # --- Test 5: Create SandboxFork ---
 log "Test 5: Create SandboxFork"
 cat <<EOF | kubectl apply -f -
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxFork
 metadata:
   name: test-fork

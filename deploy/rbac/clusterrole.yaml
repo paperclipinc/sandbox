@@ -5,9 +5,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agent-run-controller
+  name: mitos-controller
   labels:
-    app.kubernetes.io/name: agent-run
+    app.kubernetes.io/name: mitos
     app.kubernetes.io/component: controller
 rules:
   # The owned CRDs. The reconcilers read/watch them and write progress; the
@@ -21,7 +21,7 @@ rules:
   # hydrate) and creates workspacerevisions (create, to commit a dehydrated
   # revision on terminate); both verbs are already in the combined rule below.
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims
       - sandboxforks
@@ -38,7 +38,7 @@ rules:
       - watch
   # SandboxTemplate is a read-only input to pool/claim/fork placement.
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxtemplates
     verbs:
@@ -48,7 +48,7 @@ rules:
   # Adding or removing the terminate finalizer touches the finalizers
   # subresource, which some apiservers gate separately from the parent update.
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims/finalizers
       - sandboxforks/finalizers
@@ -61,7 +61,7 @@ rules:
   # diffSummary and gitPushes on a revision status it created on terminate; the
   # update verb on workspacerevisions/status is already covered here.
   - apiGroups:
-      - agentrun.dev
+      - mitos.run
     resources:
       - sandboxclaims/status
       - sandboxforks/status
@@ -90,8 +90,8 @@ rules:
       - watch
   # Secrets: get/list/watch to read sandbox-referenced mounted Secrets and to
   # reconcile the per-sandbox token Secret; create/update to mint and heal that
-  # token Secret and the control plane PKI Secrets (EnsurePKI: agent-run-ca,
-  # agent-run-forkd-tls, agent-run-controller-tls). Token and CA-key VALUES are
+  # token Secret and the control plane PKI Secrets (EnsurePKI: mitos-ca,
+  # mitos-forkd-tls, mitos-controller-tls). Token and CA-key VALUES are
   # never logged. delete crypto-shreds a template's at-rest encryption key
   # Secret on teardown (DeleteEncKey); owned Secrets are otherwise reaped by
   # owner-reference GC.

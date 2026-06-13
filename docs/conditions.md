@@ -1,7 +1,7 @@
 # Conditions and reason-code catalogue
 
 This is the NORMATIVE catalogue of the typed conditions and their reason codes
-across the agentrun.dev CRDs. It is a document, not a wiki page: a reason code
+across the mitos.run CRDs. It is a document, not a wiki page: a reason code
 is part of the API contract, and a change here is an API change. Tooling, the
 SDK, and dashboards key off these reasons; do not rename one without a
 deprecation note.
@@ -11,7 +11,7 @@ Every reconciler sets a `Ready` condition (type `Ready`) with `status`
 and one of the reason codes below. Condition `message` is human/LLM-legible and
 carries remediation; it is not part of the contract and may change.
 
-## Workspace (`agentrun.dev/v1alpha1`)
+## Workspace (`mitos.run/v1alpha1`)
 
 Condition type `Ready`. The reconciler computes `status.head` (the latest
 committed revision, ordered by creationTimestamp then name),
@@ -24,7 +24,7 @@ head pairs with a memory snapshot).
 | `WorkspacePending` | False | No committed revision yet (the workspace has no head). |
 | `WorkspaceDegraded` | False | A revision has a broken `fromWorkspaceRevision` lineage edge (a parent that does not resolve to a revision in the same workspace). |
 
-## WorkspaceRevision (`agentrun.dev/v1alpha1`)
+## WorkspaceRevision (`mitos.run/v1alpha1`)
 
 Condition type `Ready`, mirrored by `status.phase` (`Pending`/`Committed`). A
 revision commits when its `contentManifest` is a valid content-addressed digest;
@@ -35,7 +35,7 @@ once committed it is immutable (single-writer-per-revision).
 | `RevisionCommitted` | True | `Committed` | `contentManifest` is a valid content-addressed digest; the revision is frozen. |
 | `RevisionPending` | False | `Pending` | Awaiting a valid `contentManifest` from dehydrate, or the revision's lineage edge does not resolve. |
 
-## SandboxClaim, SandboxPool, SandboxFork (`agentrun.dev/v1alpha1`)
+## SandboxClaim, SandboxPool, SandboxFork (`mitos.run/v1alpha1`)
 
 Existing reason codes, recorded here so the catalogue is complete. See the
 respective reconcilers in `internal/controller` for the precise emission points.

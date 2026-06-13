@@ -1,9 +1,9 @@
 // Package deviceplugin implements a Kubernetes device plugin that advertises
-// the KVM device (agentrun.dev/kvm) to the kubelet and injects /dev/kvm (and
+// the KVM device (mitos.run/kvm) to the kubelet and injects /dev/kvm (and
 // /dev/net/tun) into containers that request it.
 //
 // The point of the plugin is to give husk pods access to /dev/kvm WITHOUT
-// running privileged: true. A pod requests the resource (agentrun.dev/kvm: 1)
+// running privileged: true. A pod requests the resource (mitos.run/kvm: 1)
 // like any other extended resource; the scheduler only places it on a node
 // whose plugin advertised healthy capacity (scheduler truth: a node with no
 // /dev/kvm advertises zero and never gets the pod), and the plugin injects the
@@ -29,7 +29,7 @@ type Plugin struct {
 	v1beta1.UnimplementedDevicePluginServer
 
 	// resourceName is the extended resource the plugin advertises, e.g.
-	// agentrun.dev/kvm. Pods request it under spec.containers[].resources.
+	// mitos.run/kvm. Pods request it under spec.containers[].resources.
 	resourceName string
 	// deviceCount is how many synthetic slots to advertise when KVM is present.
 	// /dev/kvm is shareable, so the count is a soft concurrency cap, not a count

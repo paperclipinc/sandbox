@@ -13,7 +13,7 @@ over the content-addressed store.
 A `SandboxClaim` opts into workspace state with `spec.workspaceRef`:
 
 ```yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim
 metadata:
   name: agent-session-7
@@ -105,7 +105,7 @@ the new revision. A claim narrows and enriches that capture with
 `spec.outputs`, matching the v2-spec `onTerminate.outputs` shape:
 
 ```yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim
 metadata:
   name: agent-session-7
@@ -205,7 +205,7 @@ OPEN (later W4 slices):
 - A real external rendezvous server and its credentials (a referenced Secret,
   principal-bound); this slice proves the push against a local bare repo with no
   auth. There is no auto-merge by design: git is the merge layer.
-- The SDK/CLI `terminate(outputs=...)` surface and the `agentrun ws
+- The SDK/CLI `terminate(outputs=...)` surface and the `mitos ws
   log|diff|revert|branch` verbs (a separate workstream surface).
 - The CloudEvents revision change feed and the memory-snapshot pairing that
   produces a resumable head from a real checkpoint (slice 4).

@@ -60,7 +60,7 @@ jobs:
 
       - name: Download kernel and rootfs
         run: |
-          mkdir -p /tmp/agent-run-test
+          mkdir -p /tmp/mitos-test
           ARCH=$(uname -m)
 
           # Determine CI version from latest Firecracker release
@@ -72,7 +72,7 @@ jobs:
             | grep -oP "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]+" \
             | sort -V | tail -1)
           echo "Downloading kernel: $KERNEL_KEY"
-          curl -fsSL -o /tmp/agent-run-test/vmlinux \
+          curl -fsSL -o /tmp/mitos-test/vmlinux \
             "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
 
           # Find latest rootfs in S3
@@ -83,22 +83,22 @@ jobs:
 
           # If squashfs, convert to ext4; if ext4, use directly
           if echo "$ROOTFS_KEY" | grep -q squashfs; then
-            curl -fsSL -o /tmp/agent-run-test/rootfs.squashfs \
+            curl -fsSL -o /tmp/mitos-test/rootfs.squashfs \
               "https://s3.amazonaws.com/spec.ccfc.min/${ROOTFS_KEY}"
             sudo apt-get install -y squashfs-tools
-            sudo unsquashfs -d /tmp/rootfs-mount /tmp/agent-run-test/rootfs.squashfs
-            dd if=/dev/zero of=/tmp/agent-run-test/rootfs.ext4 bs=1M count=512
-            mkfs.ext4 /tmp/agent-run-test/rootfs.ext4
+            sudo unsquashfs -d /tmp/rootfs-mount /tmp/mitos-test/rootfs.squashfs
+            dd if=/dev/zero of=/tmp/mitos-test/rootfs.ext4 bs=1M count=512
+            mkfs.ext4 /tmp/mitos-test/rootfs.ext4
             mkdir -p /tmp/rootfs-ext4
-            sudo mount /tmp/agent-run-test/rootfs.ext4 /tmp/rootfs-ext4
+            sudo mount /tmp/mitos-test/rootfs.ext4 /tmp/rootfs-ext4
             sudo cp -a /tmp/rootfs-mount/* /tmp/rootfs-ext4/
             sudo umount /tmp/rootfs-ext4
           else
-            curl -fsSL -o /tmp/agent-run-test/rootfs.ext4 \
+            curl -fsSL -o /tmp/mitos-test/rootfs.ext4 \
               "https://s3.amazonaws.com/spec.ccfc.min/${ROOTFS_KEY}"
           fi
 
-          ls -lh /tmp/agent-run-test/
+          ls -lh /tmp/mitos-test/
 
       - uses: actions/setup-go@v5
         with:
@@ -111,7 +111,7 @@ jobs:
         run: |
           set -e
 
-          WORKDIR=/tmp/agent-run-test/fc-test
+          WORKDIR=/tmp/mitos-test/fc-test
           mkdir -p $WORKDIR
 
           # Make /dev/kvm world-accessible so this VM actually boots. Without
@@ -121,7 +121,7 @@ jobs:
           sudo chmod 666 /dev/kvm
 
           # Copy rootfs (Firecracker needs a writable copy)
-          cp /tmp/agent-run-test/rootfs.ext4 $WORKDIR/rootfs.ext4
+          cp /tmp/mitos-test/rootfs.ext4 $WORKDIR/rootfs.ext4
 
           # Start Firecracker
           SOCK=$WORKDIR/firecracker.sock
@@ -132,7 +132,7 @@ jobs:
           # Configure VM
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off\"}"
 
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
@@ -196,7 +196,7 @@ jobs:
       # content-addressed store machinery (chunking, dedup, byte-identical
       # reconstruction, and the verify-on-load tamper gate) on the real kernel
       # and rootfs downloaded at the top of the job
-      # (/tmp/agent-run-test/vmlinux is multi-hundred-MB, rootfs.ext4 is
+      # (/tmp/mitos-test/vmlinux is multi-hundred-MB, rootfs.ext4 is
       # multi-MB). Those files ALWAYS exist regardless of whether any KVM
       # snapshot step succeeded, so this gate does not depend on the firecracker
       # snapshot phase. cas-verify runs over those exact bytes:
@@ -209,7 +209,7 @@ jobs:
       - name: CAS integrity check over the real kernel and rootfs
         run: |
           set -e
-          INPUTS=/tmp/agent-run-test
+          INPUTS=/tmp/mitos-test
           echo "Real binaries under verification:"
           ls -lh $INPUTS/vmlinux $INPUTS/rootfs.ext4
 
@@ -218,29 +218,29 @@ jobs:
           # Byte-identical reconstruction of the real kernel + rootfs.
           /tmp/cas-verify check \
             -dir $INPUTS \
-            -store /tmp/agent-run-test/cas-check \
-            -out /tmp/agent-run-test/cas-check-out \
+            -store /tmp/mitos-test/cas-check \
+            -out /tmp/mitos-test/cas-check-out \
             -files vmlinux,rootfs.ext4
 
           # Tamper detection: corrupt one chunk, assert Materialize refuses it.
           /tmp/cas-verify tamper-check \
             -dir $INPUTS \
-            -store /tmp/agent-run-test/cas-tamper \
-            -out /tmp/agent-run-test/cas-tamper-out \
+            -store /tmp/mitos-test/cas-tamper \
+            -out /tmp/mitos-test/cas-tamper-out \
             -files vmlinux,rootfs.ext4
 
           # Optional bonus: if the firecracker snapshot phase produced a real
           # mem image, additionally verify reconstruction over it. Guarded so a
           # missing snapshot never fails this phase; the kernel+rootfs check
           # above is the required gate.
-          SNAP=/tmp/agent-run-test/fc-test/snapshot
+          SNAP=/tmp/mitos-test/fc-test/snapshot
           if [ -f "$SNAP/mem" ] && [ -f "$SNAP/vmstate" ]; then
             echo "Snapshot present; additionally verifying over real mem + vmstate:"
             ls -lh $SNAP/
             /tmp/cas-verify check \
               -dir $SNAP \
-              -store /tmp/agent-run-test/cas-check-snap \
-              -out /tmp/agent-run-test/cas-check-snap-out \
+              -store /tmp/mitos-test/cas-check-snap \
+              -out /tmp/mitos-test/cas-check-snap-out \
               -files mem,vmstate
           else
             echo "No firecracker snapshot present; skipping optional snapshot check"
@@ -278,9 +278,9 @@ jobs:
       - name: Snapshot compatibility contract refuses incompatible restores
         run: |
           set -e
-          INPUTS=/tmp/agent-run-test
+          INPUTS=/tmp/mitos-test
           FC=/usr/local/bin/firecracker
-          STORE=/tmp/agent-run-test/cas-compat
+          STORE=/tmp/mitos-test/cas-compat
           echo "Node environment under the compatibility contract:"
           $FC --version | head -1
           grep -m1 'model name' /proc/cpuinfo || true
@@ -341,8 +341,8 @@ jobs:
 
       - name: Build guest agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/agent-run-test/agent ./guest/agent/
-          ls -lh /tmp/agent-run-test/agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/mitos-test/agent ./guest/agent/
+          ls -lh /tmp/mitos-test/agent
 
       # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
       # proves Engine.CreateTemplate builds a bootable template FROM A REAL OCI
@@ -373,22 +373,22 @@ jobs:
           # A static busybox to inject as /bin/sh if the image lacks a shell
           # (busybox:stable ships its own, but tmpl-smoke passes this through and
           # it is required for any shell-less image).
-          curl -fsSL -o /tmp/agent-run-test/busybox \
+          curl -fsSL -o /tmp/mitos-test/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
-          chmod +x /tmp/agent-run-test/busybox
+          chmod +x /tmp/mitos-test/busybox
 
           go build -o /tmp/tmpl-smoke ./cmd/tmpl-smoke/
 
           run_smoke() {
-            rm -rf /tmp/agent-run-test/smoke-data
+            rm -rf /tmp/mitos-test/smoke-data
             /tmp/tmpl-smoke \
               --image busybox:stable \
               --init 'echo built-by-init > /built.txt' \
-              --data-dir /tmp/agent-run-test/smoke-data \
+              --data-dir /tmp/mitos-test/smoke-data \
               --firecracker /usr/local/bin/firecracker \
-              --kernel /tmp/agent-run-test/vmlinux \
-              --agent-bin /tmp/agent-run-test/agent \
-              --busybox-bin /tmp/agent-run-test/busybox \
+              --kernel /tmp/mitos-test/vmlinux \
+              --agent-bin /tmp/mitos-test/agent \
+              --busybox-bin /tmp/mitos-test/busybox \
               --expect-file /built.txt --expect-content built-by-init \
               --expect-cmd 'ls /bin/busybox'
           }
@@ -419,7 +419,7 @@ jobs:
         timeout-minutes: 5
         run: |
           set -e
-          WORKDIR=/tmp/agent-run-test/agent-test
+          WORKDIR=/tmp/mitos-test/agent-test
           mkdir -p $WORKDIR
 
           # Build a fresh ext4 rootfs with the agent as /init
@@ -430,7 +430,7 @@ jobs:
 
           # Minimal filesystem
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
 
           # Need /bin/sh for exec; get busybox
@@ -460,7 +460,7 @@ jobs:
           # Configure VM with vsock
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
 
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
@@ -519,7 +519,7 @@ jobs:
 
           go build -o /tmp/ws-smoke ./cmd/ws-smoke/
 
-          WSDIR=/tmp/agent-run-test/ws-transfer
+          WSDIR=/tmp/mitos-test/ws-transfer
           rm -rf "$WSDIR"
           mkdir -p "$WSDIR"
 
@@ -533,9 +533,9 @@ jobs:
             mnt="$(mktemp -d)"
             sudo mount -o loop "$img" "$mnt"
             sudo mkdir -p "$mnt"/{bin,dev,proc,sys,tmp,workspace,etc}
-            sudo cp /tmp/agent-run-test/agent "$mnt/init"
+            sudo cp /tmp/mitos-test/agent "$mnt/init"
             sudo chmod +x "$mnt/init"
-            sudo cp /tmp/agent-run-test/busybox "$mnt/bin/busybox" 2>/dev/null || \
+            sudo cp /tmp/mitos-test/busybox "$mnt/bin/busybox" 2>/dev/null || \
               sudo curl -fsSL -o "$mnt/bin/busybox" \
                 "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
             sudo chmod +x "$mnt/bin/busybox"
@@ -558,7 +558,7 @@ jobs:
             sleep 1
             curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/boot-source' \
               -H 'Content-Type: application/json' \
-              -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+              -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
             curl -fsS --unix-socket "$sock" -X PUT 'http://localhost/drives/rootfs' \
               -H 'Content-Type: application/json' \
               -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$rootfs\", \"is_root_device\": true, \"is_read_only\": false}"
@@ -649,21 +649,21 @@ jobs:
 
           # --- layer 1: auth + integrity gates (no KVM, runs anywhere) ---
           echo "=== pull-smoke verify (403 on wrong token, fail-closed on wrong digest) ==="
-          rm -rf /tmp/agent-run-test/pull-verify
-          /tmp/pull-smoke verify --root /tmp/agent-run-test/pull-verify
+          rm -rf /tmp/mitos-test/pull-verify
+          /tmp/pull-smoke verify --root /tmp/mitos-test/pull-verify
 
           # --- build a busybox + agent rootfs for the distributed template ---
           # pull-smoke kvm builds the template from this rootfs path via
           # Engine.CreateTemplate (agent as /init), exactly like the other KVM
           # smoke drivers.
-          WORKDIR=/tmp/agent-run-test/pull-build
+          WORKDIR=/tmp/mitos-test/pull-build
           mkdir -p $WORKDIR
           dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
           mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -677,13 +677,13 @@ jobs:
 
           # --- layer 2: build A, serve over TLS, pull to B, fork on B + exec ---
           echo "=== pull-smoke kvm (build A -> serve TLS -> pull B -> fork+exec) ==="
-          rm -rf /tmp/agent-run-test/pull-kvm
+          rm -rf /tmp/mitos-test/pull-kvm
           /tmp/pull-smoke kvm \
-            --root /tmp/agent-run-test/pull-kvm \
+            --root /tmp/mitos-test/pull-kvm \
             --image $WORKDIR/rootfs.ext4 \
             --firecracker /usr/local/bin/firecracker \
-            --kernel /tmp/agent-run-test/vmlinux \
-            --agent-bin /tmp/agent-run-test/agent \
+            --kernel /tmp/mitos-test/vmlinux \
+            --agent-bin /tmp/mitos-test/agent \
             --expect-cmd 'ls /init'
 
           echo "================================"
@@ -704,7 +704,7 @@ jobs:
         timeout-minutes: 8
         run: |
           set -e
-          WORKDIR=/tmp/agent-run-test/fork-correctness
+          WORKDIR=/tmp/mitos-test/fork-correctness
           mkdir -p $WORKDIR
 
           # Build an ext4 rootfs with the agent as /init plus the busybox tools
@@ -714,7 +714,7 @@ jobs:
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -747,7 +747,7 @@ jobs:
 
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
             -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
@@ -883,7 +883,7 @@ jobs:
           # the small volumes here.
           sudo apt-get install -y btrfs-progs
           VOL_ROOT=/mnt/vol-btrfs
-          BTRFS_IMG=/tmp/agent-run-test/btrfs.img
+          BTRFS_IMG=/tmp/mitos-test/btrfs.img
           dd if=/dev/zero of=$BTRFS_IMG bs=1M count=2048 status=none
           mkfs.btrfs -q $BTRFS_IMG
           sudo mkdir -p $VOL_ROOT
@@ -893,14 +893,14 @@ jobs:
           mount | grep "$VOL_ROOT"
 
           # --- build a busybox + agent rootfs for the template ---
-          WORKDIR=/tmp/agent-run-test/vol-build
+          WORKDIR=/tmp/mitos-test/vol-build
           mkdir -p $WORKDIR
           dd if=/dev/zero of=$WORKDIR/rootfs.ext4 bs=1M count=256 status=none
           mkfs.ext4 -q -F $WORKDIR/rootfs.ext4
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run,mnt}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -921,8 +921,8 @@ jobs:
             --image $WORKDIR/rootfs.ext4 \
             --data-dir $VOL_ROOT/vol-data \
             --firecracker /usr/local/bin/firecracker \
-            --kernel /tmp/agent-run-test/vmlinux \
-            --agent-bin /tmp/agent-run-test/agent \
+            --kernel /tmp/mitos-test/vmlinux \
+            --agent-bin /tmp/mitos-test/agent \
             --fresh-mount /mnt/fresh \
             --snap-mount /mnt/snap \
             --share-mount /mnt/share \
@@ -982,7 +982,7 @@ jobs:
           sudo modprobe dm_crypt 2>/dev/null || true
           sudo modprobe loop 2>/dev/null || true
 
-          ROOT=/tmp/agent-run-test/crypt
+          ROOT=/tmp/mitos-test/crypt
           MOUNT=$ROOT/mnt/tmpl1
           KEY=$ROOT/test.key
           SCOPE=tmpl1
@@ -1058,10 +1058,10 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           TPL_DIR=$BENCH_DATA/templates/$TPL
-          WORKDIR=/tmp/agent-run-test/bench-build
+          WORKDIR=/tmp/mitos-test/bench-build
           mkdir -p $WORKDIR $TPL_DIR/snapshot
 
           sudo chmod 666 /dev/kvm
@@ -1074,7 +1074,7 @@ jobs:
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -1098,7 +1098,7 @@ jobs:
           sleep 1
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
             -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
@@ -1156,7 +1156,7 @@ jobs:
               --template $TPL \
               --data-dir $BENCH_DATA \
               --firecracker /usr/local/bin/firecracker \
-              --kernel /tmp/agent-run-test/vmlinux \
+              --kernel /tmp/mitos-test/vmlinux \
               --iterations 30 --warmup 5 \
               --summary --json $json | tee /tmp/bench-$mode.out
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -1211,7 +1211,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           TPL_DIR=$BENCH_DATA/templates/$TPL
 
@@ -1236,7 +1236,7 @@ jobs:
               --template $TPL \
               --data-dir $BENCH_DATA \
               --firecracker /usr/local/bin/firecracker \
-              --kernel /tmp/agent-run-test/vmlinux \
+              --kernel /tmp/mitos-test/vmlinux \
               --forks 4 --settle-ms 800 \
               --summary --json /tmp/metering.json > /tmp/metering.out 2>&1; then
             echo "SETUP-FLAKE: metering driver failed to fork/restore on this runner (KVM or snapshot issue), NOT a metering assertion failure"
@@ -1378,7 +1378,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           TPL_DIR=$BENCH_DATA/templates/$TPL
           CGROUP_ROOT=/sys/fs/cgroup/husk-probe
@@ -1428,7 +1428,7 @@ jobs:
               --template $TPL \
               --data-dir $BENCH_DATA \
               --firecracker /usr/local/bin/firecracker \
-              --kernel /tmp/agent-run-test/vmlinux \
+              --kernel /tmp/mitos-test/vmlinux \
               --forks 4 \
               --cgroup-root "$CGROUP_ROOT" \
               --json /tmp/husk.json > /tmp/husk.out 2>&1; then
@@ -1576,10 +1576,10 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
-          WORKBASE=/tmp/agent-run-test/husk-stub
+          WORKBASE=/tmp/mitos-test/husk-stub
           mkdir -p $WORKBASE
 
           fail_setup()  { echo "HUSK-STUB-SETUP: $1"; exit 1; }
@@ -1743,8 +1743,8 @@ jobs:
         with:
           name: husk-stub-activation
           path: |
-            /tmp/agent-run-test/husk-stub/result*.json
-            /tmp/agent-run-test/husk-stub/latencies.txt
+            /tmp/mitos-test/husk-stub/result*.json
+            /tmp/mitos-test/husk-stub/latencies.txt
           if-no-files-found: warn
 
       # Husk activate-correctness proof (#18). The fork-correctness phase above
@@ -1782,10 +1782,10 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
-          WORKBASE=/tmp/agent-run-test/husk-activate
+          WORKBASE=/tmp/mitos-test/husk-activate
           mkdir -p $WORKBASE
 
           fail_setup()  { echo "HUSK-ACTIVATE-SETUP: $1"; exit 1; }
@@ -1993,8 +1993,8 @@ jobs:
         with:
           name: husk-activate-correctness
           path: |
-            /tmp/agent-run-test/husk-activate/result*.json
-            /tmp/agent-run-test/husk-activate/read*.out
+            /tmp/mitos-test/husk-activate/result*.json
+            /tmp/mitos-test/husk-activate/read*.out
           if-no-files-found: warn
 
       # Husk NETWORK mTLS activation proof (#18, slice 2). The two husk phases
@@ -2047,10 +2047,10 @@ jobs:
         timeout-minutes: 10
         run: |
           set -e
-          BENCH_DATA=/tmp/agent-run-test/bench-data
+          BENCH_DATA=/tmp/mitos-test/bench-data
           TPL=bench
           SNAP_DIR=$BENCH_DATA/templates/$TPL/snapshot
-          WORKBASE=/tmp/agent-run-test/husk-net
+          WORKBASE=/tmp/mitos-test/husk-net
           CERTS=$WORKBASE/certs
           mkdir -p $WORKBASE
 
@@ -2304,8 +2304,8 @@ jobs:
         with:
           name: husk-net-activation
           path: |
-            /tmp/agent-run-test/husk-net/result.json
-            /tmp/agent-run-test/husk-net/read.out
+            /tmp/mitos-test/husk-net/result.json
+            /tmp/mitos-test/husk-net/read.out
           if-no-files-found: warn
 
       # Install the host networking tools the egress phases need. nftables and
@@ -2358,7 +2358,7 @@ jobs:
         timeout-minutes: 8
         run: |
           set -e
-          WORKDIR=/tmp/agent-run-test/egress
+          WORKDIR=/tmp/mitos-test/egress
           mkdir -p $WORKDIR
           sudo chmod 666 /dev/kvm
 
@@ -2367,10 +2367,10 @@ jobs:
           # chains. nftables evaluates ALL base chains on the forward hook
           # across families, and a DROP in ANY of them is terminal, so Docker's
           # FORWARD policy would drop the sandbox's forwarded egress before our
-          # `inet agentrun_egress` table is ever consulted, masking our
+          # `inet mitos_egress` table is ever consulted, masking our
           # enforcement and timing out the ALLOWED connect. Insert a permissive
           # rule into Docker's purpose-built user chain so Docker stops being
-          # the deciding verdict, leaving OUR `inet agentrun_egress` table as
+          # the deciding verdict, leaving OUR `inet mitos_egress` table as
           # the actual egress enforcer under test. This keeps the proof honest:
           # the DENY still comes from OUR table. With DOCKER-USER ACCEPT the
           # ALLOWED dst passes (Docker accepts, our table accepts) and the
@@ -2444,7 +2444,7 @@ jobs:
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -2465,7 +2465,7 @@ jobs:
           sleep 1
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
             -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
@@ -2541,12 +2541,12 @@ jobs:
         timeout-minutes: 8
         run: |
           set -e
-          WORKDIR=/tmp/agent-run-test/name-egress
+          WORKDIR=/tmp/mitos-test/name-egress
           mkdir -p $WORKDIR
           sudo chmod 666 /dev/kvm
 
           # Same Docker FORWARD-policy workaround as the IP-egress phase: leave OUR
-          # inet agentrun_egress table as the actual egress enforcer.
+          # inet mitos_egress table as the actual egress enforcer.
           sudo iptables -I DOCKER-USER -j ACCEPT 2>/dev/null || sudo nft insert rule ip filter DOCKER-USER accept 2>/dev/null || true
           sudo sysctl -w net.ipv4.ip_forward=1
 
@@ -2639,7 +2639,7 @@ jobs:
           mkdir -p $WORKDIR/mnt
           sudo mount -o loop $WORKDIR/rootfs.ext4 $WORKDIR/mnt
           sudo mkdir -p $WORKDIR/mnt/{bin,dev,proc,sys,tmp,workspace,etc,run}
-          sudo cp /tmp/agent-run-test/agent $WORKDIR/mnt/init
+          sudo cp /tmp/mitos-test/agent $WORKDIR/mnt/init
           sudo chmod +x $WORKDIR/mnt/init
           sudo curl -fsSL -o $WORKDIR/mnt/bin/busybox \
             "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
@@ -2659,7 +2659,7 @@ jobs:
           sleep 1
           curl --unix-socket $SOCK -X PUT 'http://localhost/boot-source' \
             -H 'Content-Type: application/json' \
-            -d "{\"kernel_image_path\": \"/tmp/agent-run-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+            -d "{\"kernel_image_path\": \"/tmp/mitos-test/vmlinux\", \"boot_args\": \"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
           curl --unix-socket $SOCK -X PUT 'http://localhost/drives/rootfs' \
             -H 'Content-Type: application/json' \
             -d "{\"drive_id\": \"rootfs\", \"path_on_host\": \"$WORKDIR/rootfs.ext4\", \"is_root_device\": true, \"is_read_only\": false}"
@@ -2749,8 +2749,8 @@ jobs:
           # Hard-link kernel, rootfs, and snapshot into the chroot (jailer
           # cannot follow paths outside it). Use the agent rootfs + snapshot
           # produced by the fork-correctness phase.
-          FC_WORK=/tmp/agent-run-test/fork-correctness
-          sudo cp /tmp/agent-run-test/vmlinux $ROOT/vmlinux
+          FC_WORK=/tmp/mitos-test/fork-correctness
+          sudo cp /tmp/mitos-test/vmlinux $ROOT/vmlinux
           sudo cp $FC_WORK/rootfs.ext4 $ROOT/rootfs.ext4
           sudo mkdir -p $ROOT/snapshot
           sudo cp $FC_WORK/snapshot/vmstate $ROOT/snapshot/vmstate

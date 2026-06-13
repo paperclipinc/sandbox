@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from agent_run.sandbox import Sandbox, SandboxFiles
-from agent_run.types import SandboxPhase
+from mitos.sandbox import Sandbox, SandboxFiles
+from mitos.types import SandboxPhase
 
 
 TEST_TOKEN = "ab" * 32  # 64 hex chars, like the controller mints
@@ -97,7 +97,7 @@ def test_sandbox_terminate(ready_sandbox, mock_api):
     ready_sandbox.terminate()
 
     mock_api.delete_namespaced_custom_object.assert_called_once_with(
-        group="agentrun.dev",
+        group="mitos.run",
         version="v1alpha1",
         namespace="default",
         plural="sandboxclaims",

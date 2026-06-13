@@ -4,23 +4,26 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: sandboxpools.agentrun.dev
+  name: workspaces.mitos.run
 spec:
-  group: agentrun.dev
+  group: mitos.run
   names:
-    kind: SandboxPool
-    listKind: SandboxPoolList
-    plural: sandboxpools
-    singular: sandboxpool
+    kind: Workspace
+    listKind: WorkspaceList
+    plural: workspaces
+    singular: workspace
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.readySnapshots
-      name: Ready
+    - jsonPath: .status.head
+      name: Head
+      type: string
+    - jsonPath: .status.revisions
+      name: Revisions
       type: integer
-    - jsonPath: .spec.replicas
-      name: Desired
-      type: integer
+    - jsonPath: .status.resumable
+      name: Resumable
+      type: boolean
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -47,44 +50,75 @@ spec:
             type: object
           spec:
             properties:
-              drainPolicy:
-                default: Kill
+              git:
                 description: |-
-                  DrainPolicy governs an active sandbox (a claim that activated a husk pod)
-                  when that husk pod is lost (drain, eviction, deletion). Kill (the default)
-                  re-pends the claim onto a replacement dormant slot. Checkpoint attempts a
-                  live-VM snapshot first where the VMM still runs, then re-pends. Only used
-                  in husk mode.
-                enum:
-                - Kill
-                - Checkpoint
-                type: string
-              replicas:
-                format: int32
-                type: integer
-              scaleDownAfterSnapshot:
-                description: Whether to scale down the source sandbox after snapshot.
-                type: boolean
-              snapshotAfter:
-                type: string
-              snapshotDelay:
-                description: |-
-                  Delay after the trigger condition before taking the snapshot.
-                  Allows init scripts to finish.
-                type: string
-              snapshotStorage:
-                description: Where to store snapshot artifacts on the node.
-                type: string
-              templateRef:
+                  Git declares the repo paths that get history and the fork-and-merge
+                  rendezvous remote. Git is the merge layer; the engine never does
+                  filesystem merge. The rendezvous itself is a later W4 slice.
                 properties:
-                  name:
-                    type: string
-                required:
-                - name
+                  paths:
+                    description: |-
+                      Paths are the repo paths inside the workspace that get version history and
+                      the rendezvous remote.
+                    items:
+                      type: string
+                    type: array
                 type: object
-            required:
-            - replicas
-            - templateRef
+              grants:
+                description: |-
+                  Grants are the explicit, auditable workspace access grants. Workspace
+                  access is declarative Kubernetes RBAC over these grant objects, not a
+                  pod-scoped mechanism.
+                items:
+                  properties:
+                    access:
+                      description: Access is the level of access the grant confers.
+                      enum:
+                      - readonly
+                      - readwrite
+                      type: string
+                    serviceAccount:
+                      description: ServiceAccount is the principal the grant applies
+                        to.
+                      type: string
+                  required:
+                  - access
+                  - serviceAccount
+                  type: object
+                type: array
+              retention:
+                description: |-
+                  Retention bounds how many committed revisions are kept and how old a
+                  revision must be before it is eligible for pruning.
+                properties:
+                  minAge:
+                    description: |-
+                      MinAge is the minimum age a revision must reach before it is eligible for
+                      pruning. A revision younger than MinAge is never pruned even if the count
+                      is over Revisions. Unset treats every over-count revision as eligible.
+                    type: string
+                  revisions:
+                    description: |-
+                      Revisions is the maximum number of committed revisions to keep. Committed
+                      revisions beyond this count that are also older than MinAge are pruned
+                      oldest-first. The head and any ancestor on the head's lineage path are
+                      never pruned. Zero or unset disables count-based pruning.
+                    format: int32
+                    type: integer
+                type: object
+              store:
+                description: |-
+                  Store selects the content-addressed object store that backs the
+                  workspace's revision artifacts.
+                properties:
+                  objectStorageRef:
+                    description: |-
+                      ObjectStorageRef names the S3-compatible, content-addressed object store
+                      that holds the workspace's chunked revision artifacts. This slice resolves
+                      it against the existing content-addressed store; the S3 backend is a later
+                      W4 slice.
+                    type: string
+                type: object
             type: object
           status:
             properties:
@@ -144,34 +178,25 @@ spec:
                   - type
                   type: object
                 type: array
-              lastSnapshotTime:
-                format: date-time
-                type: string
-              nodeDistribution:
-                additionalProperties:
-                  format: int32
-                  type: integer
-                type: object
-              readySnapshots:
-                format: int32
-                type: integer
-              restoringCount:
-                format: int32
-                type: integer
-              templateDigest:
+              head:
                 description: |-
-                  TemplateDigest is the content-addressed manifest digest of the pool's
-                  snapshot, as reported by the node(s) holding it. It makes the snapshot
-                  identity visible in the CRD so integrity can be audited. A content
-                  address, safe to log.
+                  Head is the name of the latest committed revision in the workspace's
+                  lineage. Empty until the first revision commits. Ordering is by revision
+                  creationTimestamp, then by name as a deterministic tiebreaker.
                 type: string
-              totalSnapshots:
+              observedGeneration:
+                format: int64
+                type: integer
+              resumable:
+                description: |-
+                  Resumable reports whether the head revision pairs with a memory snapshot
+                  (its memorySnapshotRef is set), so a sandbox bound to the workspace can
+                  resume from the captured VM state rather than a cold start.
+                type: boolean
+              revisions:
+                description: Revisions is the number of committed revisions.
                 format: int32
                 type: integer
-            required:
-            - readySnapshots
-            - restoringCount
-            - totalSnapshots
             type: object
         required:
         - spec
@@ -179,7 +204,4 @@ spec:
     served: true
     storage: true
     subresources:
-      scale:
-        specReplicasPath: .spec.replicas
-        statusReplicasPath: .status.readySnapshots
       status: {}

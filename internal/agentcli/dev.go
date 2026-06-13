@@ -9,10 +9,10 @@ import (
 
 // defaultClusterName is the kind cluster name DevUp/DevDown manage when
 // DevOptions.ClusterName is empty.
-const defaultClusterName = "agentrun-dev"
+const defaultClusterName = "mitos-dev"
 
 // kindConfigPath is the kind cluster config DevUp passes to `kind create
-// cluster`. It is repo-relative, matching how CI references it; run agentrun dev
+// cluster`. It is repo-relative, matching how CI references it; run mitos dev
 // from the repo root.
 const kindConfigPath = "hack/kind-config.yaml"
 
@@ -25,10 +25,10 @@ const crdsPath = "deploy/crds/"
 // mock-mode controller (--mock --disable-pki-bootstrap), a mock-mode forkd
 // DaemonSet (--mock, no KVM device, no kvm nodeSelector, no TLS), and a default
 // pool, so a kind cluster forks via the mock engine and claims reach Ready
-// without KVM. Repo-relative; run agentrun dev from the repo root.
+// without KVM. Repo-relative; run mitos dev from the repo root.
 const devOverlayPath = "deploy/dev/"
 
-// devPoolName is the SandboxPool the dev overlay creates; agentrun sandbox
+// devPoolName is the SandboxPool the dev overlay creates; mitos sandbox
 // create --pool dev-default claims from it. Exported so docs and CI agree.
 const devPoolName = "dev-default"
 
@@ -44,7 +44,7 @@ type DevOptions struct {
 
 // CommandRunner runs an external command argv. DevUp/DevDown take a runner so
 // the orchestration sequence is unit-testable without a real kind or kubectl;
-// cmd/agentrun injects a runner that shells out.
+// cmd/mitos injects a runner that shells out.
 type CommandRunner func(ctx context.Context, argv []string) error
 
 func (o DevOptions) clusterName() string {
@@ -98,7 +98,7 @@ func DevUp(ctx context.Context, opts DevOptions, runner CommandRunner, out io.Wr
 
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Local dev cluster is up with a mock control plane.")
-	fmt.Fprintf(out, "Create a sandbox: agentrun sandbox create --pool %s\n", devPoolName)
+	fmt.Fprintf(out, "Create a sandbox: mitos sandbox create --pool %s\n", devPoolName)
 	fmt.Fprintln(out, "Note: local dev uses the mock fork engine (no KVM). Claims reconcile")
 	fmt.Fprintln(out, "to Ready, but real in-VM exec needs a KVM node and the production")
 	fmt.Fprintln(out, "manifests (deploy/controller/ + deploy/daemon/). See docs/cli.md.")

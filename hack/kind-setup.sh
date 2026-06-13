@@ -4,7 +4,7 @@ set -euo pipefail
 # Creates a kind cluster for local development and testing.
 # Runs the controller and a mock forkd (no KVM required).
 
-CLUSTER_NAME="${CLUSTER_NAME:-agent-run-dev}"
+CLUSTER_NAME="${CLUSTER_NAME:-mitos-dev}"
 
 echo "==> Creating kind cluster: $CLUSTER_NAME"
 
@@ -15,10 +15,10 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      agentrun.dev/kvm: "true"
+      mitos.run/kvm: "true"
   - role: worker
     labels:
-      agentrun.dev/kvm: "true"
+      mitos.run/kvm: "true"
 EOF
 
 echo ""
@@ -29,14 +29,14 @@ echo ""
 echo "==> Cluster ready: $CLUSTER_NAME"
 echo ""
 echo "    Nodes:"
-kubectl get nodes -L agentrun.dev/kvm
+kubectl get nodes -L mitos.run/kvm
 echo ""
 echo "    Next steps:"
 echo "      1. make manifests              # generate CRD yamls"
 echo "      2. make build                  # build controller + forkd"
 echo "      3. make docker-build           # build container images"
-echo "      4. kind load docker-image ghcr.io/agent-run/controller:latest --name $CLUSTER_NAME"
-echo "      5. kind load docker-image ghcr.io/agent-run/forkd:latest --name $CLUSTER_NAME"
+echo "      4. kind load docker-image ghcr.io/mitos/controller:latest --name $CLUSTER_NAME"
+echo "      5. kind load docker-image ghcr.io/mitos/forkd:latest --name $CLUSTER_NAME"
 echo "      6. make install                # deploy to kind"
 echo ""
 echo "    Or run the controller locally against the kind cluster:"

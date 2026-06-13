@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/api/v1alpha1"
+	"github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 // HostPort is a destination IP and TCP port from an egress allowlist.
@@ -20,7 +20,7 @@ type HostPort struct {
 // sandbox's egress rules. All sandboxes share ONE table and ONE base chain so
 // that adding or removing one sandbox never disturbs another's traffic.
 func SharedTableName() string {
-	return "agentrun_egress"
+	return "mitos_egress"
 }
 
 // BaseChainName returns the single base chain hooked on the forward path. It

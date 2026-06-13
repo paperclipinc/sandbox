@@ -2805,7 +2805,7 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\bReadFile\x12\x16.forkd.ReadFileRequest\x1a\x17.forkd.ReadFileResponse\x12>\n" +
 	"\tWriteFile\x12\x17.forkd.WriteFileRequest\x1a\x18.forkd.WriteFileResponse\x128\n" +
 	"\aListDir\x12\x15.forkd.ListDirRequest\x1a\x16.forkd.ListDirResponse\x12D\n" +
-	"\vGetCapacity\x12\x19.forkd.GetCapacityRequest\x1a\x1a.forkd.GetCapacityResponseB5Z3github.com/paperclipinc/sandbox/proto/forkd;forkdpbb\x06proto3"
+	"\vGetCapacity\x12\x19.forkd.GetCapacityRequest\x1a\x1a.forkd.GetCapacityResponseB3Z1github.com/paperclipinc/mitos/proto/forkd;forkdpbb\x06proto3"
 
 var (
 	file_proto_forkd_proto_rawDescOnce sync.Once

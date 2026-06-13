@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // ActivateRequest is the control message asking the dormant VMM to load a

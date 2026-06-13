@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	forkdpb "github.com/paperclipinc/sandbox/proto/forkd"
+	forkdpb "github.com/paperclipinc/mitos/proto/forkd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -14,7 +14,7 @@ import (
 // FinalizerTerminate guards a claim (and, later, a fork) so its backing VM is
 // reaped via forkd Terminate before the object is removed from the API,
 // regardless of how deletion was triggered.
-const FinalizerTerminate = "agentrun.dev/forkd-terminate"
+const FinalizerTerminate = "mitos.run/forkd-terminate"
 
 // terminateOnNode asks the forkd on nodeName to terminate sandboxID. It is
 // bounded and tolerant so a claim's deletion always makes progress: the

@@ -22,13 +22,13 @@ var (
 	// Pending claims (a separate scan with its own staleness window). The
 	// counter answers "how often are claims failing to place" directly.
 	claimPendingTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "agentrun_claim_pending_total",
+		Name: "mitos_claim_pending_total",
 		Help: "Number of times a claim was requeued for no node with a ready snapshot (claim stayed Pending).",
 	})
 
 	// orphanSweepsTotal counts forkd VMs reaped by the GC orphan sweep.
 	orphanSweepsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "agentrun_orphan_sweeps_total",
+		Name: "mitos_orphan_sweeps_total",
 		Help: "Number of orphan sandbox VMs terminated by the garbage collector.",
 	})
 
@@ -36,7 +36,7 @@ var (
 	// coarse reason (fork, secret, volume, token). Reasons are fixed strings,
 	// never error text, so no secret or path leaks into a label value.
 	claimErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "agentrun_claim_errors_total",
+		Name: "mitos_claim_errors_total",
 		Help: "Number of claims that failed terminally, by pool and reason.",
 	}, []string{"pool", "reason"})
 
@@ -44,7 +44,7 @@ var (
 	// reconcile. It mirrors SandboxPool.Status.ReadySnapshots as a scrapeable
 	// gauge.
 	poolReadySnapshots = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "agentrun_pool_ready_snapshots",
+		Name: "mitos_pool_ready_snapshots",
 		Help: "Ready snapshots per pool, as of the last pool reconcile.",
 	}, []string{"pool"})
 )

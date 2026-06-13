@@ -11,4 +11,4 @@
 # controlplane.yaml as-is.
 machine:
   nodeLabels:
-    agentrun.dev/control-plane: "true"
+    mitos.run/control-plane: "true"

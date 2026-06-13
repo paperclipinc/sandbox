@@ -41,7 +41,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/storecrypt"
 )
 
 func main() {

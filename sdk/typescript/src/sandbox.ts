@@ -1,6 +1,6 @@
 // A running sandbox: exec, file IO, and terminate over the sandbox API
 // (forkd :9091 or the standalone sandbox-server). Mirrors the Python Sandbox
-// surface (sdk/python/agent_run/sandbox.py), camelCased.
+// surface (sdk/python/mitos/sandbox.py), camelCased.
 
 import { AgentRunError } from "./errors.js";
 import { HttpClient, validSandboxId } from "./http.js";

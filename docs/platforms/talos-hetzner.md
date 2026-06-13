@@ -1,6 +1,6 @@
 # Talos + Hetzner AX: bare-metal provisioning runbook
 
-This document is the end-to-end guide for running the agent-run operator on
+This document is the end-to-end guide for running the mitos operator on
 Talos Linux atop Hetzner AX dedicated servers (Robot fleet). It covers hardware
 selection, OS install, machine configuration, operator deployment, KVM
 readiness checks, and capacity planning pointers.
@@ -40,7 +40,7 @@ Hardware requirements:
   before provisioning.
 - **NVMe**: Firecracker snapshots, the content-addressed chunk store, and the
   jailer chroot base all live on the forkd data volume
-  (`/var/lib/agent-run`). NVMe latency is on the critical path for fork
+  (`/var/lib/mitos`). NVMe latency is on the critical path for fork
   restore time. Rotational disk is not recommended for worker nodes.
 - **RAM**: forkd pins the template snapshot in memory (one copy per template
   shared across all forks via `MAP_PRIVATE` CoW). Plan for the template
@@ -60,7 +60,7 @@ that does NOT pass through `/dev/kvm`:
   not offered.
 - Hetzner Cloud uses gVisor-style isolation in some configurations, which does
   not emulate the KVM character device.
-- The forkd DaemonSet has `nodeSelector: agentrun.dev/kvm: "true"` and mounts
+- The forkd DaemonSet has `nodeSelector: mitos.run/kvm: "true"` and mounts
   `/dev/kvm` as a `hostPath: CharDevice`. If `/dev/kvm` is absent, the pod
   stays `Pending`; if it mounts but KVM does not actually work, Firecracker
   fails at the `PUT /machine-config` step with `EHWPOISON` or an
@@ -119,9 +119,9 @@ credential.
 The file `deploy/talos/worker-kvm.yaml` is a strategic-merge patch that adds:
 
 - kernel modules `kvm`, `kvm_intel`, `kvm_amd`, `vhost_vsock`, `tun`
-- node label `agentrun.dev/kvm: "true"` (required by the forkd DaemonSet
+- node label `mitos.run/kvm: "true"` (required by the forkd DaemonSet
   `nodeSelector`)
-- a dedicated data partition at `/var/lib/agent-run` on the second NVMe
+- a dedicated data partition at `/var/lib/mitos` on the second NVMe
   (adjust `machine.disks[0].device` in the patch if the disk path differs on
   your hardware)
 
@@ -228,10 +228,10 @@ Expected: `kvm`, `kvm_intel` (Intel CPU) or `kvm_amd` (AMD CPU), `vhost_vsock`,
 and `tun` all appear. The absent vendor module (`kvm_intel` on an AMD box or
 vice versa) will not appear; that is expected.
 
-### Check the `agentrun.dev/kvm=true` label
+### Check the `mitos.run/kvm=true` label
 
 ```bash
-kubectl get node <WORKER_NODE_NAME> --show-labels | grep 'agentrun.dev/kvm'
+kubectl get node <WORKER_NODE_NAME> --show-labels | grep 'mitos.run/kvm'
 ```
 
 The label is stamped by the `machine.nodeLabels` field in
@@ -261,31 +261,31 @@ kubectl apply -k deploy/
 This installs:
 
 - the four CRDs (`SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork`)
-- the `agent-run` namespace
-- the `agent-run-controller` ServiceAccount, ClusterRole, and ClusterRoleBinding
-- the controller Deployment (two replicas, SA `agent-run-controller`, probes on
+- the `mitos` namespace
+- the `mitos-controller` ServiceAccount, ClusterRole, and ClusterRoleBinding
+- the controller Deployment (two replicas, SA `mitos-controller`, probes on
   `:8081`, PKI enabled)
-- the forkd DaemonSet (schedules only onto `agentrun.dev/kvm=true` nodes)
+- the forkd DaemonSet (schedules only onto `mitos.run/kvm=true` nodes)
 
 The DaemonSet stays `Pending` until KVM workers join and are labeled.
 
 ### 5b. PKI / mTLS bootstrap
 
 The controller's `EnsurePKI` routine runs at startup and creates three Secrets
-in the `agent-run` namespace if they do not already exist:
+in the `mitos` namespace if they do not already exist:
 
-- `agent-run-ca`: the cluster CA key and certificate
-- `agent-run-forkd-tls`: a per-node forkd TLS certificate signed by the CA
-- `agent-run-controller-tls`: the controller's client certificate
+- `mitos-ca`: the cluster CA key and certificate
+- `mitos-forkd-tls`: a per-node forkd TLS certificate signed by the CA
+- `mitos-controller-tls`: the controller's client certificate
 
-The forkd DaemonSet mounts `agent-run-forkd-tls` (cert + key) and `agent-run-ca`
+The forkd DaemonSet mounts `mitos-forkd-tls` (cert + key) and `mitos-ca`
 (CA cert only; the CA private key never reaches forkd). The controller uses its
 own cert to dial forkd over mTLS on port 9090.
 
 **No manual PKI steps are needed.** Verify bootstrap:
 
 ```bash
-kubectl -n agent-run get secret agent-run-ca agent-run-forkd-tls agent-run-controller-tls
+kubectl -n mitos get secret mitos-ca mitos-forkd-tls mitos-controller-tls
 ```
 
 All three should be present a few seconds after the controller pod reaches
@@ -293,19 +293,19 @@ All three should be present a few seconds after the controller pod reaches
 
 ### 5c. Label the KVM nodes (if not already labeled by Talos)
 
-Talos stamps `agentrun.dev/kvm=true` via `machine.nodeLabels` in the worker
+Talos stamps `mitos.run/kvm=true` via `machine.nodeLabels` in the worker
 patch, so the label should already be set. If it is missing (e.g. a node added
 before the patch was applied):
 
 ```bash
-kubectl label node <WORKER_NODE_NAME> agentrun.dev/kvm=true
+kubectl label node <WORKER_NODE_NAME> mitos.run/kvm=true
 ```
 
 ### 5d. Verify forkd is running
 
 ```bash
-kubectl -n agent-run rollout status daemonset/agent-run-forkd
-kubectl -n agent-run get pods -l app.kubernetes.io/component=forkd -o wide
+kubectl -n mitos rollout status daemonset/mitos-forkd
+kubectl -n mitos get pods -l app.kubernetes.io/component=forkd -o wide
 ```
 
 Each pod should reach `Running` and pass its readiness probe (`GET /healthz` on
@@ -323,20 +323,20 @@ Create a minimal template using the busybox OCI image. The controller's
 
 ```yaml
 # sandbox-template.yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: busybox-basic
-  namespace: agent-run
+  namespace: mitos
 spec:
   image: busybox:stable
   init: /bin/true
 ---
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxPool
 metadata:
   name: busybox-pool
-  namespace: agent-run
+  namespace: mitos
 spec:
   templateRef:
     name: busybox-basic
@@ -345,7 +345,7 @@ spec:
 
 ```bash
 kubectl apply -f sandbox-template.yaml
-kubectl -n agent-run get sandboxpool busybox-pool -w
+kubectl -n mitos get sandboxpool busybox-pool -w
 ```
 
 Wait for `readySnapshots: 2` (or the configured `size`) in the pool status.
@@ -354,11 +354,11 @@ Wait for `readySnapshots: 2` (or the configured `size`) in the pool status.
 
 ```yaml
 # sandbox-claim.yaml
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxClaim
 metadata:
   name: smoke-test
-  namespace: agent-run
+  namespace: mitos
 spec:
   poolRef:
     name: busybox-pool
@@ -366,17 +366,17 @@ spec:
 
 ```bash
 kubectl apply -f sandbox-claim.yaml
-kubectl -n agent-run get sandboxclaim smoke-test -w
+kubectl -n mitos get sandboxclaim smoke-test -w
 ```
 
 Wait for `.status.phase: Ready`.
 
 ### 6c. Run an exec via the CLI or SDK
 
-Using the `agentrun` CLI (see `docs/cli.md`):
+Using the `mitos` CLI (see `docs/cli.md`):
 
 ```bash
-agentrun sandbox exec smoke-test -- /bin/echo hello
+mitos sandbox exec smoke-test -- /bin/echo hello
 ```
 
 Expected output: `hello` (the command runs inside the forked microVM on the KVM
@@ -385,8 +385,8 @@ worker node).
 For Python SDK usage:
 
 ```python
-from agent_run import SandboxClient
-client = SandboxClient(kubeconfig="./kubeconfig", namespace="agent-run")
+from mitos import SandboxClient
+client = SandboxClient(kubeconfig="./kubeconfig", namespace="mitos")
 result = client.exec("smoke-test", ["/bin/echo", "hello"])
 print(result.stdout)  # hello
 ```
@@ -394,9 +394,9 @@ print(result.stdout)  # hello
 ### 6d. Clean up
 
 ```bash
-kubectl -n agent-run delete sandboxclaim smoke-test
-kubectl -n agent-run delete sandboxpool busybox-pool
-kubectl -n agent-run delete sandboxtemplate busybox-basic
+kubectl -n mitos delete sandboxclaim smoke-test
+kubectl -n mitos delete sandboxpool busybox-pool
+kubectl -n mitos delete sandboxtemplate busybox-basic
 ```
 
 ---
@@ -417,16 +417,16 @@ The variables that drive per-node density:
   `GET /v1/metering`). Larger templates eat more RAM per node.
 - **Per-fork dirty-page rate**: each fork accrues unique pages as the VM runs.
   Idle forks stay near zero unique pages; active forks diverge. The
-  `agentrun_cow_memory_savings_bytes` metric exposes savings vs naive
-  accounting; `agentrun_memory_unique_bytes` per fork shows individual divergence.
+  `mitos_cow_memory_savings_bytes` metric exposes savings vs naive
+  accounting; `mitos_memory_unique_bytes` per fork shows individual divergence.
 - **NVMe throughput**: fork restore time depends on reading the snapshot from
   disk. The bench harness (`cmd/bench` in `fork-exec` mode) measures
   fork-to-first-exec distribution; see `BENCHMARKS.md` for methodology and
   current shared-CI-class numbers. Bare-metal AX numbers are a target in
   ROADMAP section 4.
 - **forkd data volume**: all snapshots, the chunk store, and jailer chroot
-  bases live under `/var/lib/agent-run` (the data partition in
-  `deploy/talos/worker-kvm.yaml`). The CoW disk accounting (`agentrun_metered_disk_bytes`)
+  bases live under `/var/lib/mitos` (the data partition in
+  `deploy/talos/worker-kvm.yaml`). The CoW disk accounting (`mitos_metered_disk_bytes`)
   exposes the effective disk footprint per node.
 
 References:
@@ -444,7 +444,7 @@ References:
 |-------|---------|
 | Talos machine config patches and rationale | `deploy/talos/README.md` |
 | Deploy manifests (kustomize base) | `deploy/kustomization.yaml` |
-| CLI reference (`agentrun sandbox`, `agentrun dev`) | `docs/cli.md` |
+| CLI reference (`mitos sandbox`, `mitos dev`) | `docs/cli.md` |
 | Guest networking and egress allowlists | `docs/networking.md` |
 | Encryption at rest (`--enable-encryption`) | `docs/encryption.md` |
 | CoW-aware metering (`GET /v1/metering`) | `docs/metering.md` |

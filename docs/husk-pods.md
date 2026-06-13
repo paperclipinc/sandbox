@@ -271,7 +271,7 @@ A husk pod needs `/dev/kvm` to restore and run its VM, but mounting the device
 the way forkd does today (a `hostPath` to `/dev/kvm` plus a permissive
 capability set) is incompatible with the PSA `restricted` profile husk pods
 target. The Kubernetes device-plugin mechanism is the restricted-profile path:
-the pod requests `agentrun.dev/kvm` like any extended resource and the kubelet,
+the pod requests `mitos.run/kvm` like any extended resource and the kubelet,
 not the pod spec, injects the device.
 
 `cmd/kvm-device-plugin` (implemented in `internal/deviceplugin`) is that plugin.
@@ -302,7 +302,7 @@ unprivileged with all capabilities dropped, `allowPrivilegeEscalation: false`
 and a read-only root filesystem. Its only host access is the kubelet
 device-plugins dir (to serve and register) and a read-only `/dev` mount (to
 `stat /dev/kvm`); it creates no device nodes and starts no VMs. So a husk pod
-requesting `agentrun.dev/kvm` is PSA-restricted minus exactly the documented
+requesting `mitos.run/kvm` is PSA-restricted minus exactly the documented
 device-plugin exception, not a privileged escape.
 
 This is the PSA-restricted alternative to forkd's current privileged
@@ -325,9 +325,9 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
   crashlooping. The kind-e2e GitHub Actions runner has `/dev/kvm` (the same
   runner class also runs the Firecracker KVM suite), so the plugin advertises a
   non-zero count. The e2e assertion is adaptive: it reads the node allocatable
-  for `agentrun.dev/kvm` and branches on whether KVM is advertised.
+  for `mitos.run/kvm` and branches on whether KVM is advertised.
 - **Full advertise->schedule->inject path proven on the kind-e2e runner** (the
-  stronger result): the probe pod requests `agentrun.dev/kvm: 1`, the scheduler
+  stronger result): the probe pod requests `mitos.run/kvm: 1`, the scheduler
   places it (Running, not Pending), and `kubectl exec` into the running pod
   confirms `/dev/kvm` is present inside the container. The probe pod is
   explicitly non-privileged (`privileged: false`, `allowPrivilegeEscalation:
@@ -362,12 +362,12 @@ to `spec.replicas`:
 
 - `buildHuskPod` (`internal/controller/huskpod.go`) emits a `GenerateName
   <pool>-husk-` Pod in the pool's namespace, owner-referenced to the pool, with
-  the labels `agentrun.dev/pool=<pool>` and `agentrun.dev/husk=true`. The single
+  the labels `mitos.run/pool=<pool>` and `mitos.run/husk=true`. The single
   container `husk-stub` runs the image from `--husk-stub-image` with args to
   Prepare a dormant Firecracker VMM (the `--firecracker`/`--kernel` paths and a
   `--control-socket` to listen on). The activation transport over that socket is
   slice 2; slice 1 only stands the dormant stub up.
-- The container requests one `agentrun.dev/kvm` slot (request AND limit, the
+- The container requests one `mitos.run/kvm` slot (request AND limit, the
   device-plugin contract) so the pod is scheduled only onto a `/dev/kvm` node,
   without `privileged: true`. It also carries cpu/memory REQUESTS sized from the
   template's `spec.resources` (or a documented default of 1 cpu / 512Mi when the
@@ -406,7 +406,7 @@ object-lifecycle slice.
 
 **PROVEN (envtest, `internal/controller/huskpod_test.go`):**
 
-- the husk pod spec: the `agentrun.dev/kvm` request and limit of 1, the
+- the husk pod spec: the `mitos.run/kvm` request and limit of 1, the
   non-privileged securityContext (privileged false, escalation false, drop ALL,
   seccomp RuntimeDefault), the owner-ref to the pool, the two labels, the
   cpu/memory requests (template-sized and the default fallback), and the stub
@@ -441,7 +441,7 @@ The activation path:
 - the claim reconciler selects a `Running` + `Ready`, unclaimed husk pod for the
   pool (the pod the slice-1 lifecycle pre-scheduled), and dials its control
   server at `podIP:HuskControlPort`;
-- it CLAIMS that pod BEFORE activating it, stamping the `agentrun.dev/claim`
+- it CLAIMS that pod BEFORE activating it, stamping the `mitos.run/claim`
   label under an OPTIMISTIC LOCK (`client.MergeFromWithOptimisticLock`): the
   patch carries the pod's `resourceVersion`, so two concurrent claims that both
   select the same dormant pod both attempt the patch but exactly ONE wins; the
@@ -500,7 +500,7 @@ rather than relying on a node read-only mount) is a refinement, not done here.
   an optimistic lock BEFORE activating it, so two claims racing for one dormant
   pod resolve to exactly one activation; the loser gets a `409 Conflict` and
   requeues (envtest, `TestHuskClaimSingleDormantPodNoDoubleAssign`: one dormant
-  pod + two claims yields exactly one Ready claim, the pod's `agentrun.dev/claim`
+  pod + two claims yields exactly one Ready claim, the pod's `mitos.run/claim`
   label names only that winner, and the activator was called exactly once);
 - the in-pod SANDBOX API is served and token-gated: after a successful activate
   the husk stub registers the activated VM and the delivered per-sandbox bearer
@@ -590,7 +590,7 @@ unprivileged husk pods. The husk pod never builds; it only activates.
 - the full CLUSTER object-lifecycle path on the KVM-capable kind runner
   (`.github/workflows/ci.yaml`, the `kind-e2e-husk` job): the husk-default stack
   rolls out, EnsurePKI mints the CA + forkd + controller TLS Secrets, the device
-  plugin advertises `agentrun.dev/kvm`, the pool reconcile CREATES husk pods
+  plugin advertises `mitos.run/kvm`, the pool reconcile CREATES husk pods
   that the scheduler BINDS to the KVM node (device-plugin resource + nodeSelector
   + snapshot-node affinity, scheduler truth), and the claim reconcile is driven
   to the husk-pod activation path. When a husk pod's nested dormant VMM comes up
@@ -636,7 +636,7 @@ proof, is in [docs/networking.md](networking.md).)
 - **Husk mode (the default): a Kubernetes `NetworkPolicy` governs.** The VM's tap
   lives inside the HUSK POD's network namespace, so the sandbox's traffic IS the
   pod's traffic. A `NetworkPolicy` (or Cilium) selecting the husk pod
-  (`podSelector` on `agentrun.dev/husk=true`) is the GOVERNING egress layer,
+  (`podSelector` on `mitos.run/husk=true`) is the GOVERNING egress layer,
   enforced by the CNI on the pod netns exactly as for any pod. This is honest pod
   networking with zero bespoke code: the cluster's existing pod-network policy
   machinery applies. The bespoke host-nftables engine is REDUNDANT here and is
@@ -673,9 +673,9 @@ SETUP issue from a real conformance failure.
 | - | --------- | ------------------------------------- |
 | 1 | Scheduler truth | The husk pod carries cpu + memory REQUESTS and the scheduler BOUND it (`Status.NodeName` set), so the sandbox is an ordinary scheduled workload. A probe pod requesting more than node allocatable stays Pending: the native scheduler does not double-book. |
 | 2 | ResourceQuota + LimitRange | A `ResourceQuota` (`count/pods: 1` + cpu/memory caps) and a `LimitRange` in a test namespace bound husk-shaped pods: the first is admitted, the second is REJECTED by the quota admission with a Kubernetes `exceeded quota` / `forbidden` error. ZERO custom code: the rejection is from Kubernetes. |
-| 3 | NetworkPolicy attach | A `NetworkPolicy` with `podSelector` `matchLabels agentrun.dev/husk=true` exists and SELECTS the husk pod. In husk mode this is the governing egress layer (the VM tap is in the pod netns); see section 6d. |
+| 3 | NetworkPolicy attach | A `NetworkPolicy` with `podSelector` `matchLabels mitos.run/husk=true` exists and SELECTS the husk pod. In husk mode this is the governing egress layer (the VM tap is in the pod netns); see section 6d. |
 | 4 | PSA level | Empirically verified (see below): the husk pod is rejected by a `restricted` namespace on EXACTLY the documented exceptions, the same securityContext minus those exceptions IS admitted into restricted, and a privileged pod IS rejected (PSA is enforcing). |
-| 5 | kubectl get pods + logs | `kubectl get pods -l agentrun.dev/husk=true` lists the sandboxes and `kubectl logs` returns the husk stub console (`husk-stub: preparing dormant VMM` / `dormant` / `serving ... control`). A sandbox is a pod an operator can list and read logs from. |
+| 5 | kubectl get pods + logs | `kubectl get pods -l mitos.run/husk=true` lists the sandboxes and `kubectl logs` returns the husk stub console (`husk-stub: preparing dormant VMM` / `dormant` / `serving ... control`). A sandbox is a pod an operator can list and read logs from. |
 
 ### The exact PSA level the husk pod passes (empirically verified)
 
@@ -699,7 +699,7 @@ So the honest claim is precise: the husk pod is **NOT fully `restricted` and NOT
 restricted-clean (the SAME securityContext minus the hostPath and with
 `runAsNonRoot: true` IS admitted into a restricted namespace, verified), and the
 only PSA violations are the documented read-only-snapshot-hostPath +
-`runAsNonRoot`-false (`/dev/kvm` device) exceptions, plus the `agentrun.dev/kvm`
+`runAsNonRoot`-false (`/dev/kvm` device) exceptions, plus the `mitos.run/kvm`
 device-plugin resource that replaces `privileged: true`. The conformance job also
 rejects a genuinely privileged pod in the same restricted namespace, proving PSA
 is actually enforcing (so the husk-pod admission result is meaningful).
@@ -734,7 +734,7 @@ choose what happens to an active sandbox when its backing pod is lost.
 
 The husk-mode pool reconcile creates a `policy/v1` PodDisruptionBudget named
 `<pool>-husk`, owner-referenced to the pool, selecting the pool's husk pods
-(`agentrun.dev/pool=<name>,agentrun.dev/husk=true`). Its `minAvailable` is
+(`mitos.run/pool=<name>,mitos.run/husk=true`). Its `minAvailable` is
 `max(1, Replicas-1)`.
 
 BUDGET CHOICE (documented): `minAvailable = max(1, Replicas-1)` means a VOLUNTARY
@@ -778,9 +778,9 @@ advertising a dead endpoint. Two triggers drive the re-pend, both implemented:
 
 1. Every claim reconcile of a Ready (active) claim first runs `checkHuskPodLost`:
    if the claim's backing husk pod (`Status.SandboxID` = the pod name, labeled
-   `agentrun.dev/claim=<claim>`) is missing or terminating, the claim re-pends.
+   `mitos.run/claim=<claim>`) is missing or terminating, the claim re-pends.
 2. The husk claim reconciler watches pods (`Watches(&corev1.Pod{})`) and maps a
-   pod event to the claim named in the pod's `agentrun.dev/claim` label, so a pod
+   pod event to the claim named in the pod's `mitos.run/claim` label, so a pod
    delete promptly reconciles the active claim instead of waiting for its own
    requeue.
 
@@ -857,13 +857,13 @@ drain/checkpoint surface; a drain/re-pend latency benchmark.
   wall clock within 2s of the runner, and a delivered env var plus secret
   readable in each guest with the secret value absent from the host-side logs.
 - The `/dev/kvm` device plugin: `cmd/kvm-device-plugin` (in
-  `internal/deviceplugin`) advertises `agentrun.dev/kvm` only where `/dev/kvm`
+  `internal/deviceplugin`) advertises `mitos.run/kvm` only where `/dev/kvm`
   exists and injects `/dev/kvm` and `/dev/net/tun` on `Allocate`, so a husk pod
   gets KVM as a scheduled resource instead of `privileged: true` (section 5).
   The DevicePlugin and Registration gRPC are unit-tested against a fake kubelet.
   The kind e2e gates on the DaemonSet becoming Ready, then proves the full
   advertise->schedule->inject path: a non-privileged probe pod requesting
-  `agentrun.dev/kvm: 1` is scheduled to Running on the KVM-capable kind-e2e
+  `mitos.run/kvm: 1` is scheduled to Running on the KVM-capable kind-e2e
   runner, and `kubectl exec` into the running pod confirms `/dev/kvm` is present
   inside the container (injected by `Allocate`, not by any privilege or hostPath).
   This is the PSA-restricted device-access path proven end to end. The assertion

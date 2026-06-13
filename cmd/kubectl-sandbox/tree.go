@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cli/sandboxtable"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cli/sandboxtable"
 )
 
 // runTree lists the claims and forks in scope and renders their parent->child

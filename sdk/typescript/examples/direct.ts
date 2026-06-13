@@ -9,7 +9,7 @@
  * in test/server.test.ts and test/sandbox.test.ts.
  */
 
-import { SandboxServer } from "@agentrun/sdk";
+import { SandboxServer } from "@mitos/sdk";
 
 async function main(): Promise<void> {
   // Point at the running sandbox-server. The default is http://localhost:8080.

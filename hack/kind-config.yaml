@@ -4,4 +4,4 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      agentrun.dev/kvm: "true"
+      mitos.run/kvm: "true"

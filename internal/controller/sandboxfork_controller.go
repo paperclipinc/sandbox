@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,9 +23,9 @@ type SandboxForkReconciler struct {
 // ReadyForks and conditions (e.g. Rejected). The fork reconciler reads its
 // source SandboxClaim, the owning SandboxPool, and the SandboxTemplate, all of
 // which are already covered by the SandboxClaim reconciler's markers.
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentrun.dev,resources=sandboxforks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxforks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxforks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=mitos.run,resources=sandboxforks/finalizers,verbs=update
 func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

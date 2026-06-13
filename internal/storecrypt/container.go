@@ -90,7 +90,7 @@ func (m *Manager) imgPath(scopeID string) string {
 
 // mapperName returns the dm-crypt mapper name for a scope (the device appears at
 // /dev/mapper/<mapperName>). The caller must have already validated scopeID.
-func mapperName(scopeID string) string { return "agentrun-" + scopeID }
+func mapperName(scopeID string) string { return "mitos-" + scopeID }
 
 // validateScopeID rejects a scope id that could escape the image directory or
 // the mapper namespace, BEFORE any file is touched or any command is built.

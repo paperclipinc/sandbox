@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/observability"
+	"github.com/paperclipinc/mitos/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

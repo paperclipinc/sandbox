@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/metering"
-	"github.com/paperclipinc/sandbox/internal/volume"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/metering"
+	"github.com/paperclipinc/mitos/internal/volume"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // MockEngine simulates fork operations without KVM.
@@ -29,7 +29,7 @@ type MockEngine struct {
 	// so tests can assert a VM was reaped even after it leaves the live map.
 	terminated []string
 	// VsockDir overrides the root directory reported in ForkResult.VsockPath
-	// (defaults to /tmp/agent-run-mock). Tests point it at a temp dir so a
+	// (defaults to /tmp/mitos-mock). Tests point it at a temp dir so a
 	// fake agent can listen on the exact path the engine reports.
 	VsockDir string
 	// lastNetwork records the NetworkOpts of the most recent Fork call (nil if
@@ -118,7 +118,7 @@ func (e *MockEngine) LastTemplateVolumes() []volume.Spec {
 func (e *MockEngine) vsockPath(sandboxID string) string {
 	vsockDir := e.VsockDir
 	if vsockDir == "" {
-		vsockDir = "/tmp/agent-run-mock"
+		vsockDir = "/tmp/mitos-mock"
 	}
 	return fmt.Sprintf("%s/sandboxes/%s/vsock.sock", vsockDir, sandboxID)
 }
@@ -219,7 +219,7 @@ func (e *MockEngine) CreateTemplate(id string, image string, initCommands []stri
 	e.templates[id] = &Template{
 		ID:          id,
 		Image:       image,
-		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", id),
+		SnapshotDir: fmt.Sprintf("/tmp/mitos-mock/templates/%s", id),
 		CreatedAt:   time.Now(),
 		Ready:       true,
 	}
@@ -256,7 +256,7 @@ func (e *MockEngine) PullTemplate(_ context.Context, templateID, manifestDigest,
 	})
 	e.templates[templateID] = &Template{
 		ID:          templateID,
-		SnapshotDir: fmt.Sprintf("/tmp/agent-run-mock/templates/%s", templateID),
+		SnapshotDir: fmt.Sprintf("/tmp/mitos-mock/templates/%s", templateID),
 		CreatedAt:   time.Now(),
 		Ready:       true,
 	}

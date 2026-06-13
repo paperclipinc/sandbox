@@ -2,9 +2,9 @@
 
 ## Signal
 
-`sum(rate(agentrun_claim_pending_total[5m])) > 0.1` sustained for 15m.
+`sum(rate(mitos_claim_pending_total[5m])) > 0.1` sustained for 15m.
 
-`agentrun_claim_pending_total` is a controller counter that increments every
+`mitos_claim_pending_total` is a controller counter that increments every
 time a claim is requeued because no node had a ready snapshot (the claim stayed
 Pending). A sustained rate is capacity exhaustion: the fleet cannot place new
 claims. The threshold is environment-tunable.
@@ -23,9 +23,9 @@ claims. The threshold is environment-tunable.
 - `kubectl sandbox ls` to see how many claims are Pending and in which pools.
 - `kubectl sandbox ps` to see per-node occupancy and spot full or absent nodes.
 - `kubectl sandbox top` for node-level capacity headroom.
-- Metrics to check: `agentrun_claim_pending_total` (the rate driving this
-  alert), `agentrun_pool_ready_snapshots{pool}` (which pools are starved),
-  `agentrun_active_sandboxes` per node (are nodes saturated?).
+- Metrics to check: `mitos_claim_pending_total` (the rate driving this
+  alert), `mitos_pool_ready_snapshots{pool}` (which pools are starved),
+  `mitos_active_sandboxes` per node (are nodes saturated?).
 - SandboxClaim `Ready` condition reason: `NoCapacity` / `CapacityExhausted`
   confirms admission pressure; `NoHuskPod` confirms warm-pool starvation. See
   `docs/conditions.md`.
@@ -33,7 +33,7 @@ claims. The threshold is environment-tunable.
 ## Remediation
 
 - Scale the warm pool: raise the SandboxPool desired replica / snapshot count.
-- Add KVM-labeled nodes (`agentrun.dev/kvm=true`) so forkd can schedule and
+- Add KVM-labeled nodes (`mitos.run/kvm=true`) so forkd can schedule and
   snapshots can land.
 - Recover any drained or NotReady holder nodes.
 - If demand is structurally above capacity, plan fleet growth; the alert is a

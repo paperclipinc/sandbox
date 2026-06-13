@@ -43,7 +43,7 @@ jobs:
     # Validate the production deploy manifests: kubeconform schema-checks every
     # YAML under deploy/ and kubectl proves the kustomize base resolves. Core
     # kinds (Deployment, ClusterRole, ServiceAccount, DaemonSet, Namespace) are
-    # validated strictly; the agentrun.dev custom kinds (SandboxTemplate,
+    # validated strictly; the mitos.run custom kinds (SandboxTemplate,
     # SandboxPool, SandboxClaim, SandboxFork) have no published schema, so
     # -ignore-missing-schemas skips them rather than failing. The CRD
     # definitions themselves (kind: CustomResourceDefinition) ARE validated.
@@ -60,7 +60,7 @@ jobs:
           kubeconform -v
       - name: kubeconform validates deploy manifests
         # -strict rejects unknown fields; -ignore-missing-schemas skips the
-        # agentrun.dev custom kinds (no published schema) while still strictly
+        # mitos.run custom kinds (no published schema) while still strictly
         # validating every core kind. deploy/talos holds Talos MachineConfig
         # PATCHES (no Kubernetes kind), which are schema-checked by the
         # talos-validate job, so they are excluded here.
@@ -86,8 +86,8 @@ jobs:
         # .spec. Extract .spec.groups to a temp rules file, then check it.
         run: |
           set -euo pipefail
-          python3 -c 'import yaml,sys; d=yaml.safe_load(open("deploy/monitoring/prometheusrule.yaml")); yaml.safe_dump({"groups": d["spec"]["groups"]}, open("/tmp/agentrun-rules.yaml","w"))'
-          promtool check rules /tmp/agentrun-rules.yaml
+          python3 -c 'import yaml,sys; d=yaml.safe_load(open("deploy/monitoring/prometheusrule.yaml")); yaml.safe_dump({"groups": d["spec"]["groups"]}, open("/tmp/mitos-rules.yaml","w"))'
+          promtool check rules /tmp/mitos-rules.yaml
 
   talos-validate:
     # Validate the Talos machine configs. worker-kvm.yaml and controlplane.yaml
@@ -155,12 +155,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f Dockerfile.controller -t agent-run-controller:ci .
-      - run: docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
+      - run: docker build -f Dockerfile.controller -t mitos-controller:ci .
+      - run: docker build -f Dockerfile.forkd -t mitos-forkd:ci .
       # The husk-stub image runs the dormant VMM inside each husk pod (the
       # pod-native default, issue #18). It is referenced by the controller
       # Deployment's --husk-stub-image, so it must build cleanly here.
-      - run: docker build -f Dockerfile.husk-stub -t agent-run-husk-stub:ci .
+      - run: docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
 
   kind-e2e:
     runs-on: ubuntu-latest
@@ -172,49 +172,49 @@ jobs:
           go-version: "1.26"
       - uses: helm/kind-action@v1
         with:
-          cluster_name: agent-run-ci
+          cluster_name: mitos-ci
           config: hack/kind-config.yaml
       - name: Build and load images
         run: |
-          docker build -f Dockerfile.controller -t agent-run-controller:ci .
-          docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
-          docker build -f Dockerfile.kvm-device-plugin -t agent-run-kvm-device-plugin:ci .
-          kind load docker-image agent-run-controller:ci --name agent-run-ci
-          kind load docker-image agent-run-forkd:ci --name agent-run-ci
-          kind load docker-image agent-run-kvm-device-plugin:ci --name agent-run-ci
-      - name: Build agentrun CLI
-        run: go build -o /usr/local/bin/agentrun ./cmd/agentrun/
+          docker build -f Dockerfile.controller -t mitos-controller:ci .
+          docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+          docker build -f Dockerfile.kvm-device-plugin -t mitos-kvm-device-plugin:ci .
+          kind load docker-image mitos-controller:ci --name mitos-ci
+          kind load docker-image mitos-forkd:ci --name mitos-ci
+          kind load docker-image mitos-kvm-device-plugin:ci --name mitos-ci
+      - name: Build mitos CLI
+        run: go build -o /usr/local/bin/mitos ./cmd/mitos/
       - name: Build kubectl-sandbox plugin
         # Installed on PATH as kubectl-sandbox so it is invoked as
         # "kubectl sandbox <verb>". The object-level smoke below proves
         # ls/ps/tree render the cluster objects on the mock control plane.
         run: go build -o /usr/local/bin/kubectl-sandbox ./cmd/kubectl-sandbox/
-      - name: agentrun dev up (mock control plane on the existing kind cluster)
+      - name: mitos dev up (mock control plane on the existing kind cluster)
         # The dev overlay (deploy/dev/) runs a MOCK control plane: forkd --mock
         # (no KVM, no /dev/kvm, no kvm nodeSelector) and the controller with
         # --mock --disable-pki-bootstrap so it dials forkd over insecure gRPC.
         # --skip-cluster-create targets the kind cluster this job already stood
-        # up. The dev manifests reference the agent-run-controller:ci /
-        # agent-run-forkd:ci images loaded above with imagePullPolicy:
+        # up. The dev manifests reference the mitos-controller:ci /
+        # mitos-forkd:ci images loaded above with imagePullPolicy:
         # IfNotPresent.
-        run: agentrun dev up --skip-cluster-create
+        run: mitos dev up --skip-cluster-create
       - name: Wait for the mock control plane to be Ready
         run: |
-          kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
-          kubectl -n agent-run rollout status daemonset/agent-run-forkd --timeout=180s
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-forkd --timeout=180s
       - name: Deploy the KVM device plugin DaemonSet
         # Apply the production device-plugin DaemonSet, overriding the image to
         # the :ci tag loaded above (IfNotPresent so kind serves the local image,
-        # no registry pull). The plugin advertises agentrun.dev/kvm only where
+        # no registry pull). The plugin advertises mitos.run/kvm only where
         # /dev/kvm exists; this runner has /dev/kvm so the plugin advertises a
         # non-zero count. The DaemonSet rollout proves the plugin registers with
         # the kubelet regardless of whether /dev/kvm is present.
         run: |
           set -euo pipefail
           kubectl apply -f deploy/device-plugin/daemonset.yaml
-          kubectl -n agent-run set image daemonset/agent-run-kvm-device-plugin \
-            kvm-device-plugin=agent-run-kvm-device-plugin:ci
-          kubectl -n agent-run patch daemonset/agent-run-kvm-device-plugin --type=json \
+          kubectl -n mitos set image daemonset/mitos-kvm-device-plugin \
+            kvm-device-plugin=mitos-kvm-device-plugin:ci
+          kubectl -n mitos patch daemonset/mitos-kvm-device-plugin --type=json \
             -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
       - name: Device plugin DaemonSet becomes Ready and stays up
         # Gate on the DaemonSet rolling out Ready, then confirm the pod is not
@@ -230,33 +230,33 @@ jobs:
           # and hides why the pods never became Ready).
           dump_diagnostics() {
             echo "=== device-plugin diagnostics ==="
-            kubectl -n agent-run get pods -o wide || true
-            kubectl -n agent-run describe ds agent-run-kvm-device-plugin || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin \
+            kubectl -n mitos get pods -o wide || true
+            kubectl -n mitos describe ds mitos-kvm-device-plugin || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=kvm-device-plugin \
               --tail=50 --all-containers || true
           }
           trap 'dump_diagnostics' ERR
-          kubectl -n agent-run rollout status daemonset/agent-run-kvm-device-plugin --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-kvm-device-plugin --timeout=180s
           sleep 15
-          restarts=$(kubectl -n agent-run get pods \
+          restarts=$(kubectl -n mitos get pods \
             -l app.kubernetes.io/component=kvm-device-plugin \
             -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
           echo "device-plugin restartCount: ${restarts:-none}"
           for r in $restarts; do
             if [ "$r" != "0" ]; then
               echo "device plugin restarted ($r); dumping logs"
-              kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=50 || true
+              kubectl -n mitos logs -l app.kubernetes.io/component=kvm-device-plugin --tail=50 || true
               exit 1
             fi
           done
-          kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=20 || true
+          kubectl -n mitos logs -l app.kubernetes.io/component=kvm-device-plugin --tail=20 || true
       - name: Adaptive device-plugin assertion (KVM-advertised or no-KVM)
-        # Determine whether the node advertises agentrun.dev/kvm by reading the
+        # Determine whether the node advertises mitos.run/kvm by reading the
         # node allocatable. The kind-e2e runner has /dev/kvm, so kvm_present=true
         # is the expected path; a runner without /dev/kvm is handled honestly.
         #
         # If KVM IS advertised:
-        #   - deploy a non-privileged probe pod that requests agentrun.dev/kvm: 1
+        #   - deploy a non-privileged probe pod that requests mitos.run/kvm: 1
         #     and runs `test -e /dev/kvm && sleep 300` (busybox); the request
         #     triggers Allocate which injects /dev/kvm into the container.
         #   - assert the pod reaches Running (scheduler placed it: advertise->
@@ -274,8 +274,8 @@ jobs:
 
           # Read the allocatable value; empty or "0" means not advertised.
           kvm_allocatable=$(kubectl get nodes \
-            -o jsonpath='{.items[*].status.allocatable.agentrun\.dev/kvm}' 2>/dev/null || true)
-          echo "node allocatable agentrun.dev/kvm: '${kvm_allocatable}'"
+            -o jsonpath='{.items[*].status.allocatable.mitos\.dev/kvm}' 2>/dev/null || true)
+          echo "node allocatable mitos.run/kvm: '${kvm_allocatable}'"
 
           kvm_advertised=false
           for v in $kvm_allocatable; do
@@ -286,7 +286,7 @@ jobs:
           done
           echo "kvm_advertised: $kvm_advertised"
 
-          # Apply the probe pod. It requests agentrun.dev/kvm: 1 so Allocate
+          # Apply the probe pod. It requests mitos.run/kvm: 1 so Allocate
           # fires on schedule. The securityContext is restricted (non-privileged,
           # no allowPrivilegeEscalation, all capabilities dropped, read-only root
           # filesystem): /dev/kvm access comes from the device plugin alone.
@@ -295,7 +295,7 @@ jobs:
           kind: Pod
           metadata:
             name: kvm-resource-probe
-            namespace: agent-run
+            namespace: mitos
           spec:
             restartPolicy: Never
             containers:
@@ -304,7 +304,7 @@ jobs:
                 command: ["sh", "-c", "test -e /dev/kvm && sleep 300"]
                 resources:
                   limits:
-                    agentrun.dev/kvm: "1"
+                    mitos.run/kvm: "1"
                 securityContext:
                   allowPrivilegeEscalation: false
                   privileged: false
@@ -319,7 +319,7 @@ jobs:
             # Wait up to 60s for the pod to reach Running (scheduler places it
             # because the resource is available; Allocate injects the device).
             for i in $(seq 1 30); do
-              phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+              phase=$(kubectl -n mitos get pod kvm-resource-probe \
                 -o jsonpath='{.status.phase}' 2>/dev/null || true)
               echo "  [${i}/30] probe pod phase: $phase"
               if [ "$phase" = "Running" ]; then
@@ -328,10 +328,10 @@ jobs:
               sleep 2
             done
 
-            phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+            phase=$(kubectl -n mitos get pod kvm-resource-probe \
               -o jsonpath='{.status.phase}')
             echo "probe pod final phase: $phase"
-            kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A5 'Events:' || true
+            kubectl -n mitos describe pod kvm-resource-probe | grep -i -A5 'Events:' || true
 
             if [ "$phase" != "Running" ]; then
               echo "FAIL: expected Running (KVM advertised, pod should be scheduled and /dev/kvm injected), got $phase"
@@ -340,7 +340,7 @@ jobs:
 
             # Prove Allocate injected /dev/kvm into the non-privileged container.
             echo "Proving /dev/kvm is present inside the non-privileged probe container..."
-            kubectl -n agent-run exec kvm-resource-probe -- test -e /dev/kvm
+            kubectl -n mitos exec kvm-resource-probe -- test -e /dev/kvm
             echo "PASS: /dev/kvm injected by Allocate into the non-privileged probe pod (advertise->schedule->inject proven)"
 
           else
@@ -348,10 +348,10 @@ jobs:
 
             # Give the scheduler time to (fail to) place the pod, then assert Pending.
             sleep 20
-            phase=$(kubectl -n agent-run get pod kvm-resource-probe \
+            phase=$(kubectl -n mitos get pod kvm-resource-probe \
               -o jsonpath='{.status.phase}')
             echo "probe pod phase: $phase"
-            kubectl -n agent-run describe pod kvm-resource-probe | grep -i -A2 'Events:' || true
+            kubectl -n mitos describe pod kvm-resource-probe | grep -i -A2 'Events:' || true
 
             if [ "$phase" != "Pending" ]; then
               echo "FAIL: expected Pending (no KVM advertised), got $phase"
@@ -360,10 +360,10 @@ jobs:
             echo "PASS: probe pod stays Pending on a no-KVM node (honest scheduler truth)"
           fi
 
-          kubectl -n agent-run delete pod kvm-resource-probe --ignore-not-found=true
-      - name: agentrun sandbox ls (control-plane dispatch lists claims)
-        run: agentrun sandbox ls
-      - name: agentrun sandbox create reaches Ready on the mock engine
+          kubectl -n mitos delete pod kvm-resource-probe --ignore-not-found=true
+      - name: mitos sandbox ls (control-plane dispatch lists claims)
+        run: mitos sandbox ls
+      - name: mitos sandbox create reaches Ready on the mock engine
         # The controller discovers the mock forkd, builds the dev-default pool
         # snapshot over insecure gRPC, and the claim forks via the mock engine
         # and reaches Ready. The mock engine has NO guest VM, so this asserts the
@@ -375,10 +375,10 @@ jobs:
           # mock forkd before claiming.
           kubectl -n default wait --for=jsonpath='{.status.readySnapshots}'=1 \
             sandboxpool/dev-default --timeout=120s
-          ID=$(agentrun sandbox create --pool dev-default)
+          ID=$(mitos sandbox create --pool dev-default)
           echo "created sandbox: $ID"
-          agentrun sandbox ls | grep -q "$ID"
-          agentrun sandbox terminate "$ID"
+          mitos sandbox ls | grep -q "$ID"
+          mitos sandbox terminate "$ID"
       - name: kubectl sandbox ls/ps/tree render the objects (object-level smoke)
         # Build a claim and a fork on the mock control plane, then assert the
         # kubectl-sandbox plugin renders them at the OBJECT level: ls shows the
@@ -388,20 +388,20 @@ jobs:
         # docs/cli.md; this smoke proves the read/list verbs over kubeconfig.
         run: |
           set -euo pipefail
-          ID=$(agentrun sandbox create --pool dev-default)
+          ID=$(mitos sandbox create --pool dev-default)
           echo "created sandbox: $ID"
           kubectl sandbox ls | grep -q "$ID"
-          agentrun sandbox fork "$ID" --replicas 1
+          mitos sandbox fork "$ID" --replicas 1
           echo "created a fork from: $ID"
           # ps SOURCE column and the tree lineage root both carry the claim id.
           kubectl sandbox ps | grep -q "$ID"
           kubectl sandbox tree | grep -q "$ID"
           echo "kubectl sandbox ls/ps/tree rendered the objects"
-          agentrun sandbox terminate "$ID"
-      - name: agentrun dev down (cleanup)
+          mitos sandbox terminate "$ID"
+      - name: mitos dev down (cleanup)
         if: always()
         run: |
-          kubectl -n agent-run delete pod kvm-resource-probe --ignore-not-found=true || true
+          kubectl -n mitos delete pod kvm-resource-probe --ignore-not-found=true || true
           kubectl delete -f deploy/device-plugin/daemonset.yaml --ignore-not-found=true || true
           kubectl delete -k deploy/dev/ --ignore-not-found=true || true
 
@@ -417,7 +417,7 @@ jobs:
     #   - The Kubernetes CLUSTER object lifecycle is the new surface for the
     #     flip and is GATED here: PKI bootstrap mints the CA/forkd/controller
     #     TLS Secrets; the KVM node is labeled; the device plugin advertises
-    #     agentrun.dev/kvm; the controller (husk mode) + forkd builder + device
+    #     mitos.run/kvm; the controller (husk mode) + forkd builder + device
     #     plugin roll out; the pool reconcile CREATES husk pods that SCHEDULE
     #     onto the KVM node (device-plugin resource request + nodeSelector +
     #     snapshot-node affinity honored, scheduler truth); the claim reconcile
@@ -459,27 +459,27 @@ jobs:
           sudo chmod 666 /dev/kvm || true
       - uses: helm/kind-action@v1
         with:
-          cluster_name: agent-run-husk
+          cluster_name: mitos-husk
           config: hack/kind-config.yaml
       - name: Build and load all four images (controller, forkd, device-plugin, husk-stub)
         run: |
           set -euo pipefail
-          docker build -f Dockerfile.controller -t agent-run-controller:ci .
-          docker build -f Dockerfile.forkd -t agent-run-forkd:ci .
-          docker build -f Dockerfile.kvm-device-plugin -t agent-run-kvm-device-plugin:ci .
-          docker build -f Dockerfile.husk-stub -t agent-run-husk-stub:ci .
-          for img in agent-run-controller agent-run-forkd agent-run-kvm-device-plugin agent-run-husk-stub; do
-            kind load docker-image "$img:ci" --name agent-run-husk
+          docker build -f Dockerfile.controller -t mitos-controller:ci .
+          docker build -f Dockerfile.forkd -t mitos-forkd:ci .
+          docker build -f Dockerfile.kvm-device-plugin -t mitos-kvm-device-plugin:ci .
+          docker build -f Dockerfile.husk-stub -t mitos-husk-stub:ci .
+          for img in mitos-controller mitos-forkd mitos-kvm-device-plugin mitos-husk-stub; do
+            kind load docker-image "$img:ci" --name mitos-husk
           done
       - name: Label the kind worker so forkd and husk pods schedule, expose /dev/kvm
-        # The kind-config worker already carries agentrun.dev/kvm=true; assert it
+        # The kind-config worker already carries mitos.run/kvm=true; assert it
         # (a missing label is a SETUP issue: forkd's nodeSelector and the husk
         # pod placement both key off it). The device plugin runs everywhere and
         # advertises the resource only where /dev/kvm exists.
         run: |
           set -euo pipefail
-          kubectl label node --all agentrun.dev/kvm=true --overwrite
-          kubectl get nodes -L agentrun.dev/kvm
+          kubectl label node --all mitos.run/kvm=true --overwrite
+          kubectl get nodes -L mitos.run/kvm
       - name: Deploy the husk-default stack (controller husk mode, forkd builder, device plugin, PKI on)
         # Apply the production base (deploy/), which carries the controller in
         # husk-default mode, the forkd DaemonSet (the builder), the device
@@ -494,26 +494,26 @@ jobs:
           kubectl apply -k deploy/
 
           # Retarget images to the locally-loaded :ci tags and force IfNotPresent.
-          kubectl -n agent-run set image deployment/agent-run-controller \
-            controller=agent-run-controller:ci
-          kubectl -n agent-run set image daemonset/agent-run-forkd \
-            forkd=agent-run-forkd:ci
-          kubectl -n agent-run set image daemonset/agent-run-kvm-device-plugin \
-            kvm-device-plugin=agent-run-kvm-device-plugin:ci
-          for kind_obj in deployment/agent-run-controller daemonset/agent-run-forkd daemonset/agent-run-kvm-device-plugin; do
-            kubectl -n agent-run patch "$kind_obj" --type=json \
+          kubectl -n mitos set image deployment/mitos-controller \
+            controller=mitos-controller:ci
+          kubectl -n mitos set image daemonset/mitos-forkd \
+            forkd=mitos-forkd:ci
+          kubectl -n mitos set image daemonset/mitos-kvm-device-plugin \
+            kvm-device-plugin=mitos-kvm-device-plugin:ci
+          for kind_obj in deployment/mitos-controller daemonset/mitos-forkd daemonset/mitos-kvm-device-plugin; do
+            kubectl -n mitos patch "$kind_obj" --type=json \
               -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
           done
           # The husk pods the controller CREATES must also use the local image:
           # override the controller's --husk-stub-image to the :ci tag. The husk
           # pod's imagePullPolicy is IfNotPresent by default for a tag kind
           # already holds.
-          kubectl -n agent-run patch deployment/agent-run-controller --type=json -p='[
-            {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--husk-stub-image=agent-run-husk-stub:ci"}
+          kubectl -n mitos patch deployment/mitos-controller --type=json -p='[
+            {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--husk-stub-image=mitos-husk-stub:ci"}
           ]'
           # A single controller replica makes the e2e log a single reconcile
           # stream (the base runs 2 for HA); behavior is identical.
-          kubectl -n agent-run scale deployment/agent-run-controller --replicas=1
+          kubectl -n mitos scale deployment/mitos-controller --replicas=1
       - name: Stack rolls out and PKI Secrets exist
         # Gate: the three workloads roll out Ready and the controller's EnsurePKI
         # produced the CA + forkd + controller TLS Secrets. A missing Secret is a
@@ -523,47 +523,47 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== husk-stack diagnostics ==="
-            kubectl -n agent-run get pods -o wide || true
-            kubectl -n agent-run get secrets || true
-            kubectl -n agent-run describe deployment/agent-run-controller || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=80 || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=forkd --tail=80 || true
+            kubectl -n mitos get pods -o wide || true
+            kubectl -n mitos get secrets || true
+            kubectl -n mitos describe deployment/mitos-controller || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=80 || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=forkd --tail=80 || true
           }
           trap dump ERR
-          kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
-          kubectl -n agent-run rollout status daemonset/agent-run-kvm-device-plugin --timeout=180s
-          kubectl -n agent-run rollout status daemonset/agent-run-forkd --timeout=240s
-          for s in agent-run-ca agent-run-forkd-tls agent-run-controller-tls; do
-            kubectl -n agent-run get secret "$s" >/dev/null || {
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-kvm-device-plugin --timeout=180s
+          kubectl -n mitos rollout status daemonset/mitos-forkd --timeout=240s
+          for s in mitos-ca mitos-forkd-tls mitos-controller-tls; do
+            kubectl -n mitos get secret "$s" >/dev/null || {
               echo "HUSK-SETUP: PKI Secret $s missing (EnsurePKI did not complete); the husk control channel needs it"
               exit 1
             }
             echo "PKI Secret present: $s"
           done
-      - name: Device plugin advertises agentrun.dev/kvm
+      - name: Device plugin advertises mitos.run/kvm
         # Gate: the node advertises the KVM extended resource, so husk pods
-        # (which request agentrun.dev/kvm: 1) can be scheduled. Zero advertised
+        # (which request mitos.run/kvm: 1) can be scheduled. Zero advertised
         # is a SETUP failure on a runner we asserted has /dev/kvm.
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
-            kvm=$(kubectl get nodes -o jsonpath='{.items[*].status.allocatable.agentrun\.dev/kvm}' 2>/dev/null || true)
-            echo "  [${i}/30] allocatable agentrun.dev/kvm: '${kvm}'"
+            kvm=$(kubectl get nodes -o jsonpath='{.items[*].status.allocatable.mitos\.dev/kvm}' 2>/dev/null || true)
+            echo "  [${i}/30] allocatable mitos.run/kvm: '${kvm}'"
             for v in $kvm; do
               if [ -n "$v" ] && [ "$v" != "0" ]; then
-                echo "PASS: device plugin advertises agentrun.dev/kvm=$v"
+                echo "PASS: device plugin advertises mitos.run/kvm=$v"
                 exit 0
               fi
             done
             sleep 2
           done
-          echo "HUSK-SETUP: device plugin never advertised agentrun.dev/kvm; husk pods cannot schedule"
-          kubectl -n agent-run logs -l app.kubernetes.io/component=kvm-device-plugin --tail=50 || true
+          echo "HUSK-SETUP: device plugin never advertised mitos.run/kvm; husk pods cannot schedule"
+          kubectl -n mitos logs -l app.kubernetes.io/component=kvm-device-plugin --tail=50 || true
           exit 1
       - name: Provide a guest kernel on the node for forkd and husk pods
         # forkd's snapshot build and the husk pod's dormant VMM both expect a
         # guest kernel at <data-dir>/vmlinux on the node hostPath. Stage a real
-        # Firecracker CI kernel into the kind worker's /var/lib/agent-run so the
+        # Firecracker CI kernel into the kind worker's /var/lib/mitos so the
         # hostPath mounts resolve. (The rootfs for the template is provided via
         # the SandboxTemplate below.)
         run: |
@@ -576,12 +576,12 @@ jobs:
             | sort -V | tail -1)
           echo "Staging kernel: $KERNEL_KEY"
           curl -fsSL -o /tmp/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
-          # The kind worker node is a docker container named agent-run-husk-worker;
-          # copy the kernel into its /var/lib/agent-run (the forkd/husk hostPath).
-          worker=$(docker ps --format '{{.Names}}' | grep -m1 'agent-run-husk-worker')
-          docker exec "$worker" mkdir -p /var/lib/agent-run
-          docker cp /tmp/vmlinux "$worker:/var/lib/agent-run/vmlinux"
-          docker exec "$worker" ls -lh /var/lib/agent-run/vmlinux
+          # The kind worker node is a docker container named mitos-husk-worker;
+          # copy the kernel into its /var/lib/mitos (the forkd/husk hostPath).
+          worker=$(docker ps --format '{{.Names}}' | grep -m1 'mitos-husk-worker')
+          docker exec "$worker" mkdir -p /var/lib/mitos
+          docker cp /tmp/vmlinux "$worker:/var/lib/mitos/vmlinux"
+          docker exec "$worker" ls -lh /var/lib/mitos/vmlinux
       - name: Create a SandboxTemplate and a small SandboxPool
         # The template references an OCI image (busybox); the pool asks for a
         # small warm pool of husk pods. The controller in husk mode builds the
@@ -590,7 +590,7 @@ jobs:
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxTemplate
           metadata:
             name: husk-e2e
@@ -601,7 +601,7 @@ jobs:
               cpu: "1"
               memory: 512Mi
           ---
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxPool
           metadata:
             name: husk-e2e
@@ -624,10 +624,10 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== husk pod diagnostics ==="
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=forkd --tail=120 || true
-            for p in $(kubectl get pods -A -l agentrun.dev/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=forkd --tail=120 || true
+            for p in $(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
               ns=${p%%/*}; name=${p##*/}
               echo "--- describe $ns/$name ---"; kubectl -n "$ns" describe pod "$name" || true
               echo "--- logs $ns/$name ---"; kubectl -n "$ns" logs "$name" --tail=60 || true
@@ -638,7 +638,7 @@ jobs:
           # Wait for the controller to create the husk pods (object lifecycle).
           created=0
           for i in $(seq 1 60); do
-            n=$(kubectl get pods -A -l agentrun.dev/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            n=$(kubectl get pods -A -l mitos.run/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
             echo "  [${i}/60] husk pods created: $n"
             if [ "$n" -ge 1 ]; then created=1; break; fi
             sleep 5
@@ -654,7 +654,7 @@ jobs:
           # nodeSelector / affinity did not resolve.
           bound=0
           for i in $(seq 1 60); do
-            node=$(kubectl get pods -A -l agentrun.dev/husk=true \
+            node=$(kubectl get pods -A -l mitos.run/husk=true \
               -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
             echo "  [${i}/60] first husk pod nodeName: '${node:-<unscheduled>}'"
             if [ -n "$node" ]; then bound=1; break; fi
@@ -662,8 +662,8 @@ jobs:
           done
           if [ "$bound" -ne 1 ]; then
             echo "HUSK-FAILED: husk pod never bound to a node (device-plugin resource / kvm nodeSelector / snapshot affinity did not resolve)"
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
-            kubectl describe pod -A -l agentrun.dev/husk=true | grep -i -A5 'Events:' || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
+            kubectl describe pod -A -l mitos.run/husk=true | grep -i -A5 'Events:' || true
             exit 1
           fi
           echo "PASS: pool created husk pods and the scheduler bound one to the KVM node"
@@ -679,14 +679,14 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== scheduler-truth diagnostics ==="
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
             kubectl describe pod over-alloc-probe 2>/dev/null || true
           }
           trap dump ERR
 
-          hpod=$(kubectl get pods -A -l agentrun.dev/husk=true \
+          hpod=$(kubectl get pods -A -l mitos.run/husk=true \
             -o jsonpath='{.items[0].metadata.name}')
-          hns=$(kubectl get pods -A -l agentrun.dev/husk=true \
+          hns=$(kubectl get pods -A -l mitos.run/husk=true \
             -o jsonpath='{.items[0].metadata.namespace}')
 
           cpu=$(kubectl -n "$hns" get pod "$hpod" \
@@ -787,7 +787,7 @@ jobs:
             name: $1
             namespace: quota-conf
             labels:
-              agentrun.dev/husk: "true"
+              mitos.run/husk: "true"
           spec:
             restartPolicy: Always
             containers:
@@ -824,7 +824,7 @@ jobs:
           echo "PASS: ResourceQuota rejected the over-quota husk pod from Kubernetes (zero custom code)"
           kubectl delete namespace quota-conf --wait=false || true
       - name: Conformance 3, NetworkPolicy selects the husk pod
-        # A NetworkPolicy with podSelector matchLabels agentrun.dev/husk=true is
+        # A NetworkPolicy with podSelector matchLabels mitos.run/husk=true is
         # the husk-mode governing egress layer. Assert it exists AND selects the
         # husk pod (the pod's labels match the selector). The in-VM enforcement of
         # the VM tap by the pod netns needs a bare-metal KVM kubelet, documented
@@ -834,11 +834,11 @@ jobs:
           dump() {
             echo "=== netpol diagnostics ==="
             kubectl get netpol -A || true
-            kubectl get pods -A -l agentrun.dev/husk=true --show-labels || true
+            kubectl get pods -A -l mitos.run/husk=true --show-labels || true
           }
           trap dump ERR
 
-          hns=$(kubectl get pods -A -l agentrun.dev/husk=true \
+          hns=$(kubectl get pods -A -l mitos.run/husk=true \
             -o jsonpath='{.items[0].metadata.namespace}')
           cat <<YAML | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
@@ -849,7 +849,7 @@ jobs:
           spec:
             podSelector:
               matchLabels:
-                agentrun.dev/husk: "true"
+                mitos.run/husk: "true"
             policyTypes:
               - Egress
             egress:
@@ -864,9 +864,9 @@ jobs:
           # The policy selects the husk pod: list pods matching the SAME selector
           # and assert the husk pod is among them.
           sel=$(kubectl -n "$hns" get networkpolicy husk-egress \
-            -o jsonpath='{.spec.podSelector.matchLabels.agentrun\.dev/husk}')
-          [ "$sel" = "true" ] || { echo "CONFORMANCE-FAILED: netpol selector is not agentrun.dev/husk=true"; exit 1; }
-          matched=$(kubectl -n "$hns" get pods -l agentrun.dev/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            -o jsonpath='{.spec.podSelector.matchLabels.mitos\.dev/husk}')
+          [ "$sel" = "true" ] || { echo "CONFORMANCE-FAILED: netpol selector is not mitos.run/husk=true"; exit 1; }
+          matched=$(kubectl -n "$hns" get pods -l mitos.run/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
           [ "$matched" -ge 1 ] || { echo "CONFORMANCE-FAILED: the netpol selector matches no husk pod"; exit 1; }
           echo "PASS: NetworkPolicy husk-egress exists and selects the husk pod ($matched matched). In-VM enforcement of the VM tap by the pod netns is bare-metal-kubelet (documented)."
       - name: Conformance 4, PSA restricted admits the husk pod minus documented exceptions
@@ -905,7 +905,7 @@ jobs:
           metadata:
             name: husk-restricted
             labels:
-              agentrun.dev/husk: "true"
+              mitos.run/husk: "true"
           spec:
             restartPolicy: Always
             securityContext:
@@ -920,12 +920,12 @@ jobs:
                   requests:
                     cpu: "1"
                     memory: 512Mi
-                    agentrun.dev/kvm: "1"
+                    mitos.run/kvm: "1"
                   limits:
-                    agentrun.dev/kvm: "1"
+                    mitos.run/kvm: "1"
                 volumeMounts:
                   - name: snapshot
-                    mountPath: /var/lib/agent-run/snapshot
+                    mountPath: /var/lib/mitos/snapshot
                     readOnly: true
                 securityContext:
                   privileged: false
@@ -938,7 +938,7 @@ jobs:
             volumes:
               - name: snapshot
                 hostPath:
-                  path: /var/lib/agent-run/templates/husk-e2e/snapshot
+                  path: /var/lib/mitos/templates/husk-e2e/snapshot
                   type: DirectoryOrCreate
           YAML
           )
@@ -1035,14 +1035,14 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== kubectl get pods/logs diagnostics ==="
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
           }
           trap dump ERR
 
           # kubectl get pods shows the husk pods (NAME/STATUS columns present).
-          rows=$(kubectl get pods -A -l agentrun.dev/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
+          rows=$(kubectl get pods -A -l mitos.run/husk=true --no-headers 2>/dev/null | wc -l | tr -d ' ')
           [ "$rows" -ge 1 ] || { echo "CONFORMANCE-FAILED: kubectl get pods shows no husk pods"; exit 1; }
-          kubectl get pods -A -l agentrun.dev/husk=true -o wide
+          kubectl get pods -A -l mitos.run/husk=true -o wide
           echo "PASS: kubectl get pods shows $rows husk pod(s)"
 
           # kubectl logs returns the stub console. The husk stub logs to stderr
@@ -1051,8 +1051,8 @@ jobs:
           # the container has not logged the dormant line yet, accept any non-empty
           # stub console as proof the logs path works (a SETUP nuance, not a
           # conformance failure of the get-pods/logs surface).
-          hpod=$(kubectl get pods -A -l agentrun.dev/husk=true -o jsonpath='{.items[0].metadata.name}')
-          hns=$(kubectl get pods -A -l agentrun.dev/husk=true -o jsonpath='{.items[0].metadata.namespace}')
+          hpod=$(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{.items[0].metadata.name}')
+          hns=$(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{.items[0].metadata.namespace}')
           logs=""
           for i in $(seq 1 24); do
             logs=$(kubectl -n "$hns" logs "$hpod" --all-containers --tail=50 2>/dev/null || true)
@@ -1080,7 +1080,7 @@ jobs:
           dump() {
             echo "=== PDB diagnostics ==="
             kubectl get pdb -A || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=80 || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=80 || true
           }
           trap dump ERR
 
@@ -1096,8 +1096,8 @@ jobs:
             kubectl get pdb -A || true
             exit 1
           fi
-          sel_pool=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.agentrun\.dev/pool}')
-          sel_husk=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.agentrun\.dev/husk}')
+          sel_pool=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.dev/pool}')
+          sel_husk=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.selector.matchLabels.mitos\.dev/husk}')
           minavail=$(kubectl -n default get pdb husk-e2e-husk -o jsonpath='{.spec.minAvailable}')
           echo "PDB selector: pool='${sel_pool}' husk='${sel_husk}', minAvailable='${minavail}'"
           [ "$sel_pool" = "husk-e2e" ] || { echo "EVICTION-FAILED: PDB pool selector is not husk-e2e"; exit 1; }
@@ -1116,12 +1116,12 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== self-heal diagnostics ==="
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
           }
           trap dump ERR
 
-          before=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+          before=$(kubectl get pods -n default -l mitos.run/husk=true \
             --field-selector=status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
             | grep . | sort)
           echo "husk pods before delete:"; printf '%s\n' "$before"
@@ -1134,7 +1134,7 @@ jobs:
           # AND a name not in the before-set appears (a genuinely new pod).
           healed=0
           for i in $(seq 1 36); do
-            now=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+            now=$(kubectl get pods -n default -l mitos.run/husk=true \
               --field-selector=status.phase!=Failed -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
               | grep . | sort)
             count=$(printf '%s\n' "$now" | grep -c . || true)
@@ -1145,7 +1145,7 @@ jobs:
           done
           if [ "$healed" -ne 1 ]; then
             echo "EVICTION-FAILED: the warm pool did not self-heal the deleted husk pod back to Replicas with a new pod"
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
             exit 1
           fi
           # The new pod is owned by the pool (owner-reference, the GC + self-heal edge).
@@ -1156,7 +1156,7 @@ jobs:
       - name: Eviction 3, a claim re-pends when its husk pod is deleted (object-level)
         # OBJECT-LEVEL re-pend (the full re-activate needs a Ready dormant pod,
         # the nested-VMM boundary). We drive a claim to point at a husk pod at the
-        # object level: stamp a husk pod with agentrun.dev/claim and set the
+        # object level: stamp a husk pod with mitos.run/claim and set the
         # claim's Status.Node/Endpoint/SandboxID, then delete that pod and assert
         # the claim goes Pending (re-pend) and the pool recreates a replacement
         # husk pod. The Watches(pod)->claim mapping + checkHuskPodLost drive this.
@@ -1167,13 +1167,13 @@ jobs:
           dump() {
             echo "=== re-pend diagnostics ==="
             kubectl -n default get sandboxclaim repend-probe -o yaml 2>/dev/null || true
-            kubectl get pods -n default -l agentrun.dev/husk=true -o wide || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
+            kubectl get pods -n default -l mitos.run/husk=true -o wide || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
           }
           trap dump ERR
 
           # Pick a husk pod to back the probe claim.
-          backing=$(kubectl get pods -n default -l agentrun.dev/husk=true \
+          backing=$(kubectl get pods -n default -l mitos.run/husk=true \
             --field-selector=status.phase!=Failed -o jsonpath='{.items[0].metadata.name}')
           [ -n "$backing" ] || { echo "EVICTION-FAILED: no husk pod to back the re-pend probe"; exit 1; }
           podip=$(kubectl -n default get pod "$backing" -o jsonpath='{.status.podIP}')
@@ -1184,7 +1184,7 @@ jobs:
           # object level (label the pod claimed; set the claim status). This is the
           # object-level stand-in for a real husk activation (which needs the VMM).
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxClaim
           metadata:
             name: repend-probe
@@ -1193,7 +1193,7 @@ jobs:
             poolRef:
               name: husk-e2e
           YAML
-          kubectl -n default label pod "$backing" agentrun.dev/claim=repend-probe --overwrite
+          kubectl -n default label pod "$backing" mitos.run/claim=repend-probe --overwrite
           # Patch the claim status to "active on the backing pod" via the status
           # subresource so checkHuskPodLost sees it as Ready on that pod.
           kubectl -n default patch sandboxclaim repend-probe --subresource=status --type=merge \
@@ -1220,7 +1220,7 @@ jobs:
           # The pool recreates a replacement husk pod (warm pool restored).
           poolcount=0
           for i in $(seq 1 24); do
-            n=$(kubectl get pods -n default -l agentrun.dev/husk=true --field-selector=status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            n=$(kubectl get pods -n default -l mitos.run/husk=true --field-selector=status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
             echo "  [${i}/24] husk pod count after re-pend: $n"
             if [ "$n" -ge 2 ]; then poolcount=1; break; fi
             sleep 5
@@ -1250,7 +1250,7 @@ jobs:
             name: husk-unsched-probe
             namespace: default
             labels:
-              agentrun.dev/husk: "true"
+              mitos.run/husk: "true"
           spec:
             restartPolicy: Always
             containers:
@@ -1299,10 +1299,10 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== husk activation diagnostics ==="
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
             kubectl -n default get sandboxclaim husk-e2e-claim -o yaml || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=120 || true
-            for p in $(kubectl get pods -A -l agentrun.dev/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=120 || true
+            for p in $(kubectl get pods -A -l mitos.run/husk=true -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {end}'); do
               ns=${p%%/*}; name=${p##*/}
               echo "--- logs $ns/$name ---"; kubectl -n "$ns" logs "$name" --tail=80 || true
             done
@@ -1312,7 +1312,7 @@ jobs:
           # Wait up to 4 minutes for a husk pod to go Ready (nested dormant VMM up).
           ready=0
           for i in $(seq 1 48); do
-            r=$(kubectl get pods -A -l agentrun.dev/husk=true \
+            r=$(kubectl get pods -A -l mitos.run/husk=true \
               -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{end} {end}' 2>/dev/null || true)
             echo "  [${i}/48] husk pod Ready conditions: '${r}'"
             for v in $r; do
@@ -1324,13 +1324,13 @@ jobs:
 
           if [ "$ready" != "1" ]; then
             echo "HUSK-KIND-VMM: no husk pod reached Ready in the window. The nested dormant Firecracker VMM did not come up inside the kind pod, the documented kind boundary. The cluster object lifecycle is gated by the prior steps; the in-VM dormant-VMM + mTLS activation + exec path is gated in kvm-test.yaml (Firecracker on the host). Not failing the job for the nested-VMM limitation."
-            kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+            kubectl get pods -A -l mitos.run/husk=true -o wide || true
             exit 0
           fi
 
           echo "A husk pod reached Ready, tightening to the FULL claim -> Ready -> exec gate."
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxClaim
           metadata:
             name: husk-e2e-claim
@@ -1356,9 +1356,9 @@ jobs:
           echo "claim endpoint (podIP:port): $endpoint"
           podip=${endpoint%%:*}
           sbport=${endpoint##*:}
-          huskpod=$(kubectl get pods -A -l agentrun.dev/claim=husk-e2e-claim \
+          huskpod=$(kubectl get pods -A -l mitos.run/claim=husk-e2e-claim \
             -o jsonpath='{.items[0].metadata.name}')
-          hns=$(kubectl get pods -A -l agentrun.dev/claim=husk-e2e-claim \
+          hns=$(kubectl get pods -A -l mitos.run/claim=husk-e2e-claim \
             -o jsonpath='{.items[0].metadata.namespace}')
           token=$(kubectl -n default get secret husk-e2e-claim-sandbox-token \
             -o jsonpath='{.data.token}' | base64 -d)
@@ -1389,7 +1389,7 @@ jobs:
           kubectl -n default delete sandboxclaim husk-e2e-claim --ignore-not-found=true || true
           kubectl -n default delete sandboxpool husk-e2e --ignore-not-found=true || true
           kubectl -n default delete sandboxtemplate husk-e2e --ignore-not-found=true || true
-          kubectl get pods -A -l agentrun.dev/husk=true -o wide || true
+          kubectl get pods -A -l mitos.run/husk=true -o wide || true
 
   facade-conformance:
     # The agents.x-k8s.io conformance harness (issue #19): apply the UPSTREAM
@@ -1402,7 +1402,7 @@ jobs:
     #   - PROVEN here (object level, no running sandbox needed): the upstream
     #     agents.x-k8s.io Sandbox CRD ADMITS their manifest verbatim; our facade
     #     CREATES the bridged husk-backed SandboxClaim (owner reference +
-    #     agentrun.dev/pool bridge annotation); our facade UPDATES the Sandbox
+    #     mitos.run/pool bridge annotation); our facade UPDATES the Sandbox
     #     status with a Ready condition reflecting the run-path state achievable
     #     on kind (Ready=False while the husk claim is Pending, since no VMM
     #     boots here); deleting the Sandbox leaves the claim owner-referenced for
@@ -1429,7 +1429,7 @@ jobs:
           go-version: "1.26"
       - uses: helm/kind-action@v1
         with:
-          cluster_name: agent-run-facade
+          cluster_name: mitos-facade
           config: hack/kind-config.yaml
       - name: Build and load the facade + controller images
         # The facade reconciles the upstream Sandbox; the controller owns the
@@ -1439,10 +1439,10 @@ jobs:
         # the bare-metal boundary documented above).
         run: |
           set -euo pipefail
-          docker build -f Dockerfile.facade -t agent-run-facade:ci .
-          docker build -f Dockerfile.controller -t agent-run-controller:ci .
-          for img in agent-run-facade agent-run-controller; do
-            kind load docker-image "$img:ci" --name agent-run-facade
+          docker build -f Dockerfile.facade -t mitos-facade:ci .
+          docker build -f Dockerfile.controller -t mitos-controller:ci .
+          for img in mitos-facade mitos-controller; do
+            kind load docker-image "$img:ci" --name mitos-facade
           done
       - name: Install the upstream agents.x-k8s.io CRDs (vendored, unchanged)
         # Install the upstream Sandbox CRD from the vendored third_party tree, so
@@ -1465,22 +1465,22 @@ jobs:
         # the opt-in facade. Retarget both images to the locally-loaded :ci tags
         # with IfNotPresent (kind serves the local image, no registry pull). The
         # facade default pool is "default" (set below), matching the SandboxPool
-        # we create; the upstream manifest carries no agentrun.dev/pool
+        # we create; the upstream manifest carries no mitos.run/pool
         # annotation, so the facade binds it to that default pool.
         run: |
           set -euo pipefail
           kubectl apply -k deploy/
           kubectl apply -f deploy/facade/facade.yaml
 
-          kubectl -n agent-run set image deployment/agent-run-controller \
-            controller=agent-run-controller:ci
-          kubectl -n agent-run set image deployment/agent-run-facade \
-            facade=agent-run-facade:ci
-          for d in deployment/agent-run-controller deployment/agent-run-facade; do
-            kubectl -n agent-run patch "$d" --type=json \
+          kubectl -n mitos set image deployment/mitos-controller \
+            controller=mitos-controller:ci
+          kubectl -n mitos set image deployment/mitos-facade \
+            facade=mitos-facade:ci
+          for d in deployment/mitos-controller deployment/mitos-facade; do
+            kubectl -n mitos patch "$d" --type=json \
               -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
           done
-          kubectl -n agent-run scale deployment/agent-run-controller --replicas=1
+          kubectl -n mitos scale deployment/mitos-controller --replicas=1
       - name: Stack rolls out (controller + facade Ready, PKI Secrets exist)
         # Gate: the controller and facade roll out Ready and the controller's
         # EnsurePKI minted the CA + forkd + controller TLS Secrets. A missing
@@ -1489,17 +1489,17 @@ jobs:
           set -euo pipefail
           dump() {
             echo "=== facade-conformance setup diagnostics ==="
-            kubectl -n agent-run get pods -o wide || true
-            kubectl -n agent-run get secrets || true
-            kubectl -n agent-run describe deployment/agent-run-facade || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=80 || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=controller --tail=80 || true
+            kubectl -n mitos get pods -o wide || true
+            kubectl -n mitos get secrets || true
+            kubectl -n mitos describe deployment/mitos-facade || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=80 || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=controller --tail=80 || true
           }
           trap dump ERR
-          kubectl -n agent-run rollout status deployment/agent-run-controller --timeout=180s
-          kubectl -n agent-run rollout status deployment/agent-run-facade --timeout=180s
-          for s in agent-run-ca agent-run-forkd-tls agent-run-controller-tls; do
-            kubectl -n agent-run get secret "$s" >/dev/null || {
+          kubectl -n mitos rollout status deployment/mitos-controller --timeout=180s
+          kubectl -n mitos rollout status deployment/mitos-facade --timeout=180s
+          for s in mitos-ca mitos-forkd-tls mitos-controller-tls; do
+            kubectl -n mitos get secret "$s" >/dev/null || {
               echo "FACADE-SETUP: PKI Secret $s missing (EnsurePKI did not complete)"
               exit 1
             }
@@ -1514,7 +1514,7 @@ jobs:
         run: |
           set -euo pipefail
           cat <<'YAML' | kubectl apply -f -
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxTemplate
           metadata:
             name: default
@@ -1525,7 +1525,7 @@ jobs:
               cpu: "1"
               memory: 512Mi
           ---
-          apiVersion: agentrun.dev/v1alpha1
+          apiVersion: mitos.run/v1alpha1
           kind: SandboxPool
           metadata:
             name: default
@@ -1563,7 +1563,7 @@ jobs:
             kubectl -n default describe sandbox.agents.x-k8s.io hello-world || true
             kubectl -n default get sandboxclaim -o wide || true
             kubectl -n default describe sandboxclaim hello-world || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=120 || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
 
@@ -1572,7 +1572,7 @@ jobs:
           echo "PASS (a): upstream Sandbox admitted verbatim"
 
           # (b) our facade creates the bridged husk-backed SandboxClaim, with the
-          # owner reference back to the Sandbox AND the agentrun.dev/pool bridge
+          # owner reference back to the Sandbox AND the mitos.run/pool bridge
           # annotation.
           claimed=0
           for i in $(seq 1 30); do
@@ -1590,13 +1590,13 @@ jobs:
           owner=$(kubectl -n default get sandboxclaim hello-world \
             -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}')
           pool=$(kubectl -n default get sandboxclaim hello-world \
-            -o jsonpath='{.metadata.annotations.agentrun\.dev/pool}')
+            -o jsonpath='{.metadata.annotations.mitos\.dev/pool}')
           if [ "$owner" != "Sandbox/hello-world" ]; then
             echo "FACADE-CONFORMANCE: claim owner = '$owner', want Sandbox/hello-world"
             exit 1
           fi
           if [ "$pool" != "default" ]; then
-            echo "FACADE-CONFORMANCE: claim agentrun.dev/pool = '$pool', want default"
+            echo "FACADE-CONFORMANCE: claim mitos.run/pool = '$pool', want default"
             exit 1
           fi
           echo "PASS (b): facade bridged a husk-backed SandboxClaim (owner=$owner pool=$pool)"
@@ -1721,17 +1721,17 @@ jobs:
             kubectl -n default get sandboxtemplate.extensions.agents.x-k8s.io -o wide || true
             kubectl -n default get sandboxwarmpool.extensions.agents.x-k8s.io -o wide || true
             kubectl -n default get sandboxclaim.extensions.agents.x-k8s.io -o wide || true
-            kubectl -n default get sandboxtemplate.agentrun.dev -o wide || true
-            kubectl -n default get sandboxpool.agentrun.dev -o wide || true
-            kubectl -n default get sandboxclaim.agentrun.dev -o wide || true
-            kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=120 || true
+            kubectl -n default get sandboxtemplate.mitos.run -o wide || true
+            kubectl -n default get sandboxpool.mitos.run -o wide || true
+            kubectl -n default get sandboxclaim.mitos.run -o wide || true
+            kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=120 || true
           }
           trap dump ERR
 
           # (g) their SandboxTemplate creates our template (same name).
           got_tmpl=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxtemplate.agentrun.dev secure-datascience-template >/dev/null 2>&1; then
+            if kubectl -n default get sandboxtemplate.mitos.run secure-datascience-template >/dev/null 2>&1; then
               got_tmpl=1
               break
             fi
@@ -1748,7 +1748,7 @@ jobs:
           # (1), pointing at the resolved template.
           got_pool=0
           for i in $(seq 1 30); do
-            replicas=$(kubectl -n default get sandboxpool.agentrun.dev sandboxwarmpool-example \
+            replicas=$(kubectl -n default get sandboxpool.mitos.run sandboxwarmpool-example \
               -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
             if [ "$replicas" = "1" ]; then
               got_pool=1
@@ -1761,7 +1761,7 @@ jobs:
             echo "FACADE-CONFORMANCE: their SandboxWarmPool did not create our pool at replicas 1"
             exit 1
           fi
-          tref=$(kubectl -n default get sandboxpool.agentrun.dev sandboxwarmpool-example \
+          tref=$(kubectl -n default get sandboxpool.mitos.run sandboxwarmpool-example \
             -o jsonpath='{.spec.templateRef.name}')
           if [ "$tref" != "secure-datascience-template" ]; then
             echo "FACADE-CONFORMANCE: our pool templateRef = '$tref', want secure-datascience-template"
@@ -1774,7 +1774,7 @@ jobs:
           # annotations.
           got_claim=0
           for i in $(seq 1 30); do
-            if kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox >/dev/null 2>&1; then
+            if kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox >/dev/null 2>&1; then
               got_claim=1
               break
             fi
@@ -1785,10 +1785,10 @@ jobs:
             echo "FACADE-CONFORMANCE: their SandboxClaim did not create our claim"
             exit 1
           fi
-          bound_pool=$(kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox \
+          bound_pool=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
             -o jsonpath='{.spec.poolRef.name}')
-          policy=$(kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox \
-            -o jsonpath='{.metadata.annotations.agentrun\.dev/warmpool-policy}')
+          policy=$(kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox \
+            -o jsonpath='{.metadata.annotations.mitos\.dev/warmpool-policy}')
           if [ "$bound_pool" != "sandboxwarmpool-example" ]; then
             echo "FACADE-CONFORMANCE: our claim poolRef = '$bound_pool', want sandboxwarmpool-example"
             exit 1
@@ -1803,7 +1803,7 @@ jobs:
           kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox
           gone=0
           for i in $(seq 1 30); do
-            if ! kubectl -n default get sandboxclaim.agentrun.dev my-secure-sandbox >/dev/null 2>&1; then
+            if ! kubectl -n default get sandboxclaim.mitos.run my-secure-sandbox >/dev/null 2>&1; then
               gone=1
               break
             fi
@@ -1823,6 +1823,6 @@ jobs:
           kubectl -n default delete sandboxclaim.extensions.agents.x-k8s.io my-secure-sandbox --ignore-not-found=true || true
           kubectl -n default delete sandboxwarmpool.extensions.agents.x-k8s.io sandboxwarmpool-example --ignore-not-found=true || true
           kubectl -n default delete sandboxtemplate.extensions.agents.x-k8s.io secure-datascience-template --ignore-not-found=true || true
-          kubectl -n default delete sandboxpool.agentrun.dev default --ignore-not-found=true || true
-          kubectl -n default delete sandboxtemplate.agentrun.dev default --ignore-not-found=true || true
-          kubectl -n agent-run logs -l app.kubernetes.io/component=facade --tail=60 || true
+          kubectl -n default delete sandboxpool.mitos.run default --ignore-not-found=true || true
+          kubectl -n default delete sandboxtemplate.mitos.run default --ignore-not-found=true || true
+          kubectl -n mitos logs -l app.kubernetes.io/component=facade --tail=60 || true

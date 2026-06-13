@@ -14,7 +14,7 @@ not measurable on a given cluster is spelled out below.
 The harness, given a cluster (`--kubeconfig`):
 
 1. Applies an upstream `agents.x-k8s.io/v1alpha1` Sandbox bound to one of our
-   pools via the `agentrun.dev/pool` bridge annotation.
+   pools via the `mitos.run/pool` bridge annotation.
 2. Times the **initial claim latency**: apply -> the facade bridges the
    husk-backed `SandboxClaim`.
 3. Toggles `spec.replicas` `1 -> 0 -> 1` for `--iterations` rounds, timing the
@@ -83,7 +83,7 @@ Flags:
 | `--kubeconfig` | path to the target cluster kubeconfig (required) |
 | `--namespace` | namespace to apply the Sandbox in (default `default`) |
 | `--name` | name of the Sandbox + bridged claim (default `facade-bench`) |
-| `--pool` | the `agentrun.dev` pool the Sandbox binds to (default `default`) |
+| `--pool` | the `mitos.run` pool the Sandbox binds to (default `default`) |
 | `--image` | podTemplate image (the husk pool pins the real image; this only keeps the manifest valid; default `busybox:stable`) |
 | `--iterations` | number of pause/resume toggles to time (default `20`) |
 | `--timeout` | per-step timeout waiting for the bridged claim to transition (default `60s`) |

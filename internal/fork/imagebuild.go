@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/paperclipinc/sandbox/internal/ociroot"
+	"github.com/paperclipinc/mitos/internal/ociroot"
 )
 
 // buildRootfsFromImage turns an OCI image reference into a bootable ext4 rootfs

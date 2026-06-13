@@ -28,7 +28,7 @@ func TestJailerArgs(t *testing.T) {
 	cfg := DefaultVMConfig()
 	cfg.ID = "vm-1"
 	cfg.FirecrackerBin = "/usr/local/bin/firecracker"
-	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/agent-run")
+	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/mitos")
 
 	args := jailerArgs(cfg, cfg.ID, 64000, 64000)
 	want := []string{
@@ -54,7 +54,7 @@ func TestJailerArgs(t *testing.T) {
 func TestJailerArgsExplicitCgroupVersion(t *testing.T) {
 	cfg := DefaultVMConfig()
 	cfg.ID = "vm-1"
-	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/agent-run")
+	cfg.Jailer = testJailerConfig("/srv/jailer", "/var/lib/mitos")
 	cfg.Jailer.CgroupVersion = 1
 
 	args := jailerArgs(cfg, cfg.ID, 64001, 64001)
@@ -80,8 +80,8 @@ func TestJailerPathLayout(t *testing.T) {
 }
 
 func TestChrootPathMirrorsHostPath(t *testing.T) {
-	got := chrootPath("/srv/jailer", "vm-7", "/var/lib/agent-run/templates/t1/snapshot/mem")
-	want := "/srv/jailer/firecracker/vm-7/root/var/lib/agent-run/templates/t1/snapshot/mem"
+	got := chrootPath("/srv/jailer", "vm-7", "/var/lib/mitos/templates/t1/snapshot/mem")
+	want := "/srv/jailer/firecracker/vm-7/root/var/lib/mitos/templates/t1/snapshot/mem"
 	if got != want {
 		t.Fatalf("chrootPath = %q, want %q", got, want)
 	}
@@ -570,12 +570,12 @@ func TestStartVMJailedReleasesUIDOnLaunchFailure(t *testing.T) {
 
 func TestClientHostPath(t *testing.T) {
 	direct := &Client{}
-	if got := direct.HostPath("/var/lib/agent-run/sandboxes/s1/vsock.sock"); got != "/var/lib/agent-run/sandboxes/s1/vsock.sock" {
+	if got := direct.HostPath("/var/lib/mitos/sandboxes/s1/vsock.sock"); got != "/var/lib/mitos/sandboxes/s1/vsock.sock" {
 		t.Fatalf("direct HostPath = %q", got)
 	}
 	jailed := &Client{chrootDir: "/srv/jailer/firecracker/vm-1/root"}
-	want := "/srv/jailer/firecracker/vm-1/root/var/lib/agent-run/sandboxes/s1/vsock.sock"
-	if got := jailed.HostPath("/var/lib/agent-run/sandboxes/s1/vsock.sock"); got != want {
+	want := "/srv/jailer/firecracker/vm-1/root/var/lib/mitos/sandboxes/s1/vsock.sock"
+	if got := jailed.HostPath("/var/lib/mitos/sandboxes/s1/vsock.sock"); got != want {
 		t.Fatalf("jailed HostPath = %q, want %q", got, want)
 	}
 }
@@ -590,21 +590,21 @@ func TestClientHostPath(t *testing.T) {
 func TestVsockHostPathPerCwd(t *testing.T) {
 	// Two raw-mode forks with distinct WorkDirs resolve the same baked
 	// relative path to distinct host sockets.
-	rawA := &Client{workDir: "/var/lib/agent-run/sandboxes/a"}
-	rawB := &Client{workDir: "/var/lib/agent-run/sandboxes/b"}
+	rawA := &Client{workDir: "/var/lib/mitos/sandboxes/a"}
+	rawB := &Client{workDir: "/var/lib/mitos/sandboxes/b"}
 	gotA := rawA.VsockHostPath(VsockRelPath)
 	gotB := rawB.VsockHostPath(VsockRelPath)
 	if gotA == gotB {
 		t.Fatalf("two forks collided on one vsock host path %q", gotA)
 	}
-	if want := "/var/lib/agent-run/sandboxes/a/vsock.sock"; gotA != want {
+	if want := "/var/lib/mitos/sandboxes/a/vsock.sock"; gotA != want {
 		t.Fatalf("raw VsockHostPath = %q, want %q", gotA, want)
 	}
 
 	// Under the jailer the baked relative path resolves against the
 	// per-VM chroot root.
 	jailed := &Client{
-		workDir:   "/var/lib/agent-run/sandboxes/c",
+		workDir:   "/var/lib/mitos/sandboxes/c",
 		chrootDir: "/srv/jailer/firecracker/vm-c/root",
 	}
 	if want := "/srv/jailer/firecracker/vm-c/root/vsock.sock"; jailed.VsockHostPath(VsockRelPath) != want {

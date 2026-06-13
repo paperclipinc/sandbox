@@ -18,7 +18,7 @@ func newFlagSet(name string, errw io.Writer) *flag.FlagSet {
 	return fs
 }
 
-// cmdRun implements `agentrun run <command> [--pool P] [--timeout N]`: create a
+// cmdRun implements `mitos run <command> [--pool P] [--timeout N]`: create a
 // sandbox, run the command, terminate the sandbox, and return the command's exit
 // code. Terminate runs even when exec fails.
 func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
@@ -188,7 +188,7 @@ func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, ou
 }
 
 // cmdDev validates the `dev up|down` arguments. The dev orchestration shells out
-// to kind and kubectl, which the pure CLI dispatcher does not do; cmd/agentrun
+// to kind and kubectl, which the pure CLI dispatcher does not do; cmd/mitos
 // intercepts the dev subcommand before agentcli.Run and runs DevUp/DevDown with
 // a real exec runner. Reaching cmdDev means dev was invoked through a path that
 // did not wire the runner, so it reports that and returns nonzero.
@@ -199,7 +199,7 @@ func cmdDev(_ context.Context, args []string, _, errw io.Writer) int {
 	}
 	switch args[0] {
 	case "up", "down":
-		fmt.Fprintf(errw, "dev %s: run via the agentrun binary, which wires the kind/kubectl runner\n", args[0])
+		fmt.Fprintf(errw, "dev %s: run via the mitos binary, which wires the kind/kubectl runner\n", args[0])
 		return 1
 	default:
 		fmt.Fprintf(errw, "unknown dev subcommand %q\n\n%s", args[0], usage)

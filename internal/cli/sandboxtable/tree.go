@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 )
 
 // TreeNode is one entry in the rendered fork/lineage DAG: a SandboxClaim or a

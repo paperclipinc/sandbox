@@ -19,14 +19,14 @@ const (
 	// SpecVersion is the CloudEvents spec version the envelope declares.
 	SpecVersion = "1.0"
 	// Source is the CloudEvents source attribute: the controller emits the feed.
-	Source = "agentrun.dev/controller"
+	Source = "mitos.run/controller"
 	// DataContentType is the media type of the data payload.
 	DataContentType = "application/json"
 
 	// TypeRevisionCreated is emitted when a WorkspaceRevision is created.
-	TypeRevisionCreated = "dev.agentrun.workspace.revision.created"
+	TypeRevisionCreated = "dev.mitos.workspace.revision.created"
 	// TypePhaseChanged is emitted when a SandboxClaim transitions phase.
-	TypePhaseChanged = "dev.agentrun.sandbox.phase.changed"
+	TypePhaseChanged = "dev.mitos.sandbox.phase.changed"
 )
 
 // Event is a CloudEvents 1.0 envelope for the feed. The JSON tags match the
@@ -65,7 +65,7 @@ type RevisionCreatedData struct {
 	MemorySnapshotRef string `json:"memorySnapshotRef,omitempty"`
 	// TraceID, when set, is the orchestrator trace that produced the revision
 	// (the controller.reconcileClaim trace, stamped on the revision as the
-	// agentrun.dev/trace-id annotation). It lets an external indexer correlate
+	// mitos.run/trace-id annotation). It lets an external indexer correlate
 	// the revision.created event with the request trace. An opaque correlation
 	// id, never a secret value; empty when tracing was disabled.
 	TraceID string `json:"traceId,omitempty"`

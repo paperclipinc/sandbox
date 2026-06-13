@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
-	"github.com/paperclipinc/sandbox/internal/workspace"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -94,12 +94,12 @@ type repoFilesFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, diges
 // hydrated into its sandbox, so a requeue of a Ready claim does not hydrate
 // twice (which would clobber in-sandbox edits). It records the hydrated head
 // revision name (a content address pointer, not a secret).
-const workspaceHydratedAnnotation = "agentrun.dev/workspace-hydrated-head"
+const workspaceHydratedAnnotation = "mitos.run/workspace-hydrated-head"
 
 // workspaceDehydratedAnnotation marks a claim whose sandbox /workspace was
 // already dehydrated into a committed revision on terminate, so a re-entrant
 // terminate (lifetime expiry then delete) does not create a second revision.
-const workspaceDehydratedAnnotation = "agentrun.dev/workspace-dehydrated"
+const workspaceDehydratedAnnotation = "mitos.run/workspace-dehydrated"
 
 // traceIDAnnotation stamps the active reconcile's trace id onto a WorkspaceRevision
 // so an operator can resolve a committed revision back to the exact orchestrator
@@ -108,12 +108,12 @@ const workspaceDehydratedAnnotation = "agentrun.dev/workspace-dehydrated"
 // when tracing is enabled (the trace id is valid); a no-op provider leaves the
 // annotation absent rather than stamping a fake id. A trace id is an opaque
 // correlation id, not a secret.
-const traceIDAnnotation = "agentrun.dev/trace-id"
+const traceIDAnnotation = "mitos.run/trace-id"
 
 // traceIDAnnotations returns the annotation map a new WorkspaceRevision is
 // stamped with for the active trace, or nil when tracing is off. The trace id is
 // read from the active span context: a valid id (a real provider is installed)
-// is stamped under agentrun.dev/trace-id; an invalid id (the no-op provider /
+// is stamped under mitos.run/trace-id; an invalid id (the no-op provider /
 // tracing disabled) yields nil, so a fake all-zero id is never written. A trace
 // id is an opaque correlation id, never a secret value.
 func traceIDAnnotations(ctx context.Context) map[string]string {

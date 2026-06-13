@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Snapshot-fork sandboxes for AI agents on Kubernetes. The system boots Firecracker microVMs, forks them via copy-on-write snapshots, and exposes the whole lifecycle through declarative CRDs (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in API group `agentrun.dev/v1alpha1`.
+Snapshot-fork sandboxes for AI agents on Kubernetes. The system boots Firecracker microVMs, forks them via copy-on-write snapshots, and exposes the whole lifecycle through declarative CRDs (SandboxTemplate, SandboxPool, SandboxClaim, SandboxFork) in API group `mitos.run/v1alpha1`.
 
 Components:
 
@@ -48,7 +48,7 @@ make generate manifests   # regenerate deepcopy + CRD YAML after api/ changes
 - **firecracker client** (`internal/firecracker`): VM lifecycle over the Firecracker API socket.
 - **guest agent** (`guest/agent`): PID 1 inside the VM; serves exec, file IO, and env over vsock (`internal/vsock` is the host side).
 - **sandbox-server** (`cmd/sandbox-server`): standalone REST API on the same engine, no k8s.
-- **Python SDK** (`sdk/python/agent_run`): talks to forkd or sandbox-server.
+- **Python SDK** (`sdk/python/mitos`): talks to forkd or sandbox-server.
 
 Data paths:
 

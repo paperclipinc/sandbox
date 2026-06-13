@@ -9,10 +9,10 @@ import httpx
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
-from agent_run.types import ExecResult, FileInfo, ForkInfo, SandboxInfo, SandboxPhase
+from mitos.types import ExecResult, FileInfo, ForkInfo, SandboxInfo, SandboxPhase
 
 
-API_GROUP = "agentrun.dev"
+API_GROUP = "mitos.run"
 API_VERSION = "v1alpha1"
 POLL_INTERVAL = 0.05
 

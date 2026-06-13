@@ -25,9 +25,9 @@ import (
 // issuance is a defense against identity sprawl.
 const (
 	// ServerName is the DNS SAN of the forkd gRPC server certificate.
-	ServerName = "forkd.agent-run"
+	ServerName = "forkd.mitos"
 	// ControllerName is the DNS SAN of the controller client certificate.
-	ControllerName = "controller.agent-run"
+	ControllerName = "controller.mitos"
 )
 
 // CA is a self-signed certificate authority for the control plane.

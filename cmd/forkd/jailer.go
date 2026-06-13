@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/firecracker"
 )
 
 // parseUIDRange parses the --uid-range flag, "low-high" inclusive.

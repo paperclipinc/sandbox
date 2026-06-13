@@ -11,8 +11,8 @@ import (
 	agentsv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 
-	runv1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/facade"
+	runv1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/facade"
 )
 
 // newExtTemplate builds a minimal valid upstream extension SandboxTemplate: the
@@ -65,7 +65,7 @@ func getOurPool(t *testing.T, name string) (*runv1alpha1.SandboxPool, bool) {
 }
 
 // TestFacadeMapsExtSandboxTemplate: an upstream extension SandboxTemplate
-// reconciles to our agentrun.dev SandboxTemplate, mapping the first container's
+// reconciles to our mitos.run SandboxTemplate, mapping the first container's
 // image/command/env, stamping the bridge annotation, and owner-referenced for GC.
 func TestFacadeMapsExtSandboxTemplate(t *testing.T) {
 	src := newExtTemplate("ext-template")
@@ -111,7 +111,7 @@ func newExtWarmPool(name, templateName string, replicas int32) *extv1alpha1.Sand
 }
 
 // TestFacadeMapsExtSandboxWarmPool: an upstream extension SandboxWarmPool
-// reconciles to our agentrun.dev SandboxPool at the requested replicas, pointing
+// reconciles to our mitos.run SandboxPool at the requested replicas, pointing
 // at our template, owner-referenced and bridge-annotated.
 func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	src := newExtWarmPool("ext-warmpool", "ext-wp-template", 3)
@@ -141,10 +141,10 @@ func TestFacadeMapsExtSandboxWarmPool(t *testing.T) {
 	}
 
 	// The mirrored scale-subresource selector must match the husk pods of the
-	// mapped pool (agentrun.dev/pool=<pool>,agentrun.dev/husk=true, the exact
+	// mapped pool (mitos.run/pool=<pool>,mitos.run/husk=true, the exact
 	// keys/values buildHuskPod stamps), so an HPA reading pod-resource metrics
 	// finds the real husk pods. The pool and warm pool share the same name.
-	wantSelector := "agentrun.dev/pool=ext-warmpool,agentrun.dev/husk=true"
+	wantSelector := "mitos.run/pool=ext-warmpool,mitos.run/husk=true"
 	eventually(t, "the facade mirrors a husk-pod-matching status.selector", func() bool {
 		var cur extv1alpha1.SandboxWarmPool
 		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "ext-warmpool", Namespace: "default"}, &cur); err != nil {

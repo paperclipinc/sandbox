@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/pki"
+	"github.com/paperclipinc/mitos/internal/pki"
 )
 
 // netTestPKI issues the husk server (forkd identity) and controller client

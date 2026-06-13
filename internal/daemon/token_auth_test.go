@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paperclipinc/sandbox/internal/fork"
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/fork"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // startFakeExecAgent listens on sockPath, speaks the Firecracker vsock UDS

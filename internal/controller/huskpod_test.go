@@ -4,7 +4,7 @@ package controller_test
 //
 // Two layers:
 //   - a pure unit test of buildHuskPod that asserts the spec the controller
-//     emits: the agentrun.dev/kvm request+limit, the documented non-privileged
+//     emits: the mitos.run/kvm request+limit, the documented non-privileged
 //     securityContext, the owner-ref to the pool, the two husk labels, the
 //     cpu/memory requests, and the stub image.
 //   - an envtest of reconcileHuskPods that drives the warm pool through create
@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/controller"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,8 +46,8 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	c := k8sClient
 	r := &controller.SandboxPoolReconciler{Client: c}
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
-		StubImage:       "agent-run-husk-stub:test",
-		KVMResourceName: "agentrun.dev/kvm",
+		StubImage:       "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
 	})
 
 	if pod.GenerateName != "spec-pool-husk-" {
@@ -56,11 +56,11 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if pod.Namespace != "default" {
 		t.Errorf("Namespace = %q, want default", pod.Namespace)
 	}
-	if pod.Labels["agentrun.dev/pool"] != "spec-pool" {
-		t.Errorf("pool label = %q, want spec-pool", pod.Labels["agentrun.dev/pool"])
+	if pod.Labels["mitos.run/pool"] != "spec-pool" {
+		t.Errorf("pool label = %q, want spec-pool", pod.Labels["mitos.run/pool"])
 	}
-	if pod.Labels["agentrun.dev/husk"] != "true" {
-		t.Errorf("husk label = %q, want true", pod.Labels["agentrun.dev/husk"])
+	if pod.Labels["mitos.run/husk"] != "true" {
+		t.Errorf("husk label = %q, want true", pod.Labels["mitos.run/husk"])
 	}
 	if pod.Spec.RestartPolicy != corev1.RestartPolicyAlways {
 		t.Errorf("RestartPolicy = %q, want Always", pod.Spec.RestartPolicy)
@@ -78,11 +78,11 @@ func TestBuildHuskPodSpec(t *testing.T) {
 	if ctr.Name != "husk-stub" {
 		t.Errorf("container name = %q, want husk-stub", ctr.Name)
 	}
-	if ctr.Image != "agent-run-husk-stub:test" {
-		t.Errorf("container image = %q, want agent-run-husk-stub:test", ctr.Image)
+	if ctr.Image != "mitos-husk-stub:test" {
+		t.Errorf("container image = %q, want mitos-husk-stub:test", ctr.Image)
 	}
 
-	kvm := corev1.ResourceName("agentrun.dev/kvm")
+	kvm := corev1.ResourceName("mitos.run/kvm")
 	if got := ctr.Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("kvm request = %s, want 1", got.String())
 	}
@@ -127,7 +127,7 @@ func TestBuildHuskPodSpec(t *testing.T) {
 // husk pod is admitted into a baseline/restricted namespace only EXCEPT the
 // read-only snapshot hostPath (forbidden under both baseline and restricted) and
 // runAsNonRoot=false (forbidden under restricted, the /dev/kvm device exception),
-// plus the agentrun.dev/kvm device-plugin resource. The empirical PSA finding (a
+// plus the mitos.run/kvm device-plugin resource. The empirical PSA finding (a
 // restricted namespace rejects the husk pod on exactly hostPath + runAsNonRoot,
 // and the SAME securityContext minus those two is admitted into restricted) is
 // proven object-level on kind in the conformance job; this unit test pins the
@@ -144,9 +144,9 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
-		StubImage:  "agent-run-husk-stub:test",
+		StubImage:  "mitos-husk-stub:test",
 		SnapshotID: "psa-tmpl",
-		DataDir:    "/var/lib/agent-run",
+		DataDir:    "/var/lib/mitos",
 	})
 
 	// POD-LEVEL securityContext: PSA restricted checks seccompProfile at the pod
@@ -215,7 +215,7 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 
 	// DOCUMENTED EXCEPTION: the /dev/kvm device-plugin resource request (request
 	// AND limit), which replaces privileged: true.
-	kvm := corev1.ResourceName("agentrun.dev/kvm")
+	kvm := corev1.ResourceName("mitos.run/kvm")
 	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("kvm request = %s, want 1 (the device-plugin exception)", got.String())
 	}
@@ -233,11 +233,11 @@ func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
-		StubImage:     "agent-run-husk-stub:test",
+		StubImage:     "mitos-husk-stub:test",
 		SnapshotID:    "ctl-tmpl",
-		DataDir:       "/var/lib/agent-run",
+		DataDir:       "/var/lib/mitos",
 		TLSSecretName: "forkd-tls",
-		CASecretName:  "agent-run-ca",
+		CASecretName:  "mitos-ca",
 	})
 
 	ctr := pod.Spec.Containers[0]
@@ -303,16 +303,16 @@ func TestBuildHuskPodControlAndSnapshot(t *testing.T) {
 	if snapVol == nil || snapVol.HostPath == nil {
 		t.Fatalf("snapshot volume is not a hostPath: %+v", snapVol)
 	}
-	if snapVol.HostPath.Path != "/var/lib/agent-run/templates/ctl-tmpl/snapshot" {
-		t.Errorf("snapshot hostPath = %q, want /var/lib/agent-run/templates/ctl-tmpl/snapshot", snapVol.HostPath.Path)
+	if snapVol.HostPath.Path != "/var/lib/mitos/templates/ctl-tmpl/snapshot" {
+		t.Errorf("snapshot hostPath = %q, want /var/lib/mitos/templates/ctl-tmpl/snapshot", snapVol.HostPath.Path)
 	}
 	if tlsVol == nil || tlsVol.Secret == nil || tlsVol.Secret.SecretName != "forkd-tls" {
 		t.Errorf("husk-tls volume should mount the forkd-tls Secret: %+v", tlsVol)
 	}
 
 	// Placement: the pod must land on a KVM node.
-	if pod.Spec.NodeSelector["agentrun.dev/kvm"] != "true" {
-		t.Errorf("nodeSelector = %+v, want agentrun.dev/kvm=true", pod.Spec.NodeSelector)
+	if pod.Spec.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("nodeSelector = %+v, want mitos.run/kvm=true", pod.Spec.NodeSelector)
 	}
 }
 
@@ -333,14 +333,14 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
-		StubImage:      "agent-run-husk-stub:test",
+		StubImage:      "mitos-husk-stub:test",
 		SnapshotID:     "verify-tmpl",
-		DataDir:        "/var/lib/agent-run",
+		DataDir:        "/var/lib/mitos",
 		ExpectedDigest: digest,
 	})
 
 	args := strings.Join(pod.Spec.Containers[0].Args, " ")
-	if !strings.Contains(args, "--manifest /var/lib/agent-run/manifest.json") {
+	if !strings.Contains(args, "--manifest /var/lib/mitos/manifest.json") {
 		t.Errorf("args missing --manifest mount path: %v", pod.Spec.Containers[0].Args)
 	}
 	if strings.Contains(args, "--allow-unverified-snapshots") {
@@ -357,8 +357,8 @@ func TestBuildHuskPodMountsManifestWhenDigestKnown(t *testing.T) {
 	if manVol == nil || manVol.HostPath == nil {
 		t.Fatalf("snapshot-manifest volume is not a hostPath: %+v", manVol)
 	}
-	if manVol.HostPath.Path != "/var/lib/agent-run/cas/manifests/"+digest {
-		t.Errorf("manifest hostPath = %q, want /var/lib/agent-run/cas/manifests/%s", manVol.HostPath.Path, digest)
+	if manVol.HostPath.Path != "/var/lib/mitos/cas/manifests/"+digest {
+		t.Errorf("manifest hostPath = %q, want /var/lib/mitos/cas/manifests/%s", manVol.HostPath.Path, digest)
 	}
 	var mounted bool
 	for _, m := range pod.Spec.Containers[0].VolumeMounts {
@@ -389,9 +389,9 @@ func TestBuildHuskPodEscapeHatchWhenNoDigest(t *testing.T) {
 
 	r := &controller.SandboxPoolReconciler{Client: k8sClient}
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{
-		StubImage:  "agent-run-husk-stub:test",
+		StubImage:  "mitos-husk-stub:test",
 		SnapshotID: "nodigest-tmpl",
-		DataDir:    "/var/lib/agent-run",
+		DataDir:    "/var/lib/mitos",
 	})
 
 	args := strings.Join(pod.Spec.Containers[0].Args, " ")
@@ -422,7 +422,7 @@ func TestBuildHuskPodDefaultSizing(t *testing.T) {
 	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{})
 
 	// Default kvm resource name when opts leaves it empty.
-	kvm := corev1.ResourceName("agentrun.dev/kvm")
+	kvm := corev1.ResourceName("mitos.run/kvm")
 	if got := pod.Spec.Containers[0].Resources.Requests[kvm]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Errorf("default kvm request = %s, want 1", got.String())
 	}
@@ -439,7 +439,7 @@ func listHuskPods(t *testing.T, c client.Client, poolName string) []corev1.Pod {
 	var pods corev1.PodList
 	if err := c.List(ctx, &pods,
 		client.InNamespace("default"),
-		client.MatchingLabels{"agentrun.dev/pool": poolName, "agentrun.dev/husk": "true"},
+		client.MatchingLabels{"mitos.run/pool": poolName, "mitos.run/husk": "true"},
 	); err != nil {
 		t.Fatalf("list husk pods: %v", err)
 	}
@@ -492,8 +492,8 @@ func TestReconcileHuskPodsCreateScaleAndFlagOff(t *testing.T) {
 		Client:          c,
 		NodeRegistry:    controller.NewNodeRegistry(),
 		EnableHuskPods:  true,
-		HuskStubImage:   "agent-run-husk-stub:test",
-		KVMResourceName: "agentrun.dev/kvm",
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
 	}
 
 	// Re-fetch the pool so the reconciler works against a server-populated UID

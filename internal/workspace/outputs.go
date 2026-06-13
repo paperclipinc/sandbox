@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	v1alpha1 "github.com/paperclipinc/sandbox/api/v1alpha1"
-	"github.com/paperclipinc/sandbox/internal/cas"
+	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/cas"
 )
 
 // CapturePaths reduces a claim's spec.outputs into the set of workspace-relative

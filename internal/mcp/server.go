@@ -18,7 +18,7 @@ type scanResult struct {
 const (
 	// protocolVersion is the MCP protocol revision this server speaks.
 	protocolVersion = "2025-06-18"
-	serverName      = "agentrun-mcp"
+	serverName      = "mitos-mcp"
 	serverVersion   = "0.1.0"
 )
 

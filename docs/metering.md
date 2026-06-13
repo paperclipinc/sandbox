@@ -117,13 +117,13 @@ counterparts).
 
 The forkd `/metrics` gauges are CoW-aware (`internal/daemon`):
 
-- `agentrun_memory_shared_bytes`: CoW-aware shared memory, each template's shared
+- `mitos_memory_shared_bytes`: CoW-aware shared memory, each template's shared
   page set counted once (the shared-once total).
-- `agentrun_memory_unique_bytes`: per-fork unique memory summed over all
+- `mitos_memory_unique_bytes`: per-fork unique memory summed over all
   sandboxes.
-- `agentrun_cow_memory_savings_bytes`: memory the CoW model reveals is not
+- `mitos_cow_memory_savings_bytes`: memory the CoW model reveals is not
   consumed per fork (naive minus CoW-aware).
-- `agentrun_metered_disk_bytes`: CoW-aware metered backing storage (template
+- `mitos_metered_disk_bytes`: CoW-aware metered backing storage (template
   volume seeds counted once).
 
 Observability is documented in [`observability.md`](observability.md).
@@ -153,11 +153,11 @@ consumed.
   recognized within a template group; kernel same-page merging across templates
   is not accounted.
 - **Per-tenant / per-workspace rollups**: aggregate the node report by tenant,
-  tied to Workspace ([#21](https://github.com/paperclipinc/sandbox/issues/21)).
+  tied to Workspace ([#21](https://github.com/paperclipinc/mitos/issues/21)).
 - **Billing export / OpenCost integration** and **historical time series**:
   the metrics feed Prometheus today; dashboards and export are follow-ups
-  ([#29](https://github.com/paperclipinc/sandbox/issues/29),
-  [#18](https://github.com/paperclipinc/sandbox/issues/18)).
+  ([#29](https://github.com/paperclipinc/mitos/issues/29),
+  [#18](https://github.com/paperclipinc/mitos/issues/18)).
 
 The CoW density datapoint and its CI proof are in
 [`../BENCHMARKS.md`](../BENCHMARKS.md) (the metering CI phase forks 4 sandboxes

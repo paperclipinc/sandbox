@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/firecracker"
 )
 
 // fakeVMM records the snapshot-load arguments and returns a canned error.

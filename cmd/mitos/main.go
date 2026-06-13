@@ -1,12 +1,12 @@
-// Command agentrun is the command-line interface for snapshot-fork sandboxes.
+// Command mitos is the command-line interface for snapshot-fork sandboxes.
 // It drives the sandbox lifecycle (create, exec, file IO, fork, terminate, list)
 // against a Kubernetes cluster, and brings a local kind dev cluster up or down.
 //
 // Usage:
 //
-//	agentrun run <command> [--pool P] [--timeout N]
-//	agentrun sandbox create|ls|exec|fork|terminate ...
-//	agentrun dev up|down
+//	mitos run <command> [--pool P] [--timeout N]
+//	mitos sandbox create|ls|exec|fork|terminate ...
+//	mitos dev up|down
 //
 // The cluster connection is resolved from the standard kubeconfig (KUBECONFIG,
 // --kubeconfig, or in-cluster). The sandbox API bearer token is read from the
@@ -19,7 +19,7 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/paperclipinc/sandbox/internal/agentcli"
+	"github.com/paperclipinc/mitos/internal/agentcli"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )

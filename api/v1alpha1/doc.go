@@ -1,3 +1,3 @@
 // +kubebuilder:object:generate=true
-// +groupName=agentrun.dev
+// +groupName=mitos.run
 package v1alpha1

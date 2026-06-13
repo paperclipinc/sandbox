@@ -78,7 +78,7 @@ describe("AgentRun.create", () => {
     // Claim spec is correct.
     expect(fake.createdClaims).toHaveLength(1);
     const claim = fake.createdClaims[0];
-    expect(claim.apiVersion).toBe("agentrun.dev/v1alpha1");
+    expect(claim.apiVersion).toBe("mitos.run/v1alpha1");
     expect(claim.kind).toBe("SandboxClaim");
     expect(claim.metadata).toEqual({ name: "sbx-1", namespace: "team-a" });
     expect(claim.spec).toEqual({

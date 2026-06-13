@@ -1,5 +1,5 @@
 # Full workspace setup: shared data from S3, git-backed code, persistent state
-apiVersion: agentrun.dev/v1alpha1
+apiVersion: mitos.run/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: full-workspace-agent

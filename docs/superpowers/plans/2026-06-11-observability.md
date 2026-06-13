@@ -47,7 +47,7 @@
 
 **Files:** `internal/controller/metrics.go` (new, controller-runtime registry), `internal/controller/sandboxclaim_controller.go`, `internal/controller/gc.go`, `internal/controller/sandboxpool_controller.go`, `internal/daemon/server.go` (if any forkd-side), test.
 
-- [ ] Register (controller-runtime's metrics.Registry): `agentrun_pending_claims` (gauge, claims waiting for a node), `agentrun_orphan_sweeps_total` (counter, VMs reaped by GC), `agentrun_claim_errors_total` (counter, labeled by pool and reason), and `agentrun_pool_ready_snapshots` (gauge per pool) if not already exported. Bump them at the right sites: pending when selectNode finds no node (claim stays Pending); orphan_sweeps in the GC sweep; claim_errors on the fork-failed / secret-failed paths; ready_snapshots in the pool reconcile.
+- [ ] Register (controller-runtime's metrics.Registry): `mitos_pending_claims` (gauge, claims waiting for a node), `mitos_orphan_sweeps_total` (counter, VMs reaped by GC), `mitos_claim_errors_total` (counter, labeled by pool and reason), and `mitos_pool_ready_snapshots` (gauge per pool) if not already exported. Bump them at the right sites: pending when selectNode finds no node (claim stays Pending); orphan_sweeps in the GC sweep; claim_errors on the fork-failed / secret-failed paths; ready_snapshots in the pool reconcile.
 - [ ] TDD: a test that drives the relevant reconcile/GC path and asserts the metric value changed (use the prometheus testutil to read the metric). At least pending-claims (a claim with no registered node bumps it) and orphan-sweeps (a GC pass reaping an orphan bumps it).
 - [ ] Commit `feat: pending-claims, orphan-sweep, and claim-error metrics`.
 

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paperclipinc/sandbox/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/vsock"
 )
 
 // SandboxAPI exposes HTTP endpoints for exec/files on sandboxes managed by this forkd.
