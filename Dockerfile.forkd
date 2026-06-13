@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/
+RUN CGO_ENABLED=0 go build -o forkd ./cmd/forkd/ && \
+    CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/agent ./guest/agent/
 
 FROM ubuntu:22.04
 
@@ -26,6 +27,9 @@ RUN curl -fsSL -o /tmp/fc.tgz \
     rm -rf /tmp/fc.tgz /tmp/release-*
 
 COPY --from=builder /build/forkd /usr/local/bin/forkd
+# The guest agent injected as /init when forkd builds a rootfs from an OCI
+# image. cmd/forkd --agent-bin points here (deploy/daemon/daemonset.yaml).
+COPY --from=builder /usr/local/bin/agent /usr/local/bin/agent
 
 VOLUME ["/var/lib/mitos"]
 EXPOSE 9090 9091
