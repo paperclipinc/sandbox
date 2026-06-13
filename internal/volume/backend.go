@@ -183,30 +183,37 @@ func (b *Backend) Fresh(spec Spec, sandboxID string) (Prepared, error) {
 	return Prepared{Name: spec.Name, HostPath: dst, MountPath: spec.MountPath, ReadOnly: spec.ReadOnly}, nil
 }
 
-// Snapshot reflink-copies sourcePath to a per-fork backing file. It first tries
-// cp --reflink=always for a true copy-on-write clone; on filesystems without
-// reflink support (anything but btrfs/xfs) that fails, so it falls back to
-// cp --reflink=auto, which performs a full copy. A successful fallback logs a
-// warning (CoW was unavailable for this filesystem); a hard failure returns an
-// error.
+// ReflinkCopy copies src to dst with copy-on-write semantics. It first tries
+// cp --reflink=always for a true FICLONE clone (instant, shared extents on
+// btrfs/xfs); on a filesystem without reflink support that fails, so it falls
+// back to cp --reflink=auto, which performs a full byte copy and logs a warning
+// (CoW was unavailable). The destination's parent directory is created if
+// absent. src and dst carry no secrets and are safe to log. This is the single
+// owner of the reflink policy: both per-fork volume Snapshot and the husk
+// per-activation rootfs clone go through it so they cannot drift.
+func (b *Backend) ReflinkCopy(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("reflink copy: mkdir: %w", err)
+	}
+	if err := b.runner([]string{"cp", "--reflink=always", src, dst}); err != nil {
+		fmt.Fprintf(os.Stderr, "volume: WARNING reflink CoW unavailable (filesystem lacks reflink support); falling back to a full copy of %s to %s\n", src, dst)
+		if err := b.runner([]string{"cp", "--reflink=auto", src, dst}); err != nil {
+			return fmt.Errorf("reflink copy %s to %s: %w", src, dst, err)
+		}
+	}
+	return nil
+}
+
+// Snapshot reflink-copies sourcePath to a per-fork backing file via ReflinkCopy,
+// which tries cp --reflink=always for a true copy-on-write clone and falls back
+// to cp --reflink=auto (a full copy) on filesystems without reflink support.
 func (b *Backend) Snapshot(spec Spec, sandboxID, sourcePath string) (Prepared, error) {
 	if err := validateName(spec.Name); err != nil {
 		return Prepared{}, err
 	}
 	dst := b.volumePath(sandboxID, spec.Name)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return Prepared{}, fmt.Errorf("volume %s: mkdir: %w", spec.Name, err)
-	}
-	err := b.runner([]string{"cp", "--reflink=always", sourcePath, dst})
-	if err != nil {
-		// Reflink unavailable on this filesystem; fall back to a full copy.
-		// Warn so an operator knows this fork did NOT get instant copy-on-write
-		// (the destination is a full byte copy, costing time and space). The
-		// paths carry no secrets and are safe to log.
-		fmt.Fprintf(os.Stderr, "volume: WARNING reflink CoW unavailable for %s (filesystem lacks reflink support); falling back to a full copy of %s to %s\n", spec.Name, sourcePath, dst)
-		if err := b.runner([]string{"cp", "--reflink=auto", sourcePath, dst}); err != nil {
-			return Prepared{}, fmt.Errorf("volume %s: snapshot copy: %w", spec.Name, err)
-		}
+	if err := b.ReflinkCopy(sourcePath, dst); err != nil {
+		return Prepared{}, fmt.Errorf("volume %s: %w", spec.Name, err)
 	}
 	return Prepared{Name: spec.Name, HostPath: dst, MountPath: spec.MountPath, ReadOnly: spec.ReadOnly}, nil
 }

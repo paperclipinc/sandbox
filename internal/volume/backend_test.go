@@ -134,6 +134,43 @@ func TestSnapshotFallsBackToReflinkAuto(t *testing.T) {
 	}
 }
 
+func TestReflinkCopyTriesAlwaysThenAuto(t *testing.T) {
+	b, rr := newTestBackend(t)
+	rr.failOn = func(argv []string) bool {
+		return strings.Contains(strings.Join(argv, " "), "--reflink=always")
+	}
+	src := filepath.Join(t.TempDir(), "src.ext4")
+	dst := filepath.Join(t.TempDir(), "dst.ext4")
+
+	if err := b.ReflinkCopy(src, dst); err != nil {
+		t.Fatalf("ReflinkCopy: %v", err)
+	}
+	if len(rr.calls) != 2 {
+		t.Fatalf("expected 2 cp calls (always then auto), got %d: %v", len(rr.calls), rr.calls)
+	}
+	if !strings.Contains(strings.Join(rr.calls[0], " "), "--reflink=always") {
+		t.Errorf("first cp should try --reflink=always: %v", rr.calls[0])
+	}
+	if !strings.Contains(strings.Join(rr.calls[1], " "), "--reflink=auto") {
+		t.Errorf("fallback should use --reflink=auto: %v", rr.calls[1])
+	}
+	if rr.calls[1][len(rr.calls[1])-2] != src || rr.calls[1][len(rr.calls[1])-1] != dst {
+		t.Errorf("cp src/dst = %q %q, want %q %q", rr.calls[1][len(rr.calls[1])-2], rr.calls[1][len(rr.calls[1])-1], src, dst)
+	}
+}
+
+func TestReflinkCopyMakesDestDir(t *testing.T) {
+	b, _ := newTestBackend(t)
+	src := filepath.Join(t.TempDir(), "src.ext4")
+	dst := filepath.Join(t.TempDir(), "nested", "dst.ext4")
+	if err := b.ReflinkCopy(src, dst); err != nil {
+		t.Fatalf("ReflinkCopy: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(dst)); err != nil {
+		t.Errorf("dest parent dir not created: %v", err)
+	}
+}
+
 func TestShareReturnsSourceReadOnlyNoCopy(t *testing.T) {
 	b, rr := newTestBackend(t)
 	src := "/srv/images/base.ext4"
