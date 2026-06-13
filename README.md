@@ -1,8 +1,8 @@
-# sandbox
+# mitos
 
-Millisecond sandbox forking for AI agents on Kubernetes.
+Millisecond microVM sandbox forking for AI agents on Kubernetes.
 
-`sandbox` gives your agents isolated, forkable computers: Firecracker microVMs that restore from memory snapshots in milliseconds, fork into parallel attempts, and persist durable workspaces. Declarative CRDs on your cluster, or fully hosted by us.
+`mitos` gives your agents isolated, forkable computers: Firecracker microVMs that restore from memory snapshots in milliseconds, fork into parallel attempts, and persist durable workspaces. Declarative CRDs (`mitos.run`) on your cluster, or fully hosted by us.
 
 ```bash
 # Create a pool of pre-snapshotted Python sandboxes
@@ -32,7 +32,7 @@ fork_b.exec("open('plan_b.txt', 'w').write('aggressive approach')")
 
 Agent harnesses need fast, isolated environments where agents can read and write files, install packages, and run untrusted code. Every existing option forces a trade you should not have to make: speed without ownership, isolation without forking, Kubernetes-nativeness without warm starts, durability as someone else's proprietary cloud.
 
-Our goal is the pareto frontier of agent runtimes: for the axes that matter (cold-start latency, fork semantics, hardware isolation, durable state, Kubernetes integration, data ownership, open source, cost at rest), no alternative should beat `sandbox` on one axis without losing on another that you also care about. Where we are not there yet, the [roadmap](ROADMAP.md) says so explicitly.
+Our goal is the pareto frontier of agent runtimes: for the axes that matter (cold-start latency, fork semantics, hardware isolation, durable state, Kubernetes integration, data ownership, open source, cost at rest), no alternative should beat `mitos` on one axis without losing on another that you also care about. Where we are not there yet, the [roadmap](ROADMAP.md) says so explicitly.
 
 Two ways to run it:
 
@@ -42,7 +42,7 @@ Two ways to run it:
 ## Features
 
 **Fast**
-- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; fork->first-exec is now measured reproducibly in CI (shared-runner-class, see [BENCHMARKS.md](BENCHMARKS.md)), and bare-metal reference numbers are pending the reference hardware ([#15](https://github.com/paperclipinc/mitos/issues/15))
+- Sandbox claims fork from pre-built memory snapshots via Firecracker CoW restore; fork->first-exec is measured reproducibly in CI (shared-runner-class, see [BENCHMARKS.md](BENCHMARKS.md)). A first bare-metal reference run (Hetzner dedicated i7-6700, Talos KVM, Firecracker v1.15) measured **~6-16 ms snapshot restore**, a **~27 ms warm-claim activate with the integrity gate enforced**, and **~3 MiB marginal memory per forked sandbox** via CoW page sharing (see [bench/results](bench/results)). The competitor-comparison harness on matched hardware is [#15](https://github.com/paperclipinc/mitos/issues/15)
 - Pre-snapshotted pools built from OCI images: `internal/ociroot` flattens an image into an ext4 rootfs and runs your `init` steps in the VM before snapshotting, so there is no cold start on claim ([#10](https://github.com/paperclipinc/mitos/issues/10), see [docs/templates.md](docs/templates.md))
 - CoW memory sharing across forks: you pay for unique pages, not for copies
 - Content-addressed snapshot distribution: forks pull only the missing sha256 chunks from a holder node over mTLS, so pool rebuilds ship deltas not whole multi-GB images, with a snapshot version-compatibility contract that refuses to restore an incompatible snapshot ([#14](https://github.com/paperclipinc/mitos/issues/14), [#32](https://github.com/paperclipinc/mitos/issues/32), see [docs/snapshot-distribution.md](docs/snapshot-distribution.md))
