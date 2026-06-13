@@ -5,7 +5,7 @@ import json
 import threading
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import httpx
 from kubernetes import client as k8s_client
@@ -14,11 +14,75 @@ from kubernetes.client.rest import ApiException
 from mitos.types import (
     BackgroundProcess,
     ExecResult,
+    Execution,
+    ExecutionError,
     FileInfo,
     ForkInfo,
+    Result,
     SandboxInfo,
     SandboxPhase,
 )
+
+
+def _decode_stream_bytes(value) -> str:
+    """Go marshals a []byte JSON field as base64; decode it back to text. A
+    plain string (some kernels send text directly) is returned unchanged."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            return base64.b64decode(value).decode("utf-8", "replace")
+        except Exception:
+            return value
+    return str(value)
+
+
+def _parse_run_code_stream(
+    lines: Iterable[bytes],
+    on_stdout: Optional[Callable[[str], None]],
+    on_stderr: Optional[Callable[[str], None]],
+    on_result: Optional[Callable[[Result], None]],
+) -> Execution:
+    """Folds an NDJSON ExecStreamFrame stream into an Execution, firing the
+    callbacks live as frames arrive. Result and error payloads are tenant code
+    output and are never logged here."""
+    ex = Execution()
+    for raw in lines:
+        if not raw.strip():
+            continue
+        frame = json.loads(raw)
+        kind = frame.get("kind")
+        if kind == "stdout":
+            text = _decode_stream_bytes(frame.get("stdout"))
+            ex.logs["stdout"].append(text)
+            if on_stdout:
+                on_stdout(text)
+        elif kind == "stderr":
+            text = _decode_stream_bytes(frame.get("stderr"))
+            ex.logs["stderr"].append(text)
+            if on_stderr:
+                on_stderr(text)
+        elif kind == "result":
+            payload = frame.get("result") or {}
+            data = payload.get("data") or {}
+            text = payload.get("text") or ""
+            is_main = bool(text)
+            result = Result(data=data, is_main_result=is_main)
+            ex.results.append(result)
+            if is_main and text:
+                ex.text = text
+            if on_result:
+                on_result(result)
+        elif kind == "error":
+            payload = frame.get("error") or {}
+            ex.error = ExecutionError(
+                name=payload.get("name", ""),
+                value=payload.get("value", ""),
+                traceback=payload.get("traceback", []) or [],
+            )
+        elif kind == "exit":
+            break
+    return ex
 
 
 API_GROUP = "mitos.run"
@@ -265,6 +329,44 @@ class Sandbox:
             stderr=data.get("stderr", ""),
             exec_time_ms=data.get("exec_time_ms", 0),
         )
+
+    def run_code(
+        self,
+        code: str,
+        language: str = "python",
+        timeout: int = 60,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+        on_result: Optional[Callable[[Result], None]] = None,
+    ) -> Execution:
+        """Run a code snippet in the sandbox's stateful kernel.
+
+        State persists across run_code calls for the sandbox lifetime. Returns an
+        Execution with text (REPL last value), logs (stdout/stderr), results
+        (rich display artifacts), and error. Streams via the callbacks as frames
+        arrive. Requires a base image with the code-interpreter kernel; without
+        it the Execution carries a KernelUnavailable error.
+        """
+        payload: dict = {
+            "sandbox": self._sandbox_ref,
+            "code": code,
+            "language": language,
+            "timeout": timeout,
+        }
+        with self._http.stream(
+            "POST",
+            f"{self._base_url}/run_code/stream",
+            json=payload,
+            timeout=timeout + 10,
+            headers=self._auth_headers(),
+        ) as resp:
+            resp.raise_for_status()
+            return _parse_run_code_stream(
+                resp.iter_lines(),
+                on_stdout,
+                on_stderr,
+                on_result,
+            )
 
     def _stream(
         self, command, timeout, working_dir, env, on_out, on_err,
