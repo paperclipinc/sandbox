@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/storecrypt"
 )
 
@@ -52,19 +53,25 @@ func NewInMemoryKeyProvider() *InMemoryKeyProvider {
 }
 
 // KeyFor returns the cached key for scopeID, generating and caching a fresh one
-// on first use. The key value is never logged.
+// on first use. It returns a COPY of the cached key so the engine may zeroize
+// the returned value after a cryptsetup call (the new KeyProvider contract)
+// without wiping the cached copy. The key value is never logged.
 func (p *InMemoryKeyProvider) KeyFor(scopeID string) (storecrypt.Key, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if k, ok := p.keys[scopeID]; ok {
-		return k, nil
+		dup := make(storecrypt.Key, len(k))
+		copy(dup, k)
+		return dup, nil
 	}
 	k, err := storecrypt.NewKey()
 	if err != nil {
 		return nil, fmt.Errorf("generate key for scope %s: %w", scopeID, err)
 	}
 	p.keys[scopeID] = k
-	return k, nil
+	dup := make(storecrypt.Key, len(k))
+	copy(dup, k)
+	return dup, nil
 }
 
 // ForgetKey destroys the in-memory key for scopeID: it zeroizes the key bytes
@@ -90,55 +97,78 @@ func (p *InMemoryKeyProvider) hasKey(scopeID string) bool {
 	return ok
 }
 
-// RequestKeyProvider holds per-scope keys delivered by the controller over the
-// mTLS RPC (PR2 key custody). Unlike InMemoryKeyProvider it never generates a
-// key: the daemon stashes the request-supplied key with SetKey before invoking
-// the engine and ForgetKey after. KeyFor on a scope with no stashed key returns
-// an error so encryption FAILS CLOSED (the engine must not silently run
-// unencrypted). The key is a secret value: it is never logged, never formatted
-// into an error, and the type exposes no String() that could leak it. Safe for
-// concurrent use.
-type RequestKeyProvider struct {
-	mu   sync.Mutex
-	keys map[string]storecrypt.Key
-}
-
-// NewRequestKeyProvider returns an empty request-scoped key provider.
-func NewRequestKeyProvider() *RequestKeyProvider {
-	return &RequestKeyProvider{keys: make(map[string]storecrypt.Key)}
-}
-
-// SetKey stashes the key the controller delivered for scopeID for the duration
-// of the operation. The daemon calls it before invoking the engine; the key
-// value is never logged.
-func (p *RequestKeyProvider) SetKey(scopeID string, key storecrypt.Key) {
+// cachedKey returns the live cached key array for scopeID (not a copy), so a
+// test can prove ForgetKey zeroized it in place. Test-only support.
+func (p *InMemoryKeyProvider) cachedKey(scopeID string) storecrypt.Key {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.keys[scopeID] = key
+	return p.keys[scopeID]
 }
 
-// KeyFor returns the stashed key for scopeID. It returns an error when no key
-// is present so the engine fails closed rather than running unencrypted. The
-// error names only the scope, never any key material.
+// RequestKeyProvider holds per-scope WRAPPED DEKs delivered by the controller
+// over the mTLS RPC and unwraps them via the KMS at use time (envelope
+// encryption). The daemon stashes the request-supplied wrapped DEK with
+// SetWrappedKey before invoking the engine and ForgetKey after. KeyFor unwraps
+// the DEK into a fresh storecrypt.Key via the KMS; the engine zeroizes that key
+// after the cryptsetup call so the plaintext DEK does not linger. KeyFor on a
+// scope with no stashed wrapped DEK returns an error so encryption FAILS CLOSED.
+// The plaintext DEK is a secret value: it is never logged and the storecrypt.Key
+// type exposes no leaking String(). Safe for concurrent use.
+type RequestKeyProvider struct {
+	kms     kms.Wrapper
+	mu      sync.Mutex
+	wrapped map[string]wrappedDEK
+}
+
+// wrappedDEK is the per-scope wrapped key material the controller delivered.
+type wrappedDEK struct {
+	ciphertext []byte
+	kekID      string
+}
+
+// NewRequestKeyProvider returns a provider that unwraps DEKs via w. w must be
+// non-nil whenever encryption is enabled.
+func NewRequestKeyProvider(w kms.Wrapper) *RequestKeyProvider {
+	return &RequestKeyProvider{kms: w, wrapped: make(map[string]wrappedDEK)}
+}
+
+// SetWrappedKey stashes the wrapped DEK and its KEK id for scopeID for the
+// duration of the operation. The daemon calls it before invoking the engine.
+// The wrapped DEK is opaque ciphertext and is never logged.
+func (p *RequestKeyProvider) SetWrappedKey(scopeID string, ciphertext []byte, kekID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.wrapped[scopeID] = wrappedDEK{ciphertext: ciphertext, kekID: kekID}
+}
+
+// KeyFor unwraps the stashed wrapped DEK for scopeID via the KMS and returns the
+// plaintext DEK as a storecrypt.Key. It returns an error when no wrapped DEK is
+// stashed (fail closed) or when the KMS cannot unwrap (wrong KEK, corruption).
+// The error names only the scope and the non-secret KEK id, never key material.
 func (p *RequestKeyProvider) KeyFor(scopeID string) (storecrypt.Key, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if k, ok := p.keys[scopeID]; ok {
-		return k, nil
+	wd, ok := p.wrapped[scopeID]
+	p.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no encryption key available for scope %s: the request must carry the wrapped DEK over mTLS", scopeID)
 	}
-	return nil, fmt.Errorf("no encryption key available for scope %s: the request must carry the key over mTLS", scopeID)
+	if p.kms == nil {
+		return nil, fmt.Errorf("scope %s has a wrapped DEK but no KMS is configured to unwrap it", scopeID)
+	}
+	dek, err := p.kms.Unwrap(context.Background(), kms.WrappedKey{KEKID: wd.kekID, Ciphertext: wd.ciphertext})
+	if err != nil {
+		return nil, fmt.Errorf("unwrap DEK for scope %s (kek %s): %w", scopeID, wd.kekID, err)
+	}
+	return storecrypt.Key(dek), nil
 }
 
-// ForgetKey zeroizes the stashed key bytes for scopeID and deletes the entry.
-// After it returns the provider holds no copy of the key. A no-op for a scope
-// with no stashed key.
+// ForgetKey drops the stashed wrapped DEK for scopeID. The plaintext DEK is not
+// held here (KeyFor returns a fresh copy the engine zeroizes), so there is no
+// plaintext to wipe; the wrapped ciphertext is opaque but we still drop it.
 func (p *RequestKeyProvider) ForgetKey(scopeID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if k, ok := p.keys[scopeID]; ok {
-		k.Zeroize()
-		delete(p.keys, scopeID)
-	}
+	delete(p.wrapped, scopeID)
 }
 
 // encryptionEnabled reports whether at-rest encryption is wired: the flag is set
@@ -208,6 +238,9 @@ func (e *Engine) createTemplateContainer(id, rootfsPath string, volumes []volSiz
 	if err != nil {
 		return fmt.Errorf("key for template %s: %w", id, err)
 	}
+	// KeyFor returns a freshly-unwrapped plaintext DEK; zeroize it as soon as the
+	// cryptsetup call no longer needs it so it does not linger in node memory.
+	defer key.Zeroize()
 	dir := templateDir(e.dataDir, id)
 	size := templateFootprintSize(rootfsPath, volumes)
 	if err := e.crypt.Create(context.Background(), id, key, size, dir); err != nil {
@@ -272,6 +305,9 @@ func (e *Engine) ensureTemplateOpen(id string) error {
 	if err != nil {
 		return fmt.Errorf("key for template %s: %w", id, err)
 	}
+	// KeyFor returns a freshly-unwrapped plaintext DEK; zeroize it as soon as the
+	// open no longer needs it so it does not linger in node memory.
+	defer key.Zeroize()
 	if err := e.crypt.Open(context.Background(), id, key, templateDir(e.dataDir, id)); err != nil {
 		return fmt.Errorf("open encrypted container for template %s: %w", id, err)
 	}

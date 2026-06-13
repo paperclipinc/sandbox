@@ -10,6 +10,7 @@ import (
 
 	"github.com/paperclipinc/mitos/internal/cas"
 	"github.com/paperclipinc/mitos/internal/firecracker"
+	"github.com/paperclipinc/mitos/internal/kms"
 	"github.com/paperclipinc/mitos/internal/storecrypt"
 )
 
@@ -332,18 +333,16 @@ func TestDeleteTemplateForgetsAndZeroizesKey(t *testing.T) {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 
-	// Hold a reference to the cached key bytes so we can prove they were zeroized
-	// in place (the provider shares the underlying array with any caller copy).
+	// Hold a reference to the LIVE cached key array so we can prove ForgetKey
+	// zeroized it in place. KeyFor now returns a copy (the engine zeroizes its
+	// per-use copy after cryptsetup), so we reach into the cache directly.
 	prov := e.keyProvider.(*InMemoryKeyProvider)
-	keyCopy, err := prov.KeyFor("tmpl1")
-	if err != nil {
-		t.Fatalf("KeyFor: %v", err)
-	}
 	if !prov.hasKey("tmpl1") {
 		t.Fatal("precondition: provider should hold the key before delete")
 	}
+	cached := prov.cachedKey("tmpl1")
 	allZero := true
-	for _, b := range keyCopy {
+	for _, b := range cached {
 		if b != 0 {
 			allZero = false
 			break
@@ -360,7 +359,7 @@ func TestDeleteTemplateForgetsAndZeroizesKey(t *testing.T) {
 	if prov.hasKey("tmpl1") {
 		t.Fatal("provider still holds the key after crypto-shred")
 	}
-	for i, b := range keyCopy {
+	for i, b := range cached {
 		if b != 0 {
 			t.Fatalf("key byte %d not zeroized after shred: %d", i, b)
 		}
@@ -476,7 +475,8 @@ func TestCreateTemplateFailsClosedWithoutKey(t *testing.T) {
 	e := newEncryptedTestEngine(t, fake)
 	// Swap the in-memory provider (which would generate a key) for a request
 	// provider with nothing stashed: the scope has no key.
-	e.keyProvider = NewRequestKeyProvider()
+	kekA, _ := kms.NewLocalKEK(make([]byte, 32))
+	e.keyProvider = NewRequestKeyProvider(kekA)
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
 		t.Fatal("build must not run when no key is available (fail closed)")
 		return nil
@@ -498,10 +498,22 @@ func TestCreateTemplateFailsClosedWithoutKey(t *testing.T) {
 func TestCreateTemplateUsesRequestKey(t *testing.T) {
 	fake := newFakeContainerManager()
 	e := newEncryptedTestEngine(t, fake)
-	prov := NewRequestKeyProvider()
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	w, err := kms.NewLocalKEK(kek)
+	if err != nil {
+		t.Fatalf("NewLocalKEK: %v", err)
+	}
+	prov := NewRequestKeyProvider(w)
 	e.keyProvider = prov
-	key := storecrypt.Key("0123456789abcdef0123456789abcdef")
-	prov.SetKey("tmpl1", key)
+	dek := []byte("0123456789abcdef0123456789abcdef")
+	wrapped, err := w.Wrap(context.Background(), dek)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	prov.SetWrappedKey("tmpl1", wrapped.Ciphertext, wrapped.KEKID)
 	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string) error {
 		writeFakeSnapshot(t, e.dataDir, id)
 		return nil

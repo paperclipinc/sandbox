@@ -1,60 +1,65 @@
 package fork
 
 import (
-	"strings"
+	"bytes"
+	"context"
 	"testing"
 
-	"github.com/paperclipinc/mitos/internal/storecrypt"
+	"github.com/paperclipinc/mitos/internal/kms"
 )
 
-func TestRequestKeyProviderSetAndKeyFor(t *testing.T) {
-	p := NewRequestKeyProvider()
-	key := storecrypt.Key("0123456789abcdef0123456789abcdef")
-	p.SetKey("scope-a", key)
-
-	got, err := p.KeyFor("scope-a")
+func TestRequestKeyProviderUnwrapsViaKMS(t *testing.T) {
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	w, err := kms.NewLocalKEK(kek)
+	if err != nil {
+		t.Fatalf("NewLocalKEK: %v", err)
+	}
+	dek := make([]byte, 32)
+	for i := range dek {
+		dek[i] = byte(i)
+	}
+	wrapped, err := w.Wrap(context.Background(), dek)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	p := NewRequestKeyProvider(w)
+	p.SetWrappedKey("tmpl", wrapped.Ciphertext, wrapped.KEKID)
+	got, err := p.KeyFor("tmpl")
 	if err != nil {
 		t.Fatalf("KeyFor: %v", err)
 	}
-	if string(got) != string(key) {
-		t.Fatal("KeyFor returned a different key than the one set")
+	if !bytes.Equal(got, dek) {
+		t.Fatal("unwrapped DEK mismatch")
+	}
+	p.ForgetKey("tmpl")
+	if _, err := p.KeyFor("tmpl"); err == nil {
+		t.Fatal("expected fail-closed after ForgetKey")
 	}
 }
 
-func TestRequestKeyProviderKeyForAbsentErrors(t *testing.T) {
-	p := NewRequestKeyProvider()
-	_, err := p.KeyFor("missing")
-	if err == nil {
-		t.Fatal("KeyFor for an absent scope must error (fail closed), got nil")
-	}
-	// The error must not leak any key bytes (there is none, but the contract is
-	// that the provider never formats key material into an error).
-	if strings.Contains(err.Error(), "REDACTED") {
-		t.Fatal("unexpected key material reference in error")
+func TestRequestKeyProviderFailsClosedWithNoWrappedKey(t *testing.T) {
+	w, _ := kms.NewLocalKEK(make([]byte, 32))
+	p := NewRequestKeyProvider(w)
+	if _, err := p.KeyFor("missing"); err == nil {
+		t.Fatal("expected error when no wrapped key is stashed")
 	}
 }
 
-func TestRequestKeyProviderForgetZeroizes(t *testing.T) {
-	p := NewRequestKeyProvider()
-	key := storecrypt.Key("0123456789abcdef0123456789abcdef")
-	// Keep a reference to the same underlying array so we can prove ForgetKey
-	// zeroized it in place.
-	p.SetKey("scope-a", key)
-
-	p.ForgetKey("scope-a")
-
-	if _, err := p.KeyFor("scope-a"); err == nil {
-		t.Fatal("KeyFor after ForgetKey must error; the key should be gone")
+func TestRequestKeyProviderRejectsWrongKEK(t *testing.T) {
+	kekA := make([]byte, 32)
+	kekB := make([]byte, 32)
+	for i := range kekB {
+		kekB[i] = 0xaa
 	}
-	for i, b := range key {
-		if b != 0 {
-			t.Fatalf("key byte %d not zeroized after ForgetKey: %d", i, b)
-		}
+	wa, _ := kms.NewLocalKEK(kekA)
+	wb, _ := kms.NewLocalKEK(kekB)
+	wrapped, _ := wa.Wrap(context.Background(), make([]byte, 32))
+	p := NewRequestKeyProvider(wb) // node holds the wrong KEK
+	p.SetWrappedKey("tmpl", wrapped.Ciphertext, wrapped.KEKID)
+	if _, err := p.KeyFor("tmpl"); err == nil {
+		t.Fatal("expected unwrap error for KEK mismatch")
 	}
-}
-
-func TestRequestKeyProviderForgetAbsentIsNoop(t *testing.T) {
-	p := NewRequestKeyProvider()
-	// Must not panic for an unknown scope.
-	p.ForgetKey("never-set")
 }
