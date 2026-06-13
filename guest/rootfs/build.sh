@@ -10,11 +10,14 @@ set -euo pipefail
 # Produces: rootfs.ext4 with:
 #   /init              → guest agent binary (PID 1)
 #   /bin/sh            → busybox or bash
-#   /usr/bin/python3   → Python 3 (optional, for python template)
+#   /usr/bin/python3   → Python 3 + ipykernel/jupyter_client (FULL_ROOTFS=1)
+#   /opt/mitos/kernel_driver.py → run_code kernel driver (FULL_ROOTFS=1)
 #   /workspace/        → agent working directory
 
 OUTPUT="${1:-/tmp/mitos-rootfs.ext4}"
-SIZE_MB="${2:-512}"
+# The full rootfs bakes ipykernel + matplotlib + pandas for run_code, which need
+# headroom beyond the minimal image; the busybox path is much smaller.
+SIZE_MB="${2:-1024}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR=$(mktemp -d)
@@ -54,6 +57,21 @@ if command -v debootstrap &>/dev/null && [ "${FULL_ROOTFS:-0}" = "1" ]; then
     chroot "$MOUNT_DIR" apt-get update -qq
     chroot "$MOUNT_DIR" apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv ca-certificates curl
+
+    # Code-interpreter kernel: ipykernel + jupyter_client give the run_code
+    # surface a stateful Python kernel with rich display (matplotlib png, pandas
+    # html) and structured errors. matplotlib_inline routes figures to png
+    # display_data. Installed only in the full rootfs; the minimal busybox image
+    # has no Python and run_code returns KernelUnavailable there.
+    chroot "$MOUNT_DIR" python3 -m pip install --no-cache-dir \
+        ipykernel jupyter_client matplotlib matplotlib_inline pandas
+    chroot "$MOUNT_DIR" python3 -m ipykernel install --name python3 --sys-prefix
+
+    # Install the in-guest kernel driver the agent spawns for run_code.
+    mkdir -p "$MOUNT_DIR/opt/mitos"
+    cp "$PROJECT_ROOT/guest/rootfs/kernel_driver.py" "$MOUNT_DIR/opt/mitos/kernel_driver.py"
+    chmod +x "$MOUNT_DIR/opt/mitos/kernel_driver.py"
+
     chroot "$MOUNT_DIR" apt-get clean
     chroot "$MOUNT_DIR" rm -rf /var/lib/apt/lists/*
 
