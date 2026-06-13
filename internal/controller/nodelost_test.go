@@ -89,6 +89,44 @@ func TestGCMarksNodeLost(t *testing.T) {
 	}
 }
 
+// TestGCInHuskModeDoesNotFailNodeLostClaim asserts that in husk mode the GC
+// does NOT terminally-fail a Ready claim whose node is lost. Husk node-loss is
+// owned by checkHuskPodLost + the husk pod watch, which RE-PEND the claim onto a
+// replacement dormant slot. A GC pass winning the race and flipping the claim to
+// terminal Failed/NodeLost would defeat the husk self-heal, so the GC skips the
+// node-lost-fail entirely when EnableHuskPods is set.
+func TestGCInHuskModeDoesNotFailNodeLostClaim(t *testing.T) {
+	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-3", "nl3-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			stop()
+		}
+	}()
+
+	makeReadyClaim(t, "nl3", "nl-node-3")
+
+	// The node leaves the registry.
+	stop()
+	stopped = true
+
+	// A GC in husk mode must leave the claim Ready: the husk re-pend path owns
+	// node-loss recovery, not the GC.
+	gc := &controller.GarbageCollector{Client: k8sClient, Registry: testRegistry, EnableHuskPods: true}
+	gc.RunOnce(ctx)
+
+	var got v1alpha1.SandboxClaim
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "nl3-claim", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase == v1alpha1.SandboxFailed {
+		t.Fatalf("husk-mode GC must NOT flip a node-lost claim to Failed; phase = %q", got.Status.Phase)
+	}
+}
+
 func TestGCLeavesHealthyNodeClaim(t *testing.T) {
 	stop, _, _, err := controller.StartFakeForkdNodeRecording(testRegistry, "nl-node-2", "nl2-tmpl")
 	if err != nil {

@@ -289,6 +289,9 @@ func main() {
 	if err := mgr.Add(&controller.GarbageCollector{
 		Client:   mgr.GetClient(),
 		Registry: nodeRegistry,
+		// In husk mode node-loss recovery is owned by the husk re-pend path; the
+		// GC must not terminally-fail a recoverable husk-backed claim.
+		EnableHuskPods: enableHuskPods,
 	}); err != nil {
 		logger.Error(err, "unable to add garbage collector")
 		os.Exit(1)

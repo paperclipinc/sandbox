@@ -31,6 +31,15 @@ type GarbageCollector struct {
 	// DefaultTTLSeconds is the TTL applied to a finished claim that does not set
 	// spec.ttlSecondsAfterFinished. Default 600s.
 	DefaultTTLSeconds int32
+	// EnableHuskPods mirrors the controller run mode. In husk mode a Ready claim
+	// is backed by a husk pod, and node-loss recovery is owned by
+	// checkHuskPodLost + the husk pod watch, which RE-PEND the claim onto a
+	// replacement dormant slot (the warm pool self-heals). The GC must NOT
+	// terminally-fail such a claim: a GC pass winning the race against the
+	// re-pend would defeat the husk self-heal. When set, markNodeLost is a no-op.
+	// In raw-forkd mode (false) a lost node means the ephemeral VM is gone with
+	// no recovery, so the claim is correctly failed (and the GC TTL reaps it).
+	EnableHuskPods bool
 }
 
 func (g *GarbageCollector) Start(ctx context.Context) error {
@@ -203,7 +212,15 @@ func (g *GarbageCollector) sweepOrphans(ctx context.Context, logger logr.Logger,
 // claim is, for every consumer, just a failed claim with a specific reason.
 // The node is gone, so there is nothing to terminate; we only stamp state,
 // bounded by the GC interval.
+//
+// In husk mode this is a no-op: a Ready husk-backed claim recovers from node
+// loss by re-pending onto a replacement dormant slot (checkHuskPodLost + the
+// husk pod watch own that path). Failing it here would race that re-pend into a
+// terminal state and defeat the husk self-heal.
 func (g *GarbageCollector) markNodeLost(ctx context.Context, logger logr.Logger, claims []v1alpha1.SandboxClaim) {
+	if g.EnableHuskPods {
+		return
+	}
 	for i := range claims {
 		c := &claims[i]
 		if c.Status.Phase != v1alpha1.SandboxReady {
