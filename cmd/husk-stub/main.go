@@ -171,6 +171,14 @@ func huskVMConfig(p huskVMParams) (firecracker.VMConfig, error) {
 		// this from its data dir; here the stub's allowed root is the kernel's and
 		// snapshot's mount root.
 		cfg.Jailer.DataDir = "/var/lib/mitos"
+		// The jailer launch path (firecracker.startJailedVM) fails closed when the
+		// JailerConfig has no Allocator. The fork engine constructs one in NewEngine
+		// (internal/fork/engine.go); the husk stub has no engine, so it must build
+		// its own here. A husk pod owns exactly ONE VM, so a fresh allocator over the
+		// configured range is correct: it allocates a single dedicated uid/gid for
+		// that VM. Without this the dormant VMM never reaches StateDormant and the
+		// husk pod is dead on arrival.
+		cfg.Jailer.Allocator = firecracker.NewUIDAllocator(jailerCfg.UIDRange[0], jailerCfg.UIDRange[1])
 		if p.kernel != "" {
 			cfg.ChrootFiles = []string{p.kernel}
 		}

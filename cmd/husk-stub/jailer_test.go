@@ -61,6 +61,13 @@ func TestHuskVMConfigJailerWiring(t *testing.T) {
 	if !jailed.Jailer.Enabled() {
 		t.Fatal("expected jailed VMConfig to carry an enabled jailer")
 	}
+	// The jailer launch path (firecracker startJailedVM) fails closed when the
+	// JailerConfig has no Allocator: the husk pod owns one VM, so huskVMConfig
+	// must construct a fresh allocator over the configured range. Without it the
+	// dormant VMM never reaches StateDormant and the husk pod is dead on arrival.
+	if jailed.Jailer.Allocator == nil {
+		t.Fatal("expected jailed VMConfig to carry a uid allocator; startJailedVM refuses a nil allocator")
+	}
 	foundKernel := false
 	for _, f := range jailed.ChrootFiles {
 		if f == "/var/lib/mitos/kernel/vmlinux" {
