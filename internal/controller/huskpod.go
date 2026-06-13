@@ -655,28 +655,6 @@ func huskPodReady(p *corev1.Pod) bool {
 // carries the pod's resourceVersion so exactly one wins and the loser gets a 409
 // Conflict and requeues to pick a different dormant pod. A pod is therefore
 // claimed (and activated) by exactly one claim.
-// findClaimedHuskPod returns the husk pod this claim already claimed (the
-// claim-label patch committed on a prior reconcile), so a retrying claim REUSES
-// its pod instead of selecting and claiming a fresh dormant one. Without this,
-// any claim that claims a pod then fails before reaching Ready leaks a pod on
-// every retry, and a refilling warm pool feeds that leak into a runaway that
-// drains the pool. Returns nil when this claim holds no pod yet.
-func (r *SandboxClaimReconciler) findClaimedHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool, claimName string) (*corev1.Pod, error) {
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
-		client.InNamespace(pool.Namespace),
-		client.MatchingLabels{huskPoolLabel: pool.Name, huskClaimLabel: claimName},
-	); err != nil {
-		return nil, fmt.Errorf("list claimed husk pods for %s: %w", claimName, err)
-	}
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp == nil {
-			return &pods.Items[i], nil
-		}
-	}
-	return nil, nil
-}
-
 func (r *SandboxClaimReconciler) selectDormantHuskPod(ctx context.Context, pool *v1alpha1.SandboxPool) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,

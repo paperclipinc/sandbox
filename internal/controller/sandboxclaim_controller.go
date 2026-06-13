@@ -536,19 +536,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Reuse the pod this claim already claimed on a prior reconcile (idempotent);
-	// only select + claim a fresh dormant pod when this claim holds none. This
-	// stops a retrying claim from leaking a new pod each pass.
-	pod, err := r.findClaimedHuskPod(ctx, pool, claim.Name)
+	// Select a fresh dormant pod to claim. A pod already claimed by any claim
+	// (including this one on a prior pass) carries the claim label and is skipped
+	// by selectDormantHuskPod, so an evicted claim whose old pod is gone or dying
+	// always moves on to a new dormant pod rather than re-activating the dead one.
+	// Leader election (one active reconciler) is what bounds concurrent claiming.
+	pod, err := r.selectDormantHuskPod(ctx, pool)
 	if err != nil {
 		return ctrl.Result{}, err
-	}
-	reusingPod := pod != nil
-	if pod == nil {
-		pod, err = r.selectDormantHuskPod(ctx, pool)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 	if pod == nil {
 		// No warm husk slot: pend and retry. The pool reconciler is expected to
@@ -613,26 +608,23 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	// Conflict and must NOT activate this pod (a second tenant on the same VM).
 	// Winning the label patch is the gate to Activate, so a pod is activated by
 	// exactly one claim. On conflict we requeue so the next reconcile picks a
-	// different dormant pod. Skipped when REUSING a pod this claim already holds
-	// (the label is already ours).
-	if !reusingPod {
-		if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
-			if apierrors.IsConflict(err) {
-				logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
-				claim.Status.Phase = v1alpha1.SandboxPending
-				setCondition(&claim.Status.Conditions, metav1.Condition{
-					Type:               "Ready",
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: metav1.NewTime(r.now()),
-					Reason:             "HuskPodRaced",
-					Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
-				})
-				_ = r.Status().Update(ctx, claim)
-				return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
-			}
-			logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
-			return ctrl.Result{}, err
+	// different dormant pod.
+	if err := r.markHuskPodClaimed(ctx, pod, claim.Name); err != nil {
+		if apierrors.IsConflict(err) {
+			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
+			claim.Status.Phase = v1alpha1.SandboxPending
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(r.now()),
+				Reason:             "HuskPodRaced",
+				Message:            "the selected dormant husk pod was claimed by another claim concurrently; the claim will retry and pick a different dormant pod",
+			})
+			_ = r.Status().Update(ctx, claim)
+			return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 		}
+		logger.Error(err, "mark husk pod claimed failed", "pod", pod.Name)
+		return ctrl.Result{}, err
 	}
 
 	// The recorded snapshot manifest digest the husk stub re-verifies the on-disk
