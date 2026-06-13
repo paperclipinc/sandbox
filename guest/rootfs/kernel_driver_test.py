@@ -61,6 +61,37 @@ class KernelDriverTest(unittest.TestCase):
         self.assertEqual(err["value"], "bad")
         self.assertTrue(any("ValueError" in line for line in err["traceback"]))
 
+    def test_timeout_interrupts_and_kernel_survives(self):
+        # A runaway cell that exceeds a short timeout must report TimeoutError
+        # with a status:error done, and the kernel must still run the NEXT cell,
+        # proving it was interrupted rather than left wedged on the busy loop.
+        events, _ = self._run([
+            {"id": "a", "code": "while True:\n    pass", "timeout": 2},
+            {"id": "b", "code": "21 * 2"},
+        ])
+        err = next(e for e in events if e["kind"] == "error" and e["id"] == "a")
+        self.assertEqual(err["name"], "TimeoutError")
+        done_a = next(e for e in events if e["kind"] == "done" and e["id"] == "a")
+        self.assertEqual(done_a["status"], "error")
+        result_b = next(e for e in events if e["kind"] == "result" and e["id"] == "b")
+        self.assertEqual(result_b["data"]["text/plain"].strip(), "42")
+        done_b = next(e for e in events if e["kind"] == "done" and e["id"] == "b")
+        self.assertEqual(done_b["status"], "ok")
+
+    def test_kernel_death_reports_error(self):
+        # A cell that kills the kernel mid-execution must report KernelDied with
+        # a status:error done, not a clean status:ok. os._exit(0) terminates the
+        # kernel process without a normal shutdown, mimicking a crash.
+        events, _ = self._run([
+            {"id": "a", "code": "import os\nos._exit(0)", "timeout": 30},
+        ])
+        done_a = next(e for e in events if e["kind"] == "done" and e["id"] == "a")
+        self.assertEqual(done_a["status"], "error")
+        self.assertTrue(
+            any(e["kind"] == "error" and e.get("name") == "KernelDied"
+                for e in events if e["id"] == "a")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
