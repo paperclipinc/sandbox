@@ -549,13 +549,29 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		owned = append(owned, p)
 	}
 
-	existing := int32(len(owned))
+	// Count only UNCLAIMED (dormant) pods toward the warm target. A pod carrying
+	// the claim label has been consumed by a SandboxClaim: it is activating or
+	// active, holding tenant state, and is NOT a warm slot. Counting it would
+	// leave the pool one warm pod short for every outstanding claim (the slot a
+	// claim took is never refilled), which is exactly the "no warm husk pod is
+	// ready" stall. Excluding claimed pods makes the pool maintain Replicas
+	// DORMANT pods, refilling each slot a claim consumes; the total pod count is
+	// then Replicas (warm) + the number of active claims.
+	dormant := make([]corev1.Pod, 0, len(owned))
+	for i := range owned {
+		if _, claimed := owned[i].Labels[huskClaimLabel]; claimed {
+			continue
+		}
+		dormant = append(dormant, owned[i])
+	}
+
+	existing := int32(len(dormant))
 	desired := pool.Spec.Replicas
 
 	switch {
 	case existing < desired:
 		deficit := desired - existing
-		logger.Info("husk pod deficit", "existing", existing, "desired", desired, "creating", deficit)
+		logger.Info("husk pod deficit", "dormant", existing, "desired", desired, "creating", deficit)
 		opts := HuskPodOptions{
 			StubImage:       r.HuskStubImage,
 			KVMResourceName: r.KVMResourceName,
@@ -582,14 +598,15 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1a
 		}
 
 	case existing > desired:
-		// Delete the extras deterministically: sort by name and delete the
-		// tail (newest GenerateName suffixes sort last), so repeated reconciles
-		// pick the same victims and the set converges.
-		sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
+		// Delete the extras deterministically from the DORMANT set only (never a
+		// claimed/active pod, which holds a tenant's running VM): sort by name and
+		// delete the tail (newest GenerateName suffixes sort last), so repeated
+		// reconciles pick the same victims and the set converges.
+		sort.Slice(dormant, func(i, j int) bool { return dormant[i].Name < dormant[j].Name })
 		surplus := existing - desired
-		logger.Info("husk pod surplus", "existing", existing, "desired", desired, "deleting", surplus)
+		logger.Info("husk pod surplus", "dormant", existing, "desired", desired, "deleting", surplus)
 		for i := int32(0); i < surplus; i++ {
-			victim := owned[len(owned)-1-int(i)]
+			victim := dormant[len(dormant)-1-int(i)]
 			if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
 				return existing, fmt.Errorf("delete surplus husk pod %s: %w", victim.Name, err)
 			}

@@ -803,6 +803,25 @@ func (r *SandboxClaimReconciler) reconcileDelete(ctx context.Context, claim *v1a
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
 	}
 
+	// Husk path: the claim's backing VM lives in the husk pod this claim activated,
+	// labeled with the claim name. Delete it to reap the VM and FREE THE WARM-POOL
+	// SLOT: a husk pod is single-use (once a tenant ran in it, it cannot be
+	// re-dormanted safely), so releasing the claim deletes the pod and the pool
+	// reconcile refills a fresh dormant pod. Without this the pod lingers
+	// claimed-but-idle and the pool never recovers the slot. No-op in raw-forkd
+	// mode (no pod carries the label); terminateOnNode below covers that path.
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		logger.Error(err, "list claimed husk pods on delete; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+	for i := range claimedHusk.Items {
+		if err := r.Delete(ctx, &claimedHusk.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "delete claimed husk pod on release", "pod", claimedHusk.Items[i].Name)
+			return ctrl.Result{}, err
+		}
+	}
+
 	if claim.Status.Node != "" && claim.Status.SandboxID != "" {
 		if err := terminateOnNode(ctx, r.NodeRegistry, claim.Status.Node, claim.Status.SandboxID); err != nil {
 			logger.Error(err, "terminate backing sandbox on delete", "node", claim.Status.Node, "sandbox", claim.Status.SandboxID)
