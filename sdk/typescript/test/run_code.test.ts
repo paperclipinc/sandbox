@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Execution, Result, ExecutionError } from "../src/types.js";
 import { parseRunCodeStream } from "../src/sandbox.js";
+import { AgentRunError } from "../src/errors.js";
 
 function b64(s: string): string {
   return Buffer.from(s, "utf-8").toString("base64");
@@ -42,6 +43,20 @@ describe("parseRunCodeStream", () => {
     );
     expect(ex.error?.name).toBe("ValueError");
     expect(ex.text).toBeNull();
+  });
+
+  it("throws when the stream ends without a terminal exit frame", async () => {
+    // A truncated or dropped connection: frames arrive but no exit frame. This
+    // must throw rather than resolve to a misleading clean Execution.
+    const promise = parseRunCodeStream(
+      lines(
+        { kind: "stdout", stdout: b64("partial\n") },
+        { kind: "result", result: { text: "7", data: { "text/plain": "7" } } },
+      ),
+      {},
+    );
+    await expect(promise).rejects.toBeInstanceOf(AgentRunError);
+    await expect(promise).rejects.toMatchObject({ code: "run_code_stream_truncated" });
   });
 });
 

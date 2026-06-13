@@ -1,6 +1,8 @@
 import base64
 import json
 
+import pytest
+
 from mitos.types import Execution, Result, ExecutionError
 from mitos.sandbox import _parse_run_code_stream
 
@@ -49,6 +51,18 @@ def test_parse_run_code_stream_error():
     assert ex.error is not None
     assert ex.error.name == "ValueError"
     assert ex.text is None
+
+
+def test_parse_run_code_stream_truncated_raises():
+    """A body that ends without the terminal exit frame is a dropped or
+    truncated connection, not a clean success. It must raise rather than return
+    a silent Execution with error=None."""
+    body = _frames(
+        {"kind": "stdout", "stdout": b64("partial\n")},
+        {"kind": "result", "result": {"text": "7", "data": {"text/plain": "7"}}},
+    )
+    with pytest.raises(RuntimeError, match="terminal exit frame"):
+        _parse_run_code_stream(_line_iter(body), None, None, None)
 
 
 def test_direct_sandbox_run_code_routes(monkeypatch):

@@ -395,6 +395,7 @@ export async function parseRunCodeStream(
     results: [],
     error: null,
   };
+  let sawExit = false;
   for await (const raw of source) {
     const line = raw.trim();
     if (!line) continue;
@@ -431,8 +432,23 @@ export async function parseRunCodeStream(
         break;
       }
       case "exit":
+        sawExit = true;
         return ex;
     }
+  }
+  if (!sawExit) {
+    // The body ended before the terminal exit frame: the stream was truncated
+    // or dropped. Surface it as an error rather than a misleading clean
+    // Execution success.
+    throw new AgentRunError(
+      "run_code stream ended before the terminal exit frame",
+      {
+        code: "run_code_stream_truncated",
+        cause: "the connection was truncated or dropped; the result is unknown",
+        remediation:
+          "Retry the snippet; if it persists, inspect the forkd or sandbox-server logs for a dropped connection.",
+      },
+    );
   }
   return ex;
 }

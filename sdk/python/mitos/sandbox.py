@@ -47,6 +47,7 @@ def _parse_run_code_stream(
     callbacks live as frames arrive. Result and error payloads are tenant code
     output and are never logged here."""
     ex = Execution()
+    saw_exit = False
     for raw in lines:
         if not raw.strip():
             continue
@@ -81,7 +82,16 @@ def _parse_run_code_stream(
                 traceback=payload.get("traceback", []) or [],
             )
         elif kind == "exit":
+            saw_exit = True
             break
+    if not saw_exit:
+        # The body ended before the terminal exit frame: the stream was
+        # truncated or dropped. Surface it as an error rather than a misleading
+        # clean Execution success.
+        raise RuntimeError(
+            "run_code stream ended before the terminal exit frame: "
+            "the connection was truncated or dropped; the result is unknown"
+        )
     return ex
 
 
