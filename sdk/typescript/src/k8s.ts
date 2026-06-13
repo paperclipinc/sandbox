@@ -45,6 +45,11 @@ export interface K8sApi {
   /** Creates a SandboxTemplate (the pool's templateRef target). */
   createTemplate(namespace: string, template: CustomObject): Promise<void>;
   /**
+   * Gets a SandboxTemplate. Used by the default-pool reuse path to confirm a
+   * reused pool runs the requested image (guarding against a slug collision).
+   */
+  getTemplate(namespace: string, name: string): Promise<CustomObject>;
+  /**
    * Reads a Secret and returns its data as decoded UTF-8 strings keyed by the
    * Secret key. Values are held in memory only and must never be logged.
    */
@@ -158,6 +163,18 @@ export class KubeConfigApi implements K8sApi {
       plural: "sandboxtemplates",
       body: template,
     });
+  }
+
+  async getTemplate(namespace: string, name: string): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.getNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "sandboxtemplates",
+      name,
+    });
+    return res as CustomObject;
   }
 
   async readSecret(

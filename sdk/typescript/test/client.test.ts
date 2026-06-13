@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AgentRun } from "../src/client.js";
+import { AgentRun, defaultPoolName } from "../src/client.js";
 import { AgentRunError } from "../src/errors.js";
 import type { CustomObject, CustomObjectList, K8sApi } from "../src/k8s.js";
 
@@ -31,13 +31,22 @@ class FakeK8s implements K8sApi {
       secretThrows?: boolean;
       listItems?: CustomObject[];
       poolExists?: boolean;
+      // Image stored on the existing default pool's SandboxTemplate. When set
+      // (with poolExists), getPool returns a pool whose templateRef resolves to
+      // a SandboxTemplate carrying this image, so the reuse path can verify it.
+      existingPoolImage?: string;
+      // When set, getTemplate rejects with this status code (template missing).
+      templateThrowsStatus?: number;
     },
   ) {}
 
   async getPool(_ns: string, name: string): Promise<CustomObject> {
     this.getPoolCalls += 1;
     if (this.opts.poolExists) {
-      return { metadata: { name } };
+      return {
+        metadata: { name },
+        spec: { templateRef: { name } },
+      };
     }
     throw notFound();
   }
@@ -48,6 +57,15 @@ class FakeK8s implements K8sApi {
 
   async createTemplate(_ns: string, template: CustomObject): Promise<void> {
     this.createdTemplates.push(template);
+  }
+
+  async getTemplate(_ns: string, name: string): Promise<CustomObject> {
+    if (this.opts.templateThrowsStatus !== undefined) {
+      const e = new Error("template not found") as Error & { statusCode: number };
+      e.statusCode = this.opts.templateThrowsStatus;
+      throw e;
+    }
+    return { metadata: { name }, spec: { image: this.opts.existingPoolImage } };
   }
 
   async createClaim(_ns: string, claim: CustomObject): Promise<CustomObject> {
@@ -79,6 +97,27 @@ class FakeK8s implements K8sApi {
 }
 
 const noSleep = async () => {};
+
+describe("defaultPoolName", () => {
+  it("slugifies an image deterministically", () => {
+    expect(defaultPoolName("python")).toBe("mitos-default-python");
+    expect(defaultPoolName("python:3.12-slim")).toBe("mitos-default-python-3.12-slim");
+    expect(defaultPoolName("Python")).toBe("mitos-default-python"); // lowercased
+  });
+
+  it("strips a trailing '.' so the name stays a valid object name", () => {
+    expect(defaultPoolName("python.")).toBe("mitos-default-python");
+    expect(defaultPoolName("python-")).toBe("mitos-default-python");
+  });
+
+  it("bounds the slug to 40 chars after the prefix", () => {
+    const long = defaultPoolName(
+      "ghcr.io/paperclipinc/agent-python-with-a-very-long-tag:3.12",
+    );
+    expect(long.startsWith("mitos-default-")).toBe(true);
+    expect(long.slice("mitos-default-".length).length).toBeLessThanOrEqual(40);
+  });
+});
 
 describe("AgentRun construction", () => {
   it("throws a clear error when no K8sApi is provided", () => {
@@ -253,11 +292,43 @@ describe("AgentRun.sandbox(image) lazy default pool", () => {
   });
 
   it("reuses an existing default pool (no create)", async () => {
-    const fake = new FakeK8s({ getResponses: ready, poolExists: true });
+    const fake = new FakeK8s({
+      getResponses: ready,
+      poolExists: true,
+      existingPoolImage: "python",
+    });
     const c = new AgentRun({ k8s: fake, sleep: noSleep });
     await c.sandbox("python");
     expect(fake.createdPools).toHaveLength(0);
     expect(fake.createdTemplates).toHaveLength(0);
+  });
+
+  it("raises pool_image_mismatch when a colliding slug reuses a pool for a different image", async () => {
+    // image A ("python-3.11") created the default pool; calling with image B
+    // ("python:3.11") collides to the same slug mitos-default-python-3.11.
+    expect(defaultPoolName("python:3.11")).toBe(defaultPoolName("python-3.11"));
+    const fake = new FakeK8s({
+      getResponses: ready,
+      poolExists: true,
+      existingPoolImage: "python-3.11",
+    });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    await expect(c.sandbox("python:3.11")).rejects.toMatchObject({
+      code: "pool_image_mismatch",
+    });
+    expect(fake.createdClaims).toHaveLength(0); // no sandbox was created
+  });
+
+  it("fails closed when the reused pool's template cannot be read", async () => {
+    const fake = new FakeK8s({
+      getResponses: ready,
+      poolExists: true,
+      templateThrowsStatus: 404,
+    });
+    const c = new AgentRun({ k8s: fake, sleep: noSleep });
+    await expect(c.sandbox("python")).rejects.toMatchObject({
+      code: "pool_image_mismatch",
+    });
   });
 
   it("explicit pool never creates a pool", async () => {

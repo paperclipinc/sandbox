@@ -22,17 +22,20 @@ const DEFAULT_POOL_PREFIX = "mitos-default-";
 
 /**
  * Deterministic default-pool name for an image: lowercased, "/" and ":" to "-",
- * other unsafe characters collapsed, bounded to 40 chars after the prefix.
- * Kept byte-for-byte equivalent to the Python default_pool_name so both SDKs
- * target the same pool object.
+ * other unsafe characters collapsed, bounded to 40 chars after the prefix, with
+ * leading/trailing "-" and "." stripped (a trailing "." is an invalid object
+ * name). Kept byte-for-byte equivalent to the Python default_pool_name so both
+ * SDKs target the same pool object.
  */
 export function defaultPoolName(image: string): string {
-  const slug = image
+  const collapsed = image
     .toLowerCase()
     .replace(/[/:]/g, "-")
-    .replace(/[^a-z0-9.-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return DEFAULT_POOL_PREFIX + slug.slice(0, 40);
+    .replace(/[^a-z0-9.-]+/g, "-");
+  // Bound first, then strip trailing/leading "-" and "." so truncation can
+  // never leave a name ending in "." or "-" (both invalid object-name tails).
+  const slug = collapsed.slice(0, 40).replace(/^[-.]+|[-.]+$/g, "");
+  return DEFAULT_POOL_PREFIX + slug;
 }
 
 function statusOf(e: unknown): number | undefined {
@@ -167,9 +170,13 @@ export class AgentRun {
   private async ensureDefaultPool(image: string): Promise<string> {
     const name = defaultPoolName(image);
     try {
-      await this.k8s.getPool(this.namespace, name);
+      const existing = await this.k8s.getPool(this.namespace, name);
+      await this.verifyPoolImage(existing, name, image);
       return name;
     } catch (e) {
+      if (e instanceof AgentRunError) {
+        throw e;
+      }
       if (!isNotFound(e)) {
         throw e;
       }
@@ -203,6 +210,50 @@ export class AgentRun {
       }
     }
     return name;
+  }
+
+  /**
+   * Guards the default-pool reuse path against a slug collision serving the
+   * wrong image. The slug normalizes ":"/"/" and other characters to "-", so
+   * two distinct images can map to one default pool (for example "python:3.11"
+   * and "python-3.11"). Reads the referenced SandboxTemplate's spec.image and
+   * compares it to the requested image; a mismatch throws rather than silently
+   * running the first caller's image.
+   */
+  private async verifyPoolImage(
+    pool: CustomObject,
+    name: string,
+    image: string,
+  ): Promise<void> {
+    const templateRef = (pool.spec?.["templateRef"] ?? {}) as { name?: string };
+    const templateName = templateRef.name ?? name;
+    const remediation = `Pass { pool: "${name}" } explicitly to reuse this pool, or use a distinct image that maps to a different default pool.`;
+    let template: CustomObject;
+    try {
+      template = await this.k8s.getTemplate(this.namespace, templateName);
+    } catch (e) {
+      // Pool with no resolvable template: cannot prove the image, so fail
+      // closed rather than risk the wrong image.
+      throw new AgentRunError(
+        `default pool ${name} references template ${templateName} that could not be read`,
+        {
+          code: "pool_image_mismatch",
+          cause: `reading SandboxTemplate ${templateName} failed with status ${statusOf(e) ?? "unknown"}`,
+          remediation,
+        },
+      );
+    }
+    const existingImage = (template.spec?.["image"] as string | undefined);
+    if (existingImage !== image) {
+      throw new AgentRunError(
+        `default pool ${name} already exists for a different image`,
+        {
+          code: "pool_image_mismatch",
+          cause: `pool ${name} runs image ${JSON.stringify(existingImage)}, not the requested ${JSON.stringify(image)} (the image slug collides)`,
+          remediation,
+        },
+      );
+    }
   }
 
   /**

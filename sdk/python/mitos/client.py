@@ -23,11 +23,15 @@ _SLUG_RE = re.compile(r"[^a-z0-9.-]+")
 def default_pool_name(image: str) -> str:
     """Derives a deterministic default-pool name for an image. The image is
     lowercased, "/" and ":" become "-", any other unsafe character collapses to
-    "-", and the slug is bounded so the pool name stays a valid object name.
-    Kept byte-for-byte equivalent to the TypeScript defaultPoolName."""
+    "-", leading/trailing "-" and "." are stripped (a trailing "." is an invalid
+    object name), and the slug is bounded so the pool name stays a valid object
+    name. Kept byte-for-byte equivalent to the TypeScript defaultPoolName."""
     slug = image.lower().replace("/", "-").replace(":", "-")
-    slug = _SLUG_RE.sub("-", slug).strip("-")
-    return _DEFAULT_POOL_PREFIX + slug[:40]
+    slug = _SLUG_RE.sub("-", slug)
+    # Bound first, then strip trailing/leading "-" and "." so truncation can
+    # never leave a name ending in "." or "-" (both invalid object-name tails).
+    slug = slug[:40].strip("-.")
+    return _DEFAULT_POOL_PREFIX + slug
 
 
 class AgentRun:
@@ -111,13 +115,14 @@ class AgentRun:
         deterministic name."""
         name = default_pool_name(image)
         try:
-            self._api.get_namespaced_custom_object(
+            existing = self._api.get_namespaced_custom_object(
                 group=API_GROUP,
                 version=API_VERSION,
                 namespace=self._namespace,
                 plural="sandboxpools",
                 name=name,
             )
+            self._verify_pool_image(existing, name, image)
             return name
         except ApiException as exc:
             if exc.status != 404:
@@ -142,6 +147,42 @@ class AgentRun:
         }
         self._create_or_reuse(pool, "sandboxpools")
         return name
+
+    def _verify_pool_image(self, pool: dict, name: str, image: str) -> None:
+        """Guards the default-pool reuse path against a slug collision serving
+        the wrong image. The slug normalizes ":"/"/" and other characters to
+        "-", so two distinct images can map to one default pool (for example
+        "python:3.11" and "python-3.11"). Reading the referenced
+        SandboxTemplate's spec.image and comparing it to the requested image
+        ensures a reused pool actually runs the requested image; a mismatch
+        raises rather than silently running the first caller's image."""
+        template_ref = (pool.get("spec") or {}).get("templateRef") or {}
+        template_name = template_ref.get("name") or name
+        try:
+            template = self._api.get_namespaced_custom_object(
+                group=API_GROUP,
+                version=API_VERSION,
+                namespace=self._namespace,
+                plural="sandboxtemplates",
+                name=template_name,
+            )
+        except ApiException as exc:
+            # Pool with no resolvable template: cannot prove the image, so fail
+            # closed rather than risk the wrong image.
+            raise AgentRunError(
+                f"default pool {name} references template {template_name} that could not be read",
+                code="pool_image_mismatch",
+                cause=f"reading SandboxTemplate {template_name} failed with status {exc.status}",
+                remediation=f'Pass pool="{name}" explicitly to reuse this pool, or use a distinct image that maps to a different default pool.',
+            ) from exc
+        existing_image = (template.get("spec") or {}).get("image")
+        if existing_image != image:
+            raise AgentRunError(
+                f"default pool {name} already exists for a different image",
+                code="pool_image_mismatch",
+                cause=f"pool {name} runs image {existing_image!r}, not the requested {image!r} (the image slug collides)",
+                remediation=f'Pass pool="{name}" explicitly to reuse this pool, or use a distinct image that maps to a different default pool.',
+            )
 
     def _create_or_reuse(self, body: dict, plural: str) -> None:
         """Create a namespaced custom object, tolerating a 409 from a concurrent
