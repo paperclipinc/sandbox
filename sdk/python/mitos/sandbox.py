@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import base64
+import json
+import threading
 import time
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
 
-from mitos.types import ExecResult, FileInfo, ForkInfo, SandboxInfo, SandboxPhase
+from mitos.types import (
+    BackgroundProcess,
+    ExecResult,
+    FileInfo,
+    ForkInfo,
+    SandboxInfo,
+    SandboxPhase,
+)
 
 
 API_GROUP = "mitos.run"
@@ -207,8 +216,33 @@ class Sandbox:
         timeout: int = 30,
         working_dir: str = "/workspace",
         env: Optional[dict[str, str]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
     ) -> ExecResult:
-        """Execute a command in the sandbox."""
+        """Execute a command in the sandbox.
+
+        When on_stdout or on_stderr is given, output is streamed over
+        /v1/exec/stream (NDJSON) and the callbacks fire per chunk as bytes
+        arrive; the returned ExecResult still carries the full aggregate. With
+        no callbacks the blocking /v1/exec path is used unchanged.
+        """
+        if on_stdout is None and on_stderr is None:
+            return self._exec_blocking(command, timeout, working_dir, env)
+        out_parts: list[bytes] = []
+        err_parts: list[bytes] = []
+        exit_code, exec_time_ms = self._stream(
+            command, timeout, working_dir, env,
+            lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
+            lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
+        )
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=b"".join(out_parts).decode("utf-8", "replace"),
+            stderr=b"".join(err_parts).decode("utf-8", "replace"),
+            exec_time_ms=exec_time_ms,
+        )
+
+    def _exec_blocking(self, command, timeout, working_dir, env) -> ExecResult:
         payload: dict = {
             "sandbox": self._sandbox_ref,
             "command": command,
@@ -217,7 +251,6 @@ class Sandbox:
         }
         if env:
             payload["env"] = env
-
         resp = self._http.post(
             f"{self._base_url}/exec",
             json=payload,
@@ -226,12 +259,162 @@ class Sandbox:
         )
         resp.raise_for_status()
         data = resp.json()
-
         return ExecResult(
             exit_code=data["exit_code"],
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),
             exec_time_ms=data.get("exec_time_ms", 0),
+        )
+
+    def _stream(
+        self, command, timeout, working_dir, env, on_out, on_err,
+        client=None, on_response=None,
+    ):
+        """Opens /v1/exec/stream and feeds chunks to on_out/on_err. Returns
+        (exit_code, exec_time_ms). Raises on transport error frames and on a
+        stream that ends before the terminal exit frame.
+
+        Streams on `client` when given (a dedicated per-stream httpx client so a
+        kill() can tear down only that connection), otherwise on the shared
+        Sandbox client. When on_response is given it is called with the live
+        streaming Response so a kill() can close that exact connection and
+        unblock the in-flight read deterministically, independent of how the
+        installed httpx version handles Client.close()."""
+        http = client if client is not None else self._http
+        payload: dict = {
+            "sandbox": self._sandbox_ref,
+            "command": command,
+            "timeout": timeout,
+            "working_dir": working_dir,
+        }
+        if env:
+            payload["env"] = env
+        exit_code = 0
+        exec_time_ms = 0.0
+        saw_exit = False
+        with http.stream(
+            "POST",
+            f"{self._base_url}/exec/stream",
+            json=payload,
+            timeout=None,
+            headers=self._auth_headers(),
+        ) as resp:
+            if on_response is not None:
+                on_response(resp)
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                frame = json.loads(line)
+                if "exit_code" in frame and "stream" not in frame:
+                    exit_code = frame["exit_code"]
+                    exec_time_ms = frame.get("exec_time_ms", 0.0)
+                    saw_exit = True
+                    if frame.get("error"):
+                        raise RuntimeError(f"exec stream error: {frame['error']}")
+                    continue
+                data = base64.b64decode(frame["data"]) if frame.get("data") else b""
+                if frame.get("stream") == "stderr":
+                    on_err(data)
+                else:
+                    on_out(data)
+        if not saw_exit:
+            # The body ended before the terminal exit frame: the stream was
+            # truncated or dropped. Surface it as an error rather than a
+            # misleading exit_code=0 success.
+            raise RuntimeError(
+                "exec stream ended before the terminal exit frame: "
+                "the connection was truncated or dropped; the exit code is unknown"
+            )
+        return exit_code, exec_time_ms
+
+    def exec_background(
+        self,
+        command: str,
+        timeout: int = 86400,
+        working_dir: str = "/workspace",
+        env: Optional[dict[str, str]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
+    ) -> "BackgroundProcess":
+        """Start a long-running command and return a handle. The command starts
+        running immediately on a background thread; wait() blocks for the
+        aggregate result. kill() closes only this stream's own client so forkd
+        cancels the guest process group, leaving the shared Sandbox client (and
+        every other exec/file call) untouched. Default timeout is one day so a
+        background server is not reaped by the per-exec timeout."""
+        out_parts: list[bytes] = []
+        err_parts: list[bytes] = []
+        # Resolve the endpoint and token on the calling thread so a failure to
+        # become ready surfaces here, not silently inside the drain thread.
+        base_url = self._base_url
+        self._sandbox_ref  # noqa: B018  force readiness/id resolution
+        # A dedicated client so kill() tears down only this stream, never the
+        # shared Sandbox client that other exec/file calls ride on.
+        stream_http = httpx.Client(timeout=30.0)
+
+        state: dict = {"result": None, "error": None, "response": None}
+        done = threading.Event()
+        resp_lock = threading.Lock()
+
+        def capture_response(resp) -> None:
+            with resp_lock:
+                state["response"] = resp
+
+        def drain_thread() -> None:
+            try:
+                exit_code, exec_time_ms = self._stream(
+                    command, timeout, working_dir, env,
+                    lambda b: (out_parts.append(b), on_stdout(b) if on_stdout else None),
+                    lambda b: (err_parts.append(b), on_stderr(b) if on_stderr else None),
+                    client=stream_http,
+                    on_response=capture_response,
+                )
+                state["result"] = ExecResult(
+                    exit_code=exit_code,
+                    stdout=b"".join(out_parts).decode("utf-8", "replace"),
+                    stderr=b"".join(err_parts).decode("utf-8", "replace"),
+                    exec_time_ms=exec_time_ms,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                state["error"] = exc
+            finally:
+                stream_http.close()
+                done.set()
+
+        # _base_url is read inside _stream; the thread relies on it being
+        # resolved above so no k8s call happens off the calling thread.
+        assert base_url
+        thread = threading.Thread(target=drain_thread, daemon=True)
+        thread.start()
+
+        def wait_for() -> ExecResult:
+            done.wait()
+            if state["error"] is not None:
+                raise state["error"]
+            return state["result"]
+
+        def kill() -> None:
+            # Close the exact in-flight streaming response first so the read the
+            # drain thread is blocked on aborts deterministically; relying on
+            # Client.close() alone is not portable across httpx versions. Then
+            # close the per-stream client (never the shared Sandbox client) and
+            # join the drain thread so kill() returns only once the thread has
+            # observed the teardown and set _done.
+            with resp_lock:
+                resp = state["response"]
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            stream_http.close()
+            thread.join(timeout=5.0)
+
+        return BackgroundProcess(
+            _drain=wait_for,
+            _close=kill,
+            _done=done,
         )
 
     def fork(self, n: int = 1, pause_source: bool = False) -> list[Sandbox]:

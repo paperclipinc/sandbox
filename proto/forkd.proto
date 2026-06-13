@@ -222,6 +222,11 @@ message ExecResponse {
   double exec_time_ms = 4;
 }
 
+// ExecStream is reserved for a future gRPC streaming transport. Today, like
+// Exec, streaming exec is served by the forkd HTTP sandbox API
+// (POST /v1/exec/stream, application/x-ndjson) on the HTTP port, not over gRPC.
+// The message shapes below are kept aligned with the vsock ExecStreamFrame
+// (stream, data, done/exit_code) so a later gRPC binding is a thin adapter.
 message ExecStreamRequest {
   string sandbox_id = 1;
   string command = 2;

@@ -76,3 +76,14 @@ export interface ForkInfo {
   phase: SandboxPhase;
   forkTimeMs: number;
 }
+
+/**
+ * A handle to a streaming exec started in the background. `wait()` drains the
+ * stream to completion and resolves the aggregate ExecResult; `kill()` aborts
+ * the underlying HTTP stream, which forkd turns into a guest process-group
+ * kill.
+ */
+export interface BackgroundProcess {
+  wait(): Promise<ExecResult>;
+  kill(): void;
+}

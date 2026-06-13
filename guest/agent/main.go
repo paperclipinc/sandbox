@@ -114,6 +114,16 @@ func handleConnection(conn net.Conn) {
 			continue
 		}
 
+		if req.Type == vsock.TypeExecStream {
+			if req.ExecStream == nil {
+				writeResponse(conn, vsock.Response{OK: false, Error: "exec_stream request is nil"})
+				return
+			}
+			// A stream owns its connection: write frames, then close.
+			handleExecStream(conn, req.ExecStream)
+			return
+		}
+
 		resp := handleRequest(&req)
 		writeResponse(conn, resp)
 	}

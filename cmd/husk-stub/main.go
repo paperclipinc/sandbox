@@ -389,6 +389,7 @@ func makeSandboxServer(ctx context.Context, api *daemon.SandboxAPI, listenAddr s
 		if err := api.RegisterSandbox(huskSandboxID, vsockPath); err != nil {
 			return fmt.Errorf("register activated sandbox with in-pod API: %w", err)
 		}
+		api.RegisterStreamPath(huskSandboxID, vsockPath)
 		api.RegisterToken(huskSandboxID, token)
 
 		once.Do(func() {
