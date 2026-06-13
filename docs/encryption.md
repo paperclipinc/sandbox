@@ -133,43 +133,61 @@ node data disk.
 ### Key lifecycle
 
 1. When `SandboxTemplate.Spec.Encrypted` is true, the pool reconciler calls
-   `EnsureEncKey` (`internal/controller/enc_key_secret.go`). This creates a
-   `<templateID>-enc-key` Secret in the template's namespace on the first call
-   and reads it back idempotently afterwards. The Secret holds a 32-byte key
-   generated with `crypto/rand` and is typed `Opaque`. Only the Secret name
-   appears in controller logs; key bytes are never logged, never in event
-   messages, and never in CRD status or conditions.
+   `EnsureEncKey` (`internal/controller/enc_key_secret.go`). This generates a
+   32-byte data-encryption key (DEK) with `crypto/rand`, WRAPS it with the KMS
+   key-encryption key (KEK) via `kms.Wrap`, zeroizes the plaintext DEK
+   immediately, and creates a `<templateID>-enc-key` Secret in the template's
+   namespace holding ONLY the wrapped DEK (data key `wrapped-dek`) and the
+   non-secret KEK id (data key `kek-id`). It reads the wrapped DEK back
+   idempotently on later calls. The plaintext DEK is NEVER persisted to etcd or
+   disk; only the Secret name and the KEK id (non-secret) appear in controller
+   logs. The wrapped DEK and the plaintext DEK are never logged, never in event
+   messages, and never in CRD status or conditions. See the KMS/HSM envelope
+   encryption section below.
 2. The Secret is owner-referenced to the `SandboxTemplate` object with
    `SetControllerReference`. Kubernetes garbage collection deletes the Secret
    automatically when the template is deleted, performing the crypto-shred at
    the Kubernetes level.
-3. The key is delivered to forkd inside the mTLS-protected gRPC request:
-   `CreateTemplateRequest.EncryptionKey` for template builds and
-   `ForkRequest.EncryptionKey` for forks. The RPC channel is TLS 1.3 with
-   mutual certificate authentication (see `internal/pki` and the threat model
-   §3), so the key is never in plaintext outside the controller and etcd.
-4. forkd's grpc_service stashes the key into a `RequestKeyProvider`
-   (`internal/fork/encryption.go`) before invoking the engine and calls
-   `ForgetKey` (zeroize + delete) in a deferred call after the RPC returns.
-   The key is in node memory only for the duration of the RPC. A
-   `RequestKeyProvider` fails closed: if no key is stashed for a scope and
-   encryption is enabled, `KeyFor` returns an error and the operation is
-   refused rather than running unencrypted.
-5. While a template's container is open (across forks, for the lifetime of the
-   forkd process), the key is held in node memory by the `RequestKeyProvider`.
-   If forkd restarts, the next `CreateTemplate` or `Fork` RPC re-delivers the
-   key from the controller.
+3. The WRAPPED DEK plus the KEK id are delivered to forkd inside the
+   mTLS-protected gRPC request: `CreateTemplateRequest.EncryptionKey` +
+   `kek_id` for template builds and `ForkRequest.EncryptionKey` + `kek_id` for
+   forks. The RPC channel is TLS 1.3 with mutual certificate authentication (see
+   `internal/pki` and the threat model §3). Because only the WRAPPED DEK travels
+   and is persisted, the plaintext DEK is never outside controller memory (where
+   it is zeroized post-wrap) and the forkd open window.
+4. forkd's grpc_service stashes the wrapped DEK + KEK id into a
+   `RequestKeyProvider` (`internal/fork/encryption.go`) via `SetWrappedKey`
+   before invoking the engine and calls `ForgetKey` (drop the wrapped entry) in
+   a deferred call after the RPC returns. `KeyFor` UNWRAPS the DEK via the local
+   KMS (`--kek-file`) on demand into a fresh `storecrypt.Key`; the engine
+   zeroizes that plaintext DEK immediately after the cryptsetup open/create. A
+   `RequestKeyProvider` fails closed: if no wrapped DEK is stashed for a scope
+   and encryption is enabled, or if the KMS cannot unwrap (wrong KEK), `KeyFor`
+   returns an error and the operation is refused rather than running unencrypted.
+5. The plaintext DEK exists in forkd memory ONLY for the duration of a container
+   open/create and is zeroized immediately after. The wrapped DEK is held by the
+   `RequestKeyProvider` only for the duration of the RPC. If forkd restarts, the
+   next `CreateTemplate` or `Fork` RPC re-delivers the wrapped DEK from the
+   controller, and forkd re-unwraps it via its KEK.
 
 ### Trust boundary
 
-- The controller and etcd are trusted with the key. The cluster MUST encrypt
-  etcd at rest (e.g. via a KMS provider configured in the kube-apiserver's
-  `EncryptionConfiguration`) for this to be meaningful; without etcd encryption
-  the Secret data is plaintext in the backing store. This assumption is stated
-  explicitly and is the operator's responsibility.
-- The node data disk is NOT trusted. The key is never written there; only
-  ciphertext (`<scope>.img`) and the LUKS container structure (which is
-  meaningless without a key) are stored on disk.
+- etcd holds ONLY the WRAPPED DEK (and the non-secret KEK id), never the
+  plaintext DEK. With envelope encryption the etcd-encryption-at-rest assumption
+  is DOWNGRADED to defense-in-depth: an attacker who exfiltrates an etcd backup
+  but not the KEK cannot unwrap the DEK. Encrypting etcd at rest (e.g. via a KMS
+  provider in the kube-apiserver's `EncryptionConfiguration`) is still
+  recommended as a second layer, but it is no longer the sole barrier.
+- The controller no longer holds the plaintext DEK after `EnsureEncKey` returns:
+  it generates the DEK, wraps it, and zeroizes the plaintext in the same call.
+- The KEK is the new trust anchor. For the local provider the KEK is an AES-256
+  key loaded from a Secret-mounted file (`--kek-file`) with restrictive
+  permissions; it never appears in argv or logs (only its non-secret KEKID
+  fingerprint does). For a future cloud KMS/HSM provider the KEK never leaves the
+  HSM. Destroying or rotating the KEK crypto-shreds every DEK it wrapped at once.
+- The node data disk is NOT trusted. Neither the plaintext DEK nor the wrapped
+  DEK is written there; only ciphertext (`<scope>.img`) and the LUKS container
+  structure (meaningless without the DEK) are stored on disk.
 - The controller itself is trusted. A compromised controller can read the Secret
   and deliver the key to any forkd. The controller's RBAC and the cluster's
   admin boundary are the trust anchors here.
@@ -178,14 +196,46 @@ node data disk.
 
 Deleting a `SandboxTemplate`:
 1. Kubernetes GC deletes the `<templateID>-enc-key` Secret via the owner
-   reference. The escrowed key is now gone.
+   reference. The only stored copy of the WRAPPED DEK is now gone.
 2. The LUKS keyslots on the node are wiped by `luksErase` when forkd runs
    `shredTemplateContainer` at `DeleteTemplate`. The backing image is removed.
-3. The in-memory key copy is zeroized by `ForgetKey` after the shred.
+3. The in-memory plaintext DEK was already zeroized after each cryptsetup call;
+   `ForgetKey` drops the wrapped entry after the shred.
 
-After step 1 alone, the ciphertext on the node cannot be recovered even by
-an attacker who has the node, because there is no surviving key copy. Steps 2-3
-are defense-in-depth.
+After step 1 alone, the ciphertext on the node cannot be recovered even by an
+attacker who has the node, because there is no surviving DEK copy. With envelope
+encryption there is a stronger property: even an etcd backup that still holds the
+wrapped DEK is useless without the KEK, and destroying or rotating the KEK
+crypto-shreds every DEK it wrapped at once. Steps 2-3 are defense-in-depth.
+
+## KMS/HSM envelope encryption
+
+The per-template DEK is wrapped by a key-encryption key (KEK) held behind a
+pluggable `kms.Wrapper` (`internal/kms`). This is envelope encryption: the
+controller generates the DEK, wraps it with the KEK, zeroizes the plaintext, and
+persists only the wrapped DEK plus the KEK id; forkd unwraps via the KEK at use
+time and zeroizes the plaintext immediately.
+
+- **Interface:** `kms.Wrapper` is `Wrap(ctx, plaintextDEK) (WrappedKey, error)`,
+  `Unwrap(ctx, WrappedKey) ([]byte, error)`, and `KEKID() string`. `WrappedKey`
+  carries the non-secret `KEKID` and the opaque `Ciphertext` (the wrapped DEK).
+  The context lets a cloud provider bound and cancel its remote call.
+- **Local provider (shipped, CI-testable):** `kms.LocalKEK` is AES-256-GCM with a
+  32-byte KEK and a fresh 12-byte nonce per wrap, framed as
+  `nonce || GCM(ciphertext+tag)`. The KEK is loaded from a Secret-mounted file by
+  PATH (`--kek-file` on both the controller and forkd), never as a value in argv,
+  and is never logged. `KEKID()` is `local:` followed by the first 8 bytes of
+  `SHA-256(KEK)` in hex: a stable, non-reversible fingerprint that matches a
+  wrapped DEK to its KEK and makes a KEK rotation detectable (an `Unwrap` with a
+  mismatched KEK id fails closed).
+- **Fail closed:** forkd refuses to start under `--enable-encryption` without
+  `--kek-file`, so a wrapped DEK can never arrive without an unwrapper. The
+  controller fails `EnsureEncKey` for an Encrypted template when no KMS is wired
+  (no `--kek-file`).
+- **Cloud KMS/HSM (interface-only follow-up):** AWS KMS, GCP KMS, and HashiCorp
+  Vault Transit each implement `kms.Wrapper` as a new file in `internal/kms`,
+  where `Wrap`/`Unwrap` are remote calls and the KEK never leaves the HSM. No
+  cloud SDK is added yet; the interface is shaped for them.
 
 TEARDOWN BOUNDARY: the controller does NOT today send a `DeleteTemplate` RPC to
 forkd when a `SandboxTemplate` is deleted. There is no SandboxTemplate
@@ -216,20 +266,31 @@ deferred and tracked as a follow-up; the honest status is documented in
 The envtest suite (`internal/controller/enc_key_envtest_test.go`) and unit tests
 (`internal/daemon/enc_key_test.go`, `internal/fork/encryption_test.go`) prove:
 
-- **Secret lifecycle:** `EnsureEncKey` creates a `<template>-enc-key` Secret on
-  first call and reads it back idempotently; the Secret has an owner reference to
-  the `SandboxTemplate` so it is GC'd when the template is deleted.
-- **Key over RPC:** the controller reads the key from the Secret and delivers it
-  in `CreateTemplateRequest.EncryptionKey` and `ForkRequest.EncryptionKey`; the
-  grpc_service stashes it into the `RequestKeyProvider` and forgets it after.
-- **Key not on disk:** the `RequestKeyProvider` holds the key in node memory
-  only; no code path writes the key to any file under the data dir.
-- **Fail-closed:** `RequestKeyProvider.KeyFor` returns an error when no key is
-  stashed; the engine refuses to run unencrypted rather than proceeding silently.
-- **Key never logged:** no log statement, error format, span attribute, or
-  condition message in `internal/fork/encryption.go`,
+- **Envelope round-trip and tamper:** `internal/kms` unit tests prove `LocalKEK`
+  wrap/unwrap round-trips a DEK, that a tampered wrapped DEK fails GCM
+  authentication, that a wrong-length KEK is rejected, that the KEKID is stable
+  and leaks no KEK bytes, and that a KEK mismatch fails closed on unwrap.
+- **Secret stores ONLY the wrapped DEK:** the envtest proves `EnsureEncKey`
+  creates a `<template>-enc-key` Secret holding `wrapped-dek` and `kek-id` and NO
+  raw `key` data key, that the wrapped DEK unwraps to a 32-byte DEK via the test
+  KMS, and that the Secret is owner-referenced to the `SandboxTemplate`.
+- **Wrapped DEK over RPC:** the controller delivers the wrapped DEK in
+  `CreateTemplateRequest.EncryptionKey`/`ForkRequest.EncryptionKey` and the KEK id
+  in `kek_id`; the grpc_service stashes them via `SetWrappedKey` and forgets them
+  after; forkd unwraps via the KMS and zeroizes the plaintext.
+- **Plaintext DEK not on disk, zeroized after use:** the `RequestKeyProvider`
+  holds only the wrapped DEK; `KeyFor` returns a freshly-unwrapped copy the
+  engine zeroizes after each cryptsetup call; no code path writes the plaintext
+  or wrapped DEK to any file under the data dir.
+- **Fail-closed:** `RequestKeyProvider.KeyFor` returns an error when no wrapped
+  DEK is stashed or when the KMS cannot unwrap (wrong KEK); the engine refuses to
+  run unencrypted. forkd refuses to start under `--enable-encryption` without
+  `--kek-file`.
+- **DEK and KEK never logged:** no log statement, error format, span attribute,
+  or condition message in `internal/kms/local.go`, `internal/fork/encryption.go`,
   `internal/daemon/grpc_service.go`, or `internal/controller/enc_key_secret.go`
-  formats or names key bytes.
+  formats or names the plaintext DEK, the wrapped DEK, or the KEK; only the
+  non-secret KEK id, scope ids, and counts appear.
 
 The LUKS mechanism (ciphertext at rest, decrypt/restore, crypto-shred
 unrecoverable) is proven on real `cryptsetup` in the KVM CI job as described
@@ -240,10 +301,14 @@ above.
 - **forkd container-shred-on-template-GC:** the TEARDOWN BOUNDARY above. The
   controller does not yet send a `DeleteTemplate` RPC on template deletion; the
   node-side container is not crypto-shredded by the controller today.
-- **KMS / HSM envelope encryption:** replace the raw k8s Secret with a key
-  wrapped by a cloud KMS or HSM so the key material is never in plaintext in
-  etcd, removing the etcd-encryption-at-rest assumption.
-- **Key rotation and re-encryption:** rotate the key and re-encrypt the LUKS
+- **Cloud KMS / HSM providers:** the envelope mechanism ships with the LOCAL
+  AES-256-GCM provider (`kms.LocalKEK`, CI-testable without cloud creds). AWS KMS,
+  GCP KMS, and Vault Transit are interface-only follow-ups (`kms.Wrapper` is
+  shaped for them; no cloud SDK is added yet) where the KEK never leaves the HSM.
+- **KEK rotation and DEK re-wrap:** rotate the KEK and re-wrap every stored
+  wrapped DEK. The KEKID mismatch in `Unwrap` is the rotation-detection hook this
+  work installs.
+- **DEK rotation and re-encryption:** rotate the DEK and re-encrypt the LUKS
   container without rebuilding the template.
 - **Per-workspace scope (Workspace #21):** make the scope a workspace so erasing
   a workspace crypto-shreds all its templates and volumes.

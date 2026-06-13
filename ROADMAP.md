@@ -144,8 +144,10 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     forkd-the-builder stays a smaller privileged control-plane surface. Residuals
     ACCEPTED and TRACKED: the shared read-only snapshot mount (fully pod-native CAS
     delivery is the follow-up), the `/dev/kvm` inherent host-escape surface
-    (unchanged from raw-forkd), the in-memory enc-key window (HSM custody is the
-    #31 follow-up), and the forkd-builder privilege (a builder redesign is out of
+    (unchanged from raw-forkd), the in-memory plaintext-DEK window during a
+    container open (envelope wrapping is done; the plaintext DEK is zeroized
+    immediately after use, and full HSM custody narrows but cannot eliminate this
+    window), and the forkd-builder privilege (a builder redesign is out of
     scope). The IN-VM NetworkPolicy enforcement and the live-Checkpoint-on-drain
     survival are proven only on a KVM-capable kubelet, so they need the bare-metal
     reference node (#16).
@@ -376,18 +378,28 @@ Format-freeze blockers:
   tests and a KVM CI phase on real cryptsetup: ciphertext at rest (marker absent
   on the raw image, present in the decrypted mount), decrypt/restore works (reopen
   + read intact), and crypto-shred makes the data unrecoverable (reopen with the
-  original key fails, image gone). PR2 key custody: the controller generates a
-  per-template 256-bit key with `crypto/rand`, stores it in a `<template>-enc-key`
-  Secret owner-referenced to the `SandboxTemplate` for GC crypto-shred, and
-  delivers it to forkd over the mTLS gRPC `CreateTemplate` and `Fork` requests;
-  forkd holds the key in process memory only via `RequestKeyProvider` (never on
-  the node data disk), encryption enabled with no delivered key fails closed, the
-  key is never logged; proven by envtest (Secret lifecycle, key-over-RPC,
-  fail-closed, key-never-logged) and unit tests. See docs/encryption.md. Open
-  follow-ups: forkd container-shred-on-template-GC wiring (the TEARDOWN BOUNDARY
-  in enc_key_secret.go); KMS/HSM envelope encryption instead of a raw Secret;
-  key rotation / re-encryption; per-workspace scope (#21); encrypting the CAS
-  chunk store.
+  original key fails, image gone). Key custody is ENVELOPE
+  encryption (#31 follow-up, done for the local provider): the controller
+  generates a per-template 256-bit DEK with `crypto/rand`, wraps it with a KMS
+  KEK via `kms.Wrapper` (`internal/kms`), zeroizes the plaintext, and stores ONLY
+  the wrapped DEK plus the non-secret KEK id in a `<template>-enc-key` Secret
+  owner-referenced to the `SandboxTemplate` for GC crypto-shred; the plaintext DEK
+  never reaches etcd or disk. It delivers the wrapped DEK + KEK id to forkd over
+  the mTLS gRPC `CreateTemplate` and `Fork` requests; forkd unwraps via its KEK
+  (`--kek-file` local AES-256-GCM provider), uses the plaintext DEK for cryptsetup,
+  and zeroizes it immediately, holding only the wrapped DEK via
+  `RequestKeyProvider` (never on the node data disk). Encryption enabled with no
+  wrapped DEK or an unwrap failure fails closed; forkd refuses to start under
+  `--enable-encryption` without `--kek-file`; the DEK and KEK are never logged.
+  Proven by the `internal/kms` round-trip/tamper/KEK-mismatch unit tests and
+  envtest (Secret stores the wrapped DEK + KEK id and never a raw key, RPC carries
+  them, fail-closed). The local AES-256-GCM provider is the CI-testable default;
+  cloud KMS (AWS/GCP/Vault) is interface-shaped follow-up where the KEK never
+  leaves the HSM. See docs/encryption.md. Open follow-ups: forkd
+  container-shred-on-template-GC wiring (the TEARDOWN BOUNDARY in
+  enc_key_secret.go); cloud KMS/HSM providers; KEK rotation and DEK re-wrap; DEK
+  rotation / re-encryption; per-workspace scope (#21); encrypting the CAS chunk
+  store.
 
 With #32 (mechanism done), #33 (mechanism done), and #31 (mechanism + custody
 both done, CI-proven), all three format-freeze blockers are now fully addressed.
