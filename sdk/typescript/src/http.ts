@@ -71,6 +71,24 @@ export class HttpClient {
   }
 
   /**
+   * POSTs a JSON body to `path` and returns the raw streaming Response so the
+   * caller can read the chunked NDJSON body line by line. Throws AgentRunError
+   * on a non-2xx status before any body is read.
+   */
+  async postStream(path: string, body: unknown): Promise<Response> {
+    const resp = await fetch(this.baseUrl + path, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw AgentRunError.fromResponse(resp.status, text, this.token);
+    }
+    return resp;
+  }
+
+  /**
    * Issues a DELETE to `path`. Throws AgentRunError on a non-2xx status.
    */
   async del(path: string): Promise<void> {

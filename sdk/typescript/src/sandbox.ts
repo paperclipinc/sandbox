@@ -4,7 +4,7 @@
 
 import { AgentRunError } from "./errors.js";
 import { HttpClient, validSandboxId } from "./http.js";
-import type { ExecResult, FileInfo } from "./types.js";
+import type { BackgroundProcess, ExecResult, FileInfo } from "./types.js";
 
 /** A function that tears a sandbox down. Injected by the owning client so the
  * cluster client deletes a SandboxClaim while the direct client issues a
@@ -125,26 +125,143 @@ export class Sandbox {
   }
 
   /**
-   * Runs a command in the sandbox. POSTs /v1/exec {sandbox, command, timeout}
-   * and maps the snake_case response into an ExecResult.
+   * Runs a command in the sandbox. With no stream callbacks it POSTs /v1/exec
+   * and maps the snake_case response. With onStdout/onStderr it streams
+   * /v1/exec/stream (NDJSON) and fires the callbacks per chunk while still
+   * resolving the full aggregate ExecResult.
    */
   async exec(
     command: string,
-    opts?: { timeoutSeconds?: number },
+    opts?: {
+      timeoutSeconds?: number;
+      onStdout?: (chunk: Uint8Array) => void;
+      onStderr?: (chunk: Uint8Array) => void;
+    },
   ): Promise<ExecResult> {
-    const body: Record<string, unknown> = {
-      sandbox: this.id,
+    if (!opts?.onStdout && !opts?.onStderr) {
+      const body: Record<string, unknown> = { sandbox: this.id, command };
+      if (opts?.timeoutSeconds !== undefined) {
+        body["timeout"] = opts.timeoutSeconds;
+      }
+      const resp = await this.http.post<execResponseWire>("/v1/exec", body);
+      return {
+        exitCode: resp.exit_code,
+        stdout: resp.stdout ?? "",
+        stderr: resp.stderr ?? "",
+        execTimeMs: resp.exec_time_ms,
+      };
+    }
+    return this.streamExec(command, opts);
+  }
+
+  /**
+   * Starts a long-running command and returns a handle. wait() drains the
+   * stream; kill() aborts it so forkd cancels the guest process group. The
+   * default timeout is one day so a background server is not reaped by the
+   * per-exec timeout.
+   */
+  async execBackground(
+    command: string,
+    opts?: {
+      timeoutSeconds?: number;
+      onStdout?: (chunk: Uint8Array) => void;
+      onStderr?: (chunk: Uint8Array) => void;
+    },
+  ): Promise<BackgroundProcess> {
+    const controller = new AbortController();
+    const timeout = opts?.timeoutSeconds ?? 86400;
+    const promise = this.streamExec(
       command,
+      { ...opts, timeoutSeconds: timeout },
+      controller.signal,
+    );
+    return {
+      wait: () => promise,
+      kill: () => controller.abort(),
     };
-    if (opts?.timeoutSeconds !== undefined) {
+  }
+
+  private async streamExec(
+    command: string,
+    opts: {
+      timeoutSeconds?: number;
+      onStdout?: (chunk: Uint8Array) => void;
+      onStderr?: (chunk: Uint8Array) => void;
+    },
+    signal?: AbortSignal,
+  ): Promise<ExecResult> {
+    const body: Record<string, unknown> = { sandbox: this.id, command };
+    if (opts.timeoutSeconds !== undefined) {
       body["timeout"] = opts.timeoutSeconds;
     }
-    const resp = await this.http.post<execResponseWire>("/v1/exec", body);
+    const resp = await this.http.postStream("/v1/exec/stream", body);
+    const reader = resp.body!.getReader();
+    const decoder = new TextDecoder();
+    const td = new TextDecoder();
+    let buffered = "";
+    let exitCode = 0;
+    let execTimeMs: number | undefined;
+    const outParts: string[] = [];
+    const errParts: string[] = [];
+
+    const handleLine = (line: string) => {
+      if (line === "") return;
+      const frame = JSON.parse(line) as {
+        stream?: string;
+        data?: string;
+        exit_code?: number;
+        exec_time_ms?: number;
+        error?: string;
+      };
+      if (frame.exit_code !== undefined && frame.stream === undefined) {
+        exitCode = frame.exit_code;
+        execTimeMs = frame.exec_time_ms;
+        if (frame.error) {
+          throw new AgentRunError(`exec stream error: ${frame.error}`, {
+            code: "exec_stream_error",
+            cause: frame.error,
+            remediation: "Inspect the command and the forkd logs for the failure.",
+          });
+        }
+        return;
+      }
+      const bytes = frame.data
+        ? Uint8Array.from(Buffer.from(frame.data, "base64"))
+        : new Uint8Array();
+      const text = td.decode(bytes);
+      if (frame.stream === "stderr") {
+        errParts.push(text);
+        opts.onStderr?.(bytes);
+      } else {
+        outParts.push(text);
+        opts.onStdout?.(bytes);
+      }
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (signal?.aborted) {
+        await reader.cancel();
+        break;
+      }
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 1);
+        handleLine(line);
+      }
+    }
+    if (buffered.trim() !== "") {
+      handleLine(buffered.trim());
+    }
+
     return {
-      exitCode: resp.exit_code,
-      stdout: resp.stdout ?? "",
-      stderr: resp.stderr ?? "",
-      execTimeMs: resp.exec_time_ms,
+      exitCode,
+      stdout: outParts.join(""),
+      stderr: errParts.join(""),
+      execTimeMs,
     };
   }
 
