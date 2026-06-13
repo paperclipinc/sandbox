@@ -116,6 +116,7 @@ func main() {
 	// Exec and files go through SandboxAPI → vsock → guest agent
 	apiHandler := s.sandboxAPI.Handler()
 	mux.Handle("POST /v1/exec", apiHandler)
+	mux.Handle("POST /v1/exec/stream", apiHandler)
 	mux.Handle("POST /v1/files/", apiHandler)
 
 	log.Printf("sandbox-server listening on %s (mock=%v)", addr, mockMode)
@@ -227,6 +228,7 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// Non-fatal: the sandbox exists but exec/files won't work until the agent is reachable.
 			log.Printf("register agent for sandbox %q: %v", req.ID, err)
 		}
+		s.sandboxAPI.RegisterStreamPath(req.ID, vsockPath)
 	}
 
 	log.Printf("fork %q from %q in %.2fms", req.ID, req.Template, info.ForkTimeMs)

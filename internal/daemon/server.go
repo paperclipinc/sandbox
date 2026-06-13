@@ -281,6 +281,7 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
+	s.sandboxAPI.RegisterStreamPath(sandboxID, vsockPath)
 
 	if err := s.notifyForked(sandboxID, guestNet, volumes); err != nil {
 		return err
@@ -360,6 +361,7 @@ func (s *Server) notifyForkedRunning(sandboxID, vsockPath string) error {
 	if err := s.sandboxAPI.RegisterSandbox(sandboxID, vsockPath); err != nil {
 		return fmt.Errorf("guest agent not connected: %w", err)
 	}
+	s.sandboxAPI.RegisterStreamPath(sandboxID, vsockPath)
 	// Live forks inherit the source VM's baked network identity in memory; the
 	// engine does not (yet) re-address them, so no per-fork network config is
 	// delivered here. Distinct-identity live forks are a follow-up (#18). Live
