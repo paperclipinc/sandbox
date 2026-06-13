@@ -87,6 +87,16 @@ type SandboxClaimReconciler struct {
 	// Now is the reconciler's clock, injectable for tests. Nil uses time.Now.
 	Now func() time.Time
 
+	// Demand is the shared per-pool claim-arrival tracker the warm-pool
+	// autoscaler reads. The claim reconciler records an arrival whenever a claim
+	// reaches the husk-claim path (whether it finds a warm pod or pends), so the
+	// pool reconciler keeps the warm buffer up under load and resets the
+	// scale-down cooldown. The SAME *PoolDemand instance must be shared with the
+	// SandboxPoolReconciler. Nil disables demand recording (autoscaler then falls
+	// back to never-recent, which only relaxes scale-down). Only used when
+	// EnableHuskPods is true.
+	Demand *PoolDemand
+
 	// EnableHuskPods selects the husk-pod activation path (issue #18, slice 2):
 	// the claim activates a dormant warm husk pod in place over the mTLS control
 	// channel instead of SelectNode+forkOnNode. Default false: the raw-forkd path
@@ -172,6 +182,18 @@ func (r *SandboxClaimReconciler) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+// recordHuskDemand stamps a claim arrival for the claim's pool into the shared
+// demand tracker, the autoscaler's signal that warm capacity is being consumed.
+// It is best-effort: a nil tracker is a no-op. It records only the pool key and a
+// timestamp, never any claim payload.
+func (r *SandboxClaimReconciler) recordHuskDemand(claim *v1alpha1.SandboxClaim) {
+	if r.Demand == nil {
+		return
+	}
+	key := claim.Namespace + "/" + claim.Spec.PoolRef.Name
+	r.Demand.RecordArrival(key, r.now())
 }
 
 // maxPendingDuration returns the configured bound or the default.
@@ -536,6 +558,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *v1alpha1.SandboxClaim, pool *v1alpha1.SandboxPool, template *v1alpha1.SandboxTemplate) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Every arrival at the husk-claim path is demand on the pool's warm buffer,
+	// whether or not a warm pod is available right now. Recording it here keeps
+	// the autoscaler scaling up under sustained load and resets the scale-down
+	// cooldown so an idle-down does not race a live burst.
+	r.recordHuskDemand(claim)
+
 	// Select a fresh dormant pod to claim. A pod already claimed by any claim
 	// (including this one on a prior pass) carries the claim label and is skipped
 	// by selectDormantHuskPod, so an evicted claim whose old pod is gone or dying
@@ -686,6 +714,13 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 		claim.Status.FinishedAt = &now
 		_ = r.Status().Update(ctx, claim)
 		return ctrl.Result{}, err
+	}
+
+	// Record how long this claim waited for a warm pod: creation to activate.
+	// A burst absorbed by warm capacity lands near the activate cost; a claim
+	// that waited for a cold-started refill lands in the seconds.
+	if !claim.CreationTimestamp.IsZero() {
+		observeClaimWaitForWarm(r.now().Sub(claim.CreationTimestamp.Time).Seconds())
 	}
 
 	now := metav1.Now()

@@ -270,3 +270,22 @@ func TestPoolReconcileAutoscaleDesired(t *testing.T) {
 		t.Fatalf("desiredWarm with 4 in-use = %d, want 6", got)
 	}
 }
+
+func TestClaimRecordsDemandArrival(t *testing.T) {
+	d := NewPoolDemand()
+	r := &SandboxClaimReconciler{Demand: d, Now: func() time.Time {
+		return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	}}
+	claim := &v1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+		Spec:       v1alpha1.SandboxClaimSpec{PoolRef: v1alpha1.LocalObjectReference{Name: "p"}},
+	}
+	r.recordHuskDemand(claim)
+	got, ok := d.LastArrival("ns/p")
+	if !ok {
+		t.Fatal("expected a recorded arrival for ns/p")
+	}
+	if !got.Equal(time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("arrival = %v, want the injected clock time", got)
+	}
+}
