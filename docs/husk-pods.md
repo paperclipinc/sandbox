@@ -345,6 +345,48 @@ DaemonSet to request the resource instead of mounting the device is a follow-up.
   wiring) and migrating the forkd DaemonSet off its privileged `/dev/kvm`
   hostPath to request the resource are follow-ups (see section 6).
 
+### Jailer in the pod (per-VM uid, chroot, nested cgroup)
+
+The husk pod runs every VM through the Firecracker jailer, INSIDE the pod, so a
+tenant VM gets a dedicated per-VM uid/gid, a chroot the jailer `pivot_root`s into,
+and a cgroup nested under the pod's own cgroup. This is what makes a microVM
+escape land as a throwaway unprivileged uid in an empty chroot rather than the
+pod's uid 0.
+
+The one hard part is `pivot_root(2)` inside a pod. The jailer `pivot_root`s into
+`<chroot-base>/firecracker/<vm-id>/root`, and `pivot_root` requires the new root
+to be a MOUNT POINT whose parent mount does NOT have SHARED propagation. A pod's
+container rootfs is commonly mounted shared (or otherwise propagating), so a plain
+directory under it fails `pivot_root` with `EINVAL`/`EBUSY`. The stub fixes both
+preconditions once, at Prepare, in the pod's own mount namespace
+(`cmd/husk-stub/mount_linux.go` `prepareChrootMount`):
+
+1. bind-mount the chroot base onto itself (`mount --bind`), so it BECOMES a mount
+   point the jailer can pivot under; and
+2. recursively mark it `MS_PRIVATE` (`mount --make-private`), so its propagation
+   does not defeat `pivot_root`.
+
+The chroot base is a pod-WRITABLE `emptyDir` (`/run/husk/jail`), deliberately
+separate from the READ-ONLY snapshot hostPath: the jailer creates per-VM chroot
+dirs and the stub hard-links (or copies on EXDEV) the snapshot mem/vmstate into
+them, both of which need a writable filesystem. The cross-filesystem copy fallback
+is expected here (the snapshot is on the read-only node mount), so the husk jailer
+config does NOT require the chroot base and the snapshot to share a filesystem,
+unlike the forkd builder.
+
+This needs exactly one capability beyond what the device plugin grants:
+`CAP_SYS_ADMIN`, for the `mount(2)` above and for the jailer's own jail
+construction (cgroup + namespace + chroot). The jailer then drops to the
+unprivileged per-VM uid inside the jail, so the VMM does NOT keep `CAP_SYS_ADMIN`.
+`/dev/kvm` and `/dev/net/tun` are still injected by the device plugin; the jailer
+mknods them inside the chroot from the injected device nodes.
+
+CI-proven on real KVM (`kvm-test.yaml` husk jailed-activation phase): a jailed
+dormant stub activates a snapshot in place, the activated Firecracker runs as a
+uid in 64000-64999, and its `/proc/<pid>/root` is the per-VM chroot, not `/`. The
+mount setup itself is verified in the KVM-CI unit phase
+(`cmd/husk-stub/mount_linux_test.go`, gated to root/`CAP_SYS_ADMIN`).
+
 ## 6. Controller migration: husk pod lifecycle (slice 1)
 
 This is the first controller-migration slice. It is gated behind the

@@ -38,6 +38,13 @@ jobs:
           # last v1 line and reads our v1-format .golangci.yml.
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
           "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
+      - name: Threat model records jailed-in-pod surface
+        run: |
+          set -euo pipefail
+          grep -q 'CAP_SYS_ADMIN' docs/threat-model.md
+          grep -qi 'jailed' docs/threat-model.md
+          grep -qi 'pivot_root' docs/husk-pods.md
+          echo "DOC_DELTA_OK"
 
   manifests:
     # Validate the production deploy manifests: kubeconform schema-checks every

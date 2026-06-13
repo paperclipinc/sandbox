@@ -17,7 +17,7 @@ has happened.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent (`guest/agent`) | PID 1 in guest, untrusted post-exec | nothing | forkd / husk stub treat its output as data only |
-| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, `seccomp: RuntimeDefault`, read-only snapshot mount | controller (mTLS control channel) | controller |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps, add only CAP_SYS_ADMIN (the in-pod jailer + chroot-base mount), `seccomp: RuntimeDefault`, read-only snapshot mount, every VM jailed (per-VM uid, chroot, nested cgroup) | controller (mTLS control channel) | controller |
 | forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | root DaemonSet pod with `/dev/kvm` and an explicit capability list (not `privileged`) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
@@ -86,7 +86,7 @@ load-bearing:
 
 - `privileged: false`,
 - `allowPrivilegeEscalation: false` (no setuid path regains privilege),
-- `capabilities.drop: [ALL]`, none added back,
+- `capabilities.drop: [ALL]`, add EXACTLY `CAP_SYS_ADMIN`: the in-pod jailer needs it to build each VM's jail (cgroup + mount namespace + chroot), and the stub needs the one `mount(2)` that bind-mounts and privatizes the jailer chroot base so the jailer can `pivot_root` inside the pod (a pod's rootfs is commonly a shared mount, which `pivot_root` refuses). The jailer then drops to an unprivileged per-VM uid inside the jail, so a VMM escape does NOT inherit `CAP_SYS_ADMIN`,
 - `seccompProfile: RuntimeDefault` at BOTH the pod and the container level,
 - the ONLY host mount is the READ-ONLY snapshot dir plus the read-only kernel
   file (surface 3),
@@ -101,6 +101,24 @@ SAME securityContext minus those two exceptions IS admitted into a restricted
 namespace, and a genuinely privileged pod IS rejected in the same namespace
 (PSA is enforcing); both are asserted on `kind-e2e-husk` (slice 4, section 6e of
 `docs/husk-pods.md`).
+
+JAILED IN THE POD (this closes the prior unjailed-husk residual). Until now the
+husk stub exec'd Firecracker DIRECTLY as the pod's uid 0: no per-VM uid, no
+chroot, no jailer cgroup, so a microVM escape landed as the pod's uid 0 with the
+pod's full view. The stub now launches every VM through the Firecracker jailer
+INSIDE the pod (`cmd/husk-stub`, `internal/firecracker/jailer.go`): a dedicated
+per-VM uid/gid from `--uid-range` (default 64000-64999, uid 0 refused), a per-VM
+chroot the jailer `pivot_root`s into, and a cgroup the jailer NESTS under the
+pod's own cgroup (a child memcg, it does not override the pod's `memory.max`).
+The in-pod `pivot_root` precondition is handled by the stub: before any launch it
+bind-mounts the chroot base (a pod-writable emptyDir, NOT the read-only snapshot
+hostPath) onto itself and marks it `MS_PRIVATE`, so the new root is a mount point
+with non-shared parent propagation, exactly what `pivot_root(2)` requires. The
+cost is the single added `CAP_SYS_ADMIN` above; the benefit is that a guest that
+escapes the microVM now lands as a THROWAWAY uid in an EMPTY chroot, not as the
+pod's uid 0. CI-proven on real KVM (`kvm-test.yaml` husk jailed-activation phase):
+the activated Firecracker runs as a uid in 64000-64999 and its `/proc/<pid>/root`
+is the per-VM chroot, not `/`.
 
 This is the core "provably better" claim, and it is bounded to THIS surface: a
 guest that escapes the microVM lands with NO root authority, NO Linux
@@ -254,7 +272,7 @@ is discussed separately below the table.
 
 | Axis | Old forkd (raw-forkd) | Husk pod | Verdict |
 |---|---|---|---|
-| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (one of the two PSA-restricted exceptions, the `/dev/kvm` device one; the other is the read-only snapshot hostPath), no escalation | husk BETTER |
+| Privilege | root, `privileged` dropped for an explicit cap list | `privileged: false`, `runAsNonRoot: false` (the `/dev/kvm` device exception), no escalation, drop ALL caps and add ONLY `CAP_SYS_ADMIN` for the in-pod jailer (which drops to a per-VM uid inside the jail) | husk BETTER |
 | Capabilities | explicit set incl. `CAP_SYS_ADMIN`, `SYS_CHROOT` | `drop: [ALL]`, none added | husk BETTER |
 | Host FS access | hostPath to the node data dir (RW) | READ-ONLY node hostPaths only: the snapshot mount, the kernel file, and (when verify is enforced) the CAS manifest the stub checks the snapshot against; all read-only | husk BETTER |
 | Device access (`/dev/kvm` + kernel) | `/dev/kvm` via hostPath | `/dev/kvm` via device plugin (no privilege) | EQUAL on the inherent KVM/kernel escape surface; husk removes only the privileged REQUIREMENT, not the device surface |
@@ -299,7 +317,7 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Firecracker microVM (minimal device model) | **mitigated** | Each sandbox is a separate Firecracker process with its own KVM VM (`internal/fork/engine.go`). |
-| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **mitigated by design; capability set pending proof in the KVM CI jailer run (issue #2 Task 5)** | forkd launches every Firecracker process through the jailer (`internal/firecracker/jailer.go`, `client.go:startJailedVM`): a dedicated uid/gid per VM from `--uid-range` (default 64000-64999; uid 0 refused), a per-VM chroot under `--chroot-base` containing only the explicitly hard-linked kernel, rootfs, and snapshot files (a traversal guard refuses anything outside the data dir and the VM workspace), and cgroup v2 attachment. Caller-supplied ids are validated at the gRPC boundary (`internal/daemon/validate.go`, `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}`) and the launch path independently refuses ids whose jailer directories would escape the chroot base, so ids cannot traverse into root-level filesystem operations. The shipped DaemonSet sets the jailer flags; forkd fails closed on misconfiguration (nonroot, chroot base on a different filesystem from the data dir, malformed uid range). Residuals, explicitly: the direct-exec dev path remains when `--jailer` is omitted (forkd logs a loud warning; standalone sandbox-server always runs unjailed); a VMM compromise now lands as a throwaway uid in an empty chroot instead of forkd's root, but hard-linked snapshot files inside the chroot remain readable to it. |
+| Jailer (dedicated UID, chroot, cgroup, namespaces per VM) | **mitigated by design; capability set pending proof in the KVM CI jailer run (issue #2 Task 5)** | forkd launches every Firecracker process through the jailer (`internal/firecracker/jailer.go`, `client.go:startJailedVM`): a dedicated uid/gid per VM from `--uid-range` (default 64000-64999; uid 0 refused), a per-VM chroot under `--chroot-base` containing only the explicitly hard-linked kernel, rootfs, and snapshot files (a traversal guard refuses anything outside the data dir and the VM workspace), and cgroup v2 attachment. Caller-supplied ids are validated at the gRPC boundary (`internal/daemon/validate.go`, `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}`) and the launch path independently refuses ids whose jailer directories would escape the chroot base, so ids cannot traverse into root-level filesystem operations. The shipped DaemonSet sets the jailer flags; forkd fails closed on misconfiguration (nonroot, chroot base on a different filesystem from the data dir, malformed uid range). Residuals, explicitly: the direct-exec dev path remains when `--jailer` is omitted (forkd logs a loud warning; standalone sandbox-server always runs unjailed); a VMM compromise now lands as a throwaway uid in an empty chroot instead of forkd's root, but hard-linked snapshot files inside the chroot remain readable to it. UPDATE: the husk pod (the default runner) now ALSO runs jailed: `cmd/husk-stub` launches its VM through the jailer with the same per-VM uid + chroot + nested cgroup, after privatizing the chroot base so `pivot_root` works inside the pod (section 0, surface 1). The unjailed-husk path is now the development-only escape hatch (omit `--jailer`; the stub logs a loud warning), no longer the default. |
 | Seccomp on the VMM process | **partial** | The jailer-launched VMM runs Firecracker's default production seccomp filters; Firecracker installs them on all VMM threads unless explicitly disabled, and we never pass `--no-seccomp` or a custom filter. We do not verify or customize the filter level; that stays out of scope until the jailer path is proven in KVM CI. |
 | CVE posture / version pinning | **partial** | CI pins Firecracker v1.15.0; there is no documented update policy or advisory tracking. |
 | Guest agent as attack surface | **partial** | Agent speaks a small JSON protocol over vsock only (`guest/agent/main.go`); host side treats responses as data. A 10MB line-buffer cap exists. No fuzzing of the protocol yet. |
