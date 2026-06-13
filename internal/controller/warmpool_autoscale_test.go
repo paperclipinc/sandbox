@@ -6,6 +6,7 @@ import (
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 func autoPool(min, max, spare, cooldownSec int32) *v1alpha1.SandboxPool {
@@ -133,4 +134,48 @@ func TestPoolDemandTracker(t *testing.T) {
 	if _, ok := d.LastArrival("ns/poolB"); ok {
 		t.Fatal("poolB must be independent of poolA")
 	}
+}
+
+func gaugeValueByLabel(t *testing.T, name, labelKey, labelVal string) float64 {
+	t.Helper()
+	mfs, err := ctrlmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == labelKey && l.GetValue() == labelVal {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf("metric %s{%s=%q} not found", name, labelKey, labelVal)
+	return 0
+}
+
+func TestWarmPoolMetricsSetters(t *testing.T) {
+	// Gauges: set then read back via the testutil gatherer.
+	setWarmPoolGauges("ns/poolM", 3, 5, 7)
+	if got := gaugeValueByLabel(t, "mitos_pool_warm_dormant", "pool", "ns/poolM"); got != 3 {
+		t.Fatalf("dormant gauge = %v, want 3", got)
+	}
+	if got := gaugeValueByLabel(t, "mitos_pool_warm_in_use", "pool", "ns/poolM"); got != 5 {
+		t.Fatalf("in-use gauge = %v, want 5", got)
+	}
+	if got := gaugeValueByLabel(t, "mitos_pool_desired_warm", "pool", "ns/poolM"); got != 7 {
+		t.Fatalf("desired gauge = %v, want 7", got)
+	}
+
+	// Counters: bump once each and confirm they are registered (no panic).
+	recordWarmScaleUp("ns/poolM")
+	recordWarmScaleDown("ns/poolM")
+
+	// Histograms: observe once each (no panic, registered).
+	observeRefillLatency(0.5)
+	observeClaimWaitForWarm(0.02)
 }
