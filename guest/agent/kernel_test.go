@@ -3,12 +3,44 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/paperclipinc/mitos/internal/vsock"
 )
+
+// fakeFrameConn captures frames written by handleRunCodeStream.
+type fakeFrameConn struct {
+	bytes.Buffer
+}
+
+func (f *fakeFrameConn) Close() error { return nil }
+
+func TestHandleRunCodeStreamWritesFrames(t *testing.T) {
+	dir := t.TempDir()
+	driver := writeFakeDriver(t, dir)
+	// Point the package kernel at the fake driver.
+	guestKernel = newKernelManager(kernelConfig{python: "/bin/sh", driverPath: driver})
+	defer guestKernel.shutdown()
+
+	var conn fakeFrameConn
+	handleRunCodeStream(&conn, &vsock.RunCodeRequest{Code: "print('hi')", Language: "python"})
+
+	var frames []vsock.ExecStreamFrame
+	for _, line := range bytes.Split(bytes.TrimSpace(conn.Bytes()), []byte("\n")) {
+		var fr vsock.ExecStreamFrame
+		if err := json.Unmarshal(line, &fr); err != nil {
+			t.Fatalf("decode frame %q: %v", line, err)
+		}
+		frames = append(frames, fr)
+	}
+	if len(frames) != 3 || frames[len(frames)-1].Kind != vsock.FrameExit {
+		t.Fatalf("frames = %+v", frames)
+	}
+}
 
 // writeFakeDriver writes a shell script that mimics kernel_driver.py: it prints
 // a ready line, then for each stdin request line emits canned event lines and a

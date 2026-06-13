@@ -131,6 +131,18 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
+		if req.Type == vsock.TypeRunCode {
+			if req.RunCode == nil {
+				writeResponse(conn, vsock.Response{OK: false, Error: "run_code request is nil"})
+				return
+			}
+			// A run_code is a stream too: it owns this connection. The kernel
+			// itself is the package-level guestKernel and persists across these
+			// per-call connections, so state survives.
+			handleRunCodeStream(conn, req.RunCode)
+			return
+		}
+
 		resp := handleRequest(&req)
 		writeResponse(conn, resp)
 	}
