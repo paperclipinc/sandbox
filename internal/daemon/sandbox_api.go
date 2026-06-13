@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,10 @@ type SandboxAPI struct {
 	agents   map[string]*vsock.Client // sandbox ID → agent connection
 	tokens   map[string]string        // sandbox ID → bearer token; values never logged
 	vsockDir string                   // directory containing vsock UDS files
+	// streamPaths maps sandbox ID to the vsock UDS path used to open a DEDICATED
+	// connection per streaming exec (so a long stream never interleaves with the
+	// shared agents[id] connection). Guarded by mu.
+	streamPaths map[string]string
 	// lastActivity records the time of the most recent exec or file call per
 	// sandbox, guarded by mu. Absent until the first touch; used by the GC
 	// reconciler via ListSandboxes to drive idle reaping.
@@ -47,6 +52,7 @@ func NewSandboxAPI(vsockDir string) *SandboxAPI {
 		agents:       make(map[string]*vsock.Client),
 		tokens:       make(map[string]string),
 		vsockDir:     vsockDir,
+		streamPaths:  make(map[string]string),
 		lastActivity: make(map[string]time.Time),
 		now:          time.Now,
 		auditor:      NopAuditor{},
@@ -164,7 +170,38 @@ func (api *SandboxAPI) UnregisterSandbox(sandboxID string) {
 	}
 	delete(api.tokens, sandboxID)
 	delete(api.lastActivity, sandboxID)
+	delete(api.streamPaths, sandboxID)
 	api.mu.Unlock()
+}
+
+// RegisterStreamPath records the vsock UDS path for opening per-stream
+// dedicated connections to a sandbox's guest agent. forkd calls this with the
+// same path it passed to RegisterSandbox; the standalone server uses the unix
+// fallback path. Without a recorded path, /v1/exec/stream falls back to the
+// shared connection's aggregated Exec (no incremental output).
+func (api *SandboxAPI) RegisterStreamPath(sandboxID, vsockPath string) {
+	api.mu.Lock()
+	api.streamPaths[sandboxID] = vsockPath
+	api.mu.Unlock()
+}
+
+// dialStream opens a dedicated streaming connection for sandboxID, honoring the
+// unix fallback the standalone server enables.
+func (api *SandboxAPI) dialStream(sandboxID string) (*vsock.StreamConn, error) {
+	api.mu.RLock()
+	path, ok := api.streamPaths[sandboxID]
+	api.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("sandbox %s has no stream path", sandboxID)
+	}
+	sc, err := vsock.DialStream(path, vsock.AgentPort)
+	if err == nil {
+		return sc, nil
+	}
+	if api.unixFallback && errors.Is(err, fs.ErrNotExist) {
+		return vsock.DialStreamUnix(fmt.Sprintf("/tmp/sandbox-agent-%d.sock", vsock.AgentPort))
+	}
+	return nil, err
 }
 
 // Configure delivers claim-time env and secrets to a sandbox's guest agent.
@@ -209,6 +246,7 @@ func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {
 func (api *SandboxAPI) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/exec", api.handleExec)
+	mux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
 	mux.HandleFunc("POST /v1/files/read", api.handleReadFile)
 	mux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
@@ -296,21 +334,30 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	api.touch(req.Sandbox)
 
-	agent, err := api.getAgent(req.Sandbox)
-	if err != nil {
+	if _, err := api.getAgent(req.Sandbox); err != nil {
 		writeErr(w, err.Error(), 404)
 		return
 	}
 
-	timeout := req.Timeout
-	if timeout == 0 {
-		timeout = 30
-	}
-
-	result, err := agent.Exec(req.Command, req.WorkingDir, req.Env, timeout)
+	var out, errb strings.Builder
+	exit, err := api.runExecStream(r.Context(), req, func(stream vsock.StreamName, data []byte) error {
+		if stream == vsock.StreamStdout {
+			out.Write(data)
+		} else {
+			errb.Write(data)
+		}
+		return nil
+	})
 	if err != nil {
 		writeErr(w, fmt.Sprintf("exec failed: %v", err), 500)
 		return
+	}
+
+	result := &vsock.ExecResponse{
+		ExitCode:   exit.ExitCode,
+		Stdout:     out.String(),
+		Stderr:     errb.String(),
+		ExecTimeMs: exit.ExecTimeMs,
 	}
 
 	// The command is safe to record (commands are not secret values); it is
@@ -324,6 +371,84 @@ func (api *SandboxAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, result)
+}
+
+// runExecStream opens a dedicated stream connection and drives one exec,
+// invoking onChunk per chunk and returning the terminal frame. It falls back to
+// the shared connection's aggregated Exec when no stream path is registered so
+// callers still work on hosts that have not wired streaming.
+func (api *SandboxAPI) runExecStream(ctx context.Context, req execRequest, onChunk vsock.ChunkFunc) (*vsock.ExecStreamFrame, error) {
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = 30
+	}
+	sc, err := api.dialStream(req.Sandbox)
+	if err != nil {
+		// Fallback: aggregate via the shared connection (no incremental output).
+		agent, gerr := api.getAgent(req.Sandbox)
+		if gerr != nil {
+			return nil, gerr
+		}
+		resp, eerr := agent.Exec(req.Command, req.WorkingDir, req.Env, timeout)
+		if eerr != nil {
+			return nil, eerr
+		}
+		_ = onChunk(vsock.StreamStdout, []byte(resp.Stdout))
+		_ = onChunk(vsock.StreamStderr, []byte(resp.Stderr))
+		return &vsock.ExecStreamFrame{Kind: vsock.FrameExit, ExitCode: resp.ExitCode, ExecTimeMs: resp.ExecTimeMs}, nil
+	}
+	defer sc.Close()
+	return sc.ExecStream(ctx, &vsock.ExecRequest{
+		Command:    req.Command,
+		WorkingDir: req.WorkingDir,
+		Env:        req.Env,
+		Timeout:    timeout,
+	}, onChunk)
+}
+
+func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) {
+	var req execRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, "invalid json", 400)
+		return
+	}
+	api.touch(req.Sandbox)
+
+	if _, err := api.getAgent(req.Sandbox); err != nil {
+		writeErr(w, err.Error(), 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	enc := json.NewEncoder(w)
+
+	writeLine := func(v any) error {
+		if err := enc.Encode(v); err != nil {
+			return err
+		}
+		return rc.Flush()
+	}
+
+	exit, err := api.runExecStream(r.Context(), req, func(stream vsock.StreamName, data []byte) error {
+		return writeLine(map[string]any{"stream": string(stream), "data": data})
+	})
+	if err != nil {
+		// The stream has already started; emit a terminal error frame rather
+		// than an HTTP status (status was sent 200 with the first byte). The
+		// message carries actionable text and never echoes secrets.
+		_ = writeLine(map[string]any{"exit_code": 1, "error": fmt.Sprintf("exec stream failed: %v", err)})
+		return
+	}
+	_ = writeLine(map[string]any{"exit_code": exit.ExitCode, "exec_time_ms": exit.ExecTimeMs, "error": exit.Error})
+
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "exec_stream",
+		Detail:    fmt.Sprintf("exit=%d cmd=%s", exit.ExitCode, truncateCommand(req.Command)),
+		OK:        true,
+	})
 }
 
 type filePathRequest struct {
