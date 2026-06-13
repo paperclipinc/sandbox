@@ -67,11 +67,12 @@ jobs:
           FC_VERSION=v1.15.0
           CI_VERSION=$(echo $FC_VERSION | sed 's/v//' | cut -d. -f1-2)
 
-          # Find latest kernel in S3 (strip trailing dots from XML parsing)
-          KERNEL_KEY=$(curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/?prefix=firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-" \
-            | grep -oP "firecracker-ci/v${CI_VERSION}/${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]+" \
-            | sort -V | tail -1)
-          echo "Downloading kernel: $KERNEL_KEY"
+          # Pinned guest kernel. The exact version we ship is recorded in
+          # docs/kernel-cve.md; a bump is a reviewed diff to this line and the
+          # matching line in ci.yaml, never a floating "latest" resolve.
+          KERNEL_VERSION=6.1.155
+          KERNEL_KEY="firecracker-ci/v1.15/${ARCH}/vmlinux-${KERNEL_VERSION}"
+          echo "Downloading pinned kernel: $KERNEL_KEY"
           curl -fsSL -o /tmp/mitos-test/vmlinux \
             "https://s3.amazonaws.com/spec.ccfc.min/${KERNEL_KEY}"
 
