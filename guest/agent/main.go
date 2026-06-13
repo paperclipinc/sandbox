@@ -31,6 +31,13 @@ var startTime = time.Now()
 
 // configuredEnv holds claim-time env+secrets delivered via the configure
 // message. Values are never logged. Guarded by configuredMu.
+// guestKernel is the single per-sandbox code-interpreter kernel. It is started
+// lazily on the first run_code and persists for the VM lifetime so the Python
+// namespace survives across calls (and across the dedicated per-call vsock
+// connections). A base image without ipykernel/the driver yields a
+// KernelUnavailable frame; exec is unaffected.
+var guestKernel = newKernelManager(kernelConfig{})
+
 var (
 	configuredMu  sync.Mutex
 	configuredEnv = map[string]string{}
@@ -121,6 +128,18 @@ func handleConnection(conn net.Conn) {
 			}
 			// A stream owns its connection: write frames, then close.
 			handleExecStream(conn, req.ExecStream)
+			return
+		}
+
+		if req.Type == vsock.TypeRunCode {
+			if req.RunCode == nil {
+				writeResponse(conn, vsock.Response{OK: false, Error: "run_code request is nil"})
+				return
+			}
+			// A run_code is a stream too: it owns this connection. The kernel
+			// itself is the package-level guestKernel and persists across these
+			// per-call connections, so state survives.
+			handleRunCodeStream(conn, req.RunCode)
 			return
 		}
 

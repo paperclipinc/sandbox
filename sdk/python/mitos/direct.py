@@ -19,11 +19,12 @@ Usage:
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
-from mitos.types import ExecResult
+from mitos.types import Execution, ExecResult, Result
+from mitos.sandbox import _parse_run_code_stream
 
 
 class DirectSandbox:
@@ -50,6 +51,35 @@ class DirectSandbox:
             stderr=data.get("stderr", ""),
             exec_time_ms=data.get("exec_time_ms", 0),
         )
+
+    def run_code(
+        self,
+        code: str,
+        language: str = "python",
+        timeout: int = 60,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+        on_result: Optional[Callable[[Result], None]] = None,
+    ) -> Execution:
+        """Run a code snippet in the sandbox's stateful kernel (sandbox-server
+        mode). State persists across calls for the sandbox lifetime. Returns an
+        Execution and streams via the callbacks; requires a base image with the
+        code-interpreter kernel, else the Execution carries a KernelUnavailable
+        error."""
+        payload = {
+            "sandbox": self.id,
+            "code": code,
+            "language": language,
+            "timeout": timeout,
+        }
+        with self._http.stream(
+            "POST",
+            f"{self._server_url}/v1/run_code/stream",
+            json=payload,
+            timeout=timeout + 10,
+        ) as resp:
+            resp.raise_for_status()
+            return _parse_run_code_stream(resp.iter_lines(), on_stdout, on_stderr, on_result)
 
     def terminate(self) -> None:
         self._http.delete(f"{self._server_url}/v1/sandboxes/{self.id}")

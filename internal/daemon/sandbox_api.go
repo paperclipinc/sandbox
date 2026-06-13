@@ -247,6 +247,7 @@ func (api *SandboxAPI) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/exec", api.handleExec)
 	mux.HandleFunc("POST /v1/exec/stream", api.handleExecStream)
+	mux.HandleFunc("POST /v1/run_code/stream", api.handleRunCodeStream)
 	mux.HandleFunc("POST /v1/files/read", api.handleReadFile)
 	mux.HandleFunc("POST /v1/files/write", api.handleWriteFile)
 	mux.HandleFunc("POST /v1/files/list", api.handleListDir)
@@ -447,6 +448,101 @@ func (api *SandboxAPI) handleExecStream(w http.ResponseWriter, r *http.Request) 
 		SandboxID: req.Sandbox,
 		Op:        "exec_stream",
 		Detail:    fmt.Sprintf("exit=%d cmd=%s", exit.ExitCode, truncateCommand(req.Command)),
+		OK:        true,
+	})
+}
+
+type runCodeRequest struct {
+	Sandbox  string `json:"sandbox"`
+	Code     string `json:"code"`
+	Language string `json:"language,omitempty"`
+	Timeout  int    `json:"timeout,omitempty"`
+}
+
+// runRunCodeStream opens a dedicated stream connection and drives one run_code
+// against the guest kernel, invoking onFrame per ExecStreamFrame. Unlike exec,
+// there is no aggregated fallback: run_code requires the streaming path (a
+// registered stream UDS), since the kernel reply is a frame stream.
+func (api *SandboxAPI) runRunCodeStream(ctx context.Context, req runCodeRequest, onFrame func(vsock.ExecStreamFrame)) error {
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = 60
+	}
+	sc, err := api.dialStream(req.Sandbox)
+	if err != nil {
+		return err
+	}
+	defer sc.Close()
+	return sc.RunCode(ctx, &vsock.RunCodeRequest{
+		Code:     req.Code,
+		Language: req.Language,
+		Timeout:  timeout,
+	}, onFrame)
+}
+
+// handleRunCodeStream streams a run_code execution back as chunked NDJSON. Each
+// guest ExecStreamFrame is re-encoded with an explicit "kind" field so the SDKs
+// can distinguish stdout/stderr/result/error/exit frames; this is a distinct
+// wire shape from /v1/exec/stream (which uses keyless chunk/exit maps) because
+// run_code carries rich result and structured-error payloads exec does not.
+// Result/error payloads are tenant code output and are never logged.
+func (api *SandboxAPI) handleRunCodeStream(w http.ResponseWriter, r *http.Request) {
+	var req runCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, "invalid json", 400)
+		return
+	}
+	api.touch(req.Sandbox)
+
+	if _, err := api.getAgent(req.Sandbox); err != nil {
+		writeErr(w, err.Error(), 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	enc := json.NewEncoder(w)
+
+	writeLine := func(v any) {
+		if err := enc.Encode(v); err != nil {
+			return
+		}
+		_ = rc.Flush()
+	}
+
+	var lastExit int
+	err := api.runRunCodeStream(r.Context(), req, func(fr vsock.ExecStreamFrame) {
+		switch fr.Kind {
+		case vsock.FrameChunk:
+			if fr.Stream == vsock.StreamStderr {
+				writeLine(map[string]any{"kind": "stderr", "stderr": fr.Data})
+			} else {
+				writeLine(map[string]any{"kind": "stdout", "stdout": fr.Data})
+			}
+		case vsock.FrameResult:
+			writeLine(map[string]any{"kind": "result", "result": fr.Result})
+		case vsock.FrameError:
+			writeLine(map[string]any{"kind": "error", "error": fr.ErrorInfo})
+		case vsock.FrameExit:
+			lastExit = fr.ExitCode
+			writeLine(map[string]any{"kind": "exit", "exit_code": fr.ExitCode})
+		}
+	})
+	if err != nil {
+		// The stream has already started (200 sent); surface the failure as a
+		// final error frame rather than an HTTP status. The message carries
+		// actionable text and never echoes secrets.
+		writeLine(map[string]any{"kind": "error", "error": map[string]any{"name": "KernelStreamError", "value": fmt.Sprintf("run_code stream failed: %v", err)}})
+		writeLine(map[string]any{"kind": "exit", "exit_code": 1})
+		lastExit = 1
+	}
+
+	// The code is safe to record (not a secret value), truncated to a bound.
+	api.auditor.Record(AuditEvent{
+		SandboxID: req.Sandbox,
+		Op:        "run_code",
+		Detail:    fmt.Sprintf("exit=%d code=%s", lastExit, truncateCommand(req.Code)),
 		OK:        true,
 	})
 }

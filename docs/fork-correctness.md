@@ -60,6 +60,19 @@ bug). This proves the GUEST applies the reseed; forkd end-to-end notify is
 covered by the go tests above. The N=8 / `uuid.uuid4()` / TLS-ClientHello
 variants remain a follow-up.
 
+**run_code kernel caveat.** A forked VM inherits the LIVE run_code kernel
+(`/opt/mitos/kernel_driver.py`, started lazily on the first `run_code`) and its
+entire Python namespace, because the kernel process is part of the snapshot. The
+post-fork `NotifyForked` reseed handles the kernel CRNG (`/dev/urandom`) and
+signals userspace, but a Python-level PRNG that was already seeded INSIDE the
+kernel before the fork (`random.seed(...)`, `numpy.random.seed(...)`, or the
+implicit module-global `random` state once drawn from) is captured in the
+snapshot and is therefore IDENTICAL across all forks until reseeded. This is the
+same class as item 1 for any already-started runtime; it is not a host boundary.
+Remediation: callers who need per-fork randomness in the kernel should reseed
+after a fork (`random.seed()`, `np.random.seed()` with no argument reseeds from
+fresh OS entropy), or avoid seeding the PRNG before the fork point.
+
 ## 2. Clock correctness
 
 A restored guest's wall clock is frozen at snapshot time. TLS certificate

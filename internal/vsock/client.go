@@ -353,6 +353,52 @@ func (s *StreamConn) ExecStream(ctx context.Context, req *ExecRequest, onChunk C
 	return nil, fmt.Errorf("exec_stream: connection closed before exit frame")
 }
 
+// RunCode runs a code snippet in the guest's stateful kernel over this
+// dedicated stream and invokes onFrame for each ExecStreamFrame the guest emits
+// (chunk frames for stdout/stderr, result frames for rich artifacts, an error
+// frame for a structured exception, and a terminal exit). The kernel is started
+// lazily by the guest on the first call and persists for the sandbox lifetime,
+// so state set by an earlier RunCode is visible here. Returns when the guest
+// sends an exit frame; if ctx is cancelled the connection is closed, which the
+// guest observes. Code is not logged.
+func (s *StreamConn) RunCode(ctx context.Context, req *RunCodeRequest, onFrame func(ExecStreamFrame)) error {
+	data, err := json.Marshal(&Request{Type: TypeRunCode, RunCode: req})
+	if err != nil {
+		return err
+	}
+	if _, err := s.conn.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("send run_code: %w", err)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.conn.Close()
+		case <-done:
+		}
+	}()
+
+	for s.scanner.Scan() {
+		var f ExecStreamFrame
+		if err := json.Unmarshal(s.scanner.Bytes(), &f); err != nil {
+			return fmt.Errorf("decode run_code frame: %w", err)
+		}
+		onFrame(f)
+		if f.Kind == FrameExit {
+			return nil
+		}
+	}
+	if err := s.scanner.Err(); err != nil {
+		return fmt.Errorf("recv run_code: %w", err)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fmt.Errorf("run_code: connection closed before exit frame")
+}
+
 // Exec runs command to completion over the stream and returns the aggregated
 // stdout/stderr and exit code, matching the one-shot ExecResponse shape. It is
 // the streaming-native equivalent of Client.Exec and is what the HTTP /v1/exec

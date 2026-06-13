@@ -4,7 +4,14 @@
 
 import { AgentRunError } from "./errors.js";
 import { HttpClient, validSandboxId } from "./http.js";
-import type { BackgroundProcess, ExecResult, FileInfo } from "./types.js";
+import type {
+  BackgroundProcess,
+  Execution,
+  ExecResult,
+  ExecutionError,
+  FileInfo,
+  Result,
+} from "./types.js";
 
 /** A function that tears a sandbox down. Injected by the owning client so the
  * cluster client deletes a SandboxClaim while the direct client issues a
@@ -297,6 +304,33 @@ export class Sandbox {
   }
 
   /**
+   * Runs a code snippet in the sandbox's stateful kernel. State persists across
+   * runCode calls for the sandbox lifetime. Streams stdout/stderr/results via
+   * the callbacks and resolves to the full Execution. Requires a base image with
+   * the code-interpreter kernel; without it the Execution carries a
+   * KernelUnavailable error.
+   */
+  async runCode(
+    code: string,
+    opts?: { language?: string; timeoutSeconds?: number } & RunCodeCallbacks,
+  ): Promise<Execution> {
+    const body: Record<string, unknown> = {
+      sandbox: this.id,
+      code,
+      language: opts?.language ?? "python",
+    };
+    if (opts?.timeoutSeconds !== undefined) {
+      body["timeout"] = opts.timeoutSeconds;
+    }
+    const resp = await this.http.postStream("/v1/run_code/stream", body);
+    return parseRunCodeStream(ndjsonLines(resp), {
+      onStdout: opts?.onStdout,
+      onStderr: opts?.onStderr,
+      onResult: opts?.onResult,
+    });
+  }
+
+  /**
    * Tears the sandbox down via the injected terminator. A bare Sandbox with no
    * terminator is a no-op.
    */
@@ -305,6 +339,118 @@ export class Sandbox {
       await this.terminator();
     }
   }
+}
+
+export interface RunCodeCallbacks {
+  onStdout?: (text: string) => void;
+  onStderr?: (text: string) => void;
+  onResult?: (result: Result) => void;
+}
+
+function decodeStreamBytes(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  try {
+    return Buffer.from(value, "base64").toString("utf-8");
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Decodes a streaming Response body into NDJSON lines (one JSON object per
+ * yielded string). The trailing partial line, if non-empty, is yielded last.
+ */
+async function* ndjsonLines(resp: Response): AsyncIterable<string> {
+  if (!resp.body) return;
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      yield buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+    }
+  }
+  if (buf.trim()) yield buf;
+}
+
+/**
+ * Folds an NDJSON ExecStreamFrame line stream into an Execution, firing
+ * callbacks live as frames arrive. Result and error payloads are tenant code
+ * output and are never logged.
+ */
+export async function parseRunCodeStream(
+  source: AsyncIterable<string>,
+  cb: RunCodeCallbacks,
+): Promise<Execution> {
+  const ex: Execution = {
+    text: null,
+    logs: { stdout: [], stderr: [] },
+    results: [],
+    error: null,
+  };
+  let sawExit = false;
+  for await (const raw of source) {
+    const line = raw.trim();
+    if (!line) continue;
+    const frame = JSON.parse(line) as Record<string, unknown>;
+    switch (frame["kind"]) {
+      case "stdout": {
+        const text = decodeStreamBytes(frame["stdout"]);
+        ex.logs.stdout.push(text);
+        cb.onStdout?.(text);
+        break;
+      }
+      case "stderr": {
+        const text = decodeStreamBytes(frame["stderr"]);
+        ex.logs.stderr.push(text);
+        cb.onStderr?.(text);
+        break;
+      }
+      case "result": {
+        const payload = (frame["result"] ?? {}) as { text?: string; data?: Record<string, string> };
+        const text = payload.text ?? "";
+        const result: Result = { data: payload.data ?? {}, isMainResult: Boolean(text) };
+        ex.results.push(result);
+        if (text) ex.text = text;
+        cb.onResult?.(result);
+        break;
+      }
+      case "error": {
+        const payload = (frame["error"] ?? {}) as Partial<ExecutionError>;
+        ex.error = {
+          name: payload.name ?? "",
+          value: payload.value ?? "",
+          traceback: payload.traceback ?? [],
+        };
+        break;
+      }
+      case "exit":
+        sawExit = true;
+        return ex;
+    }
+  }
+  if (!sawExit) {
+    // The body ended before the terminal exit frame: the stream was truncated
+    // or dropped. Surface it as an error rather than a misleading clean
+    // Execution success.
+    throw new AgentRunError(
+      "run_code stream ended before the terminal exit frame",
+      {
+        code: "run_code_stream_truncated",
+        cause: "the connection was truncated or dropped; the result is unknown",
+        remediation:
+          "Retry the snippet; if it persists, inspect the forkd or sandbox-server logs for a dropped connection.",
+      },
+    );
+  }
+  return ex;
 }
 
 /**

@@ -18,6 +18,7 @@ const (
 	TypeTarDir       RequestType = "tar_dir"
 	TypeUntarDir     RequestType = "untar_dir"
 	TypeExecStream   RequestType = "exec_stream"
+	TypeRunCode      RequestType = "run_code"
 )
 
 // MaxTarBytes bounds a single TarDir/UntarDir payload (the raw tar bytes, before
@@ -52,6 +53,23 @@ type Request struct {
 	TarDir       *TarDirRequest       `json:"tar_dir,omitempty"`
 	UntarDir     *UntarDirRequest     `json:"untar_dir,omitempty"`
 	ExecStream   *ExecRequest         `json:"exec_stream,omitempty"`
+	RunCode      *RunCodeRequest      `json:"run_code,omitempty"`
+}
+
+// RunCodeRequest asks the guest agent to run a code snippet in the stateful
+// in-guest kernel and stream the result back as ExecStreamFrame NDJSON lines
+// (the same framing as TypeExecStream). The kernel is started lazily on the
+// first RunCode and persists for the sandbox lifetime, so Code observes state
+// left by prior RunCode calls. Language defaults to "python"; any other value
+// is refused with a KernelUnavailable error frame. Timeout bounds one
+// execution in seconds; on the deadline the kernel is interrupted and a
+// TimeoutError frame is returned, leaving the kernel usable. A value <= 0 means
+// the agent applies its 60s default. Code is not a secret value and is safe to
+// truncate-log.
+type RunCodeRequest struct {
+	Code     string `json:"code"`
+	Language string `json:"language,omitempty"`
+	Timeout  int    `json:"timeout,omitempty"`
 }
 
 // NotifyForkedRequest tells the guest a restore just happened so it can repair
@@ -210,6 +228,13 @@ type FrameKind string
 const (
 	FrameChunk FrameKind = "chunk"
 	FrameExit  FrameKind = "exit"
+	// FrameResult and FrameError are emitted by the run_code (TypeRunCode) path
+	// only. A FrameResult carries one rich display artifact (Result); a
+	// FrameError carries a structured exception (ErrorInfo). Plain exec_stream
+	// never emits these, so the exec_stream reader rejecting unknown kinds is
+	// unaffected.
+	FrameResult FrameKind = "result"
+	FrameError  FrameKind = "error"
 )
 
 // StreamName identifies which standard stream a chunk came from.
@@ -234,6 +259,36 @@ type ExecStreamFrame struct {
 	ExitCode   int        `json:"exit_code,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ExecTimeMs float64    `json:"exec_time_ms,omitempty"`
+	// Result is set only on a FrameResult frame (run_code path): one rich
+	// display artifact. ErrorInfo is set only on a FrameError frame: a
+	// structured guest-code exception or a KernelUnavailable signal. Both are
+	// nil on chunk/exit frames. They are distinct from the Error string above,
+	// which carries a transport-level spawn failure on the terminal frame.
+	Result    *ResultFrame `json:"result,omitempty"`
+	ErrorInfo *ErrorFrame  `json:"error_info,omitempty"`
+}
+
+// ResultFrame is the payload of an ExecStreamFrame with Kind FrameResult. It is
+// a single rich display artifact emitted by the kernel: Data maps a MIME type
+// to its payload (base64 for binary types like image/png; raw UTF-8 text for
+// text/html, image/svg+xml, text/markdown, text/latex, application/json,
+// text/plain). Text is the REPL last-expression value (the text/plain rendering
+// of an execute_result); it is empty for a display_data result that is not the
+// cell's return value. None of these fields carry secrets.
+type ResultFrame struct {
+	Text string            `json:"text,omitempty"`
+	Data map[string]string `json:"data,omitempty"`
+}
+
+// ErrorFrame is the payload of an ExecStreamFrame with Kind FrameError. It
+// mirrors a Jupyter IOPub error message: Name is the exception class (ename),
+// Value its string form (evalue), and Traceback the formatted lines. Tracebacks
+// may contain ANSI color codes from the kernel; the host passes them through
+// verbatim. Used both for guest code exceptions and for KernelUnavailable.
+type ErrorFrame struct {
+	Name      string   `json:"name"`
+	Value     string   `json:"value"`
+	Traceback []string `json:"traceback,omitempty"`
 }
 
 type ReadFileResponse struct {

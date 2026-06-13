@@ -1,0 +1,182 @@
+//go:build linux
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/paperclipinc/mitos/internal/vsock"
+)
+
+// fakeFrameConn captures frames written by handleRunCodeStream.
+type fakeFrameConn struct {
+	bytes.Buffer
+}
+
+func (f *fakeFrameConn) Close() error { return nil }
+
+func TestHandleRunCodeStreamWritesFrames(t *testing.T) {
+	dir := t.TempDir()
+	driver := writeFakeDriver(t, dir)
+	// Point the package kernel at the fake driver.
+	guestKernel = newKernelManager(kernelConfig{python: "/bin/sh", driverPath: driver})
+	defer guestKernel.shutdown()
+
+	var conn fakeFrameConn
+	handleRunCodeStream(&conn, &vsock.RunCodeRequest{Code: "print('hi')", Language: "python"})
+
+	var frames []vsock.ExecStreamFrame
+	for _, line := range bytes.Split(bytes.TrimSpace(conn.Bytes()), []byte("\n")) {
+		var fr vsock.ExecStreamFrame
+		if err := json.Unmarshal(line, &fr); err != nil {
+			t.Fatalf("decode frame %q: %v", line, err)
+		}
+		frames = append(frames, fr)
+	}
+	if len(frames) != 3 || frames[len(frames)-1].Kind != vsock.FrameExit {
+		t.Fatalf("frames = %+v", frames)
+	}
+}
+
+// writeFakeDriver writes a shell script that mimics kernel_driver.py: it prints
+// a ready line, then for each stdin request line emits canned event lines and a
+// done. It lets us drive the manager without Python or ipykernel.
+func writeFakeDriver(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake_driver.sh")
+	// printf (not echo) so the literal backslash-n inside the JSON string stays
+	// a two-byte escape, not a real newline that would split the NDJSON line.
+	// %s with a single argument prints the format verbatim and adds no newline,
+	// so each printf ends with an explicit \n that terminates exactly one frame.
+	script := `#!/bin/sh
+printf '%s\n' '{"id":"","kind":"ready"}'
+while IFS= read -r line; do
+  printf '%s\n' '{"id":"x","kind":"stdout","text":"hi\n"}'
+  printf '%s\n' '{"id":"x","kind":"result","text":"42","data":{"text/plain":"42","image/png":"aGVsbG8="}}'
+  printf '%s\n' '{"id":"x","kind":"done","status":"ok"}'
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake driver: %v", err)
+	}
+	return path
+}
+
+func TestKernelManagerTranslatesEvents(t *testing.T) {
+	dir := t.TempDir()
+	driver := writeFakeDriver(t, dir)
+
+	km := newKernelManager(kernelConfig{
+		python:     "/bin/sh",
+		driverPath: driver,
+	})
+	defer km.shutdown()
+
+	var frames []vsock.ExecStreamFrame
+	err := km.run("print('hi')\n42", "python", 30, func(fr vsock.ExecStreamFrame) {
+		frames = append(frames, fr)
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(frames) != 3 {
+		t.Fatalf("got %d frames, want 3: %+v", len(frames), frames)
+	}
+	if frames[0].Kind != vsock.FrameChunk || frames[0].Stream != vsock.StreamStdout || string(frames[0].Data) != "hi\n" {
+		t.Fatalf("frame 0 = %+v", frames[0])
+	}
+	if frames[1].Kind != vsock.FrameResult || frames[1].Result == nil ||
+		frames[1].Result.Text != "42" || frames[1].Result.Data["image/png"] != "aGVsbG8=" {
+		t.Fatalf("frame 1 = %+v", frames[1])
+	}
+	if frames[2].Kind != vsock.FrameExit || frames[2].ExitCode != 0 {
+		t.Fatalf("frame 2 = %+v", frames[2])
+	}
+}
+
+func TestKernelManagerUnavailable(t *testing.T) {
+	km := newKernelManager(kernelConfig{
+		python:     "/bin/sh",
+		driverPath: "/nonexistent/kernel_driver.py",
+	})
+	defer km.shutdown()
+
+	var frames []vsock.ExecStreamFrame
+	err := km.run("1", "python", 30, func(fr vsock.ExecStreamFrame) {
+		frames = append(frames, fr)
+	})
+	if err != nil {
+		t.Fatalf("run should not hard-error, it frames the failure: %v", err)
+	}
+	if len(frames) < 2 {
+		t.Fatalf("want error+exit frames, got %+v", frames)
+	}
+	if frames[0].Kind != vsock.FrameError || frames[0].ErrorInfo == nil || frames[0].ErrorInfo.Name != "KernelUnavailable" {
+		t.Fatalf("frame 0 = %+v", frames[0])
+	}
+	last := frames[len(frames)-1]
+	if last.Kind != vsock.FrameExit || last.ExitCode != 127 {
+		t.Fatalf("last frame = %+v", last)
+	}
+}
+
+// TestKernelManagerPlumbsTimeout proves the per-run timeout reaches the driver
+// on the stdin request line. The fake driver echoes the request it read back as
+// a stdout frame, so the test can assert the timeout field was sent verbatim.
+func TestKernelManagerPlumbsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "echo_driver.sh")
+	// Read each request line and emit it back as the text of a stdout frame so
+	// the Go side can inspect the JSON it was handed (including timeout).
+	script := `#!/bin/sh
+printf '%s\n' '{"id":"","kind":"ready"}'
+while IFS= read -r line; do
+  esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
+  printf '%s\n' "{\"id\":\"x\",\"kind\":\"stdout\",\"text\":\"$esc\"}"
+  printf '%s\n' '{"id":"x","kind":"done","status":"ok"}'
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write echo driver: %v", err)
+	}
+
+	km := newKernelManager(kernelConfig{python: "/bin/sh", driverPath: path})
+	defer km.shutdown()
+
+	var frames []vsock.ExecStreamFrame
+	if err := km.run("print(1)", "python", 7, func(fr vsock.ExecStreamFrame) {
+		frames = append(frames, fr)
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(frames) < 1 || frames[0].Kind != vsock.FrameChunk {
+		t.Fatalf("want echoed request as first stdout frame, got %+v", frames)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(frames[0].Data, &req); err != nil {
+		t.Fatalf("decode echoed request %q: %v", frames[0].Data, err)
+	}
+	if got, ok := req["timeout"].(float64); !ok || int(got) != 7 {
+		t.Fatalf("timeout not plumbed into driver request: %v", req["timeout"])
+	}
+}
+
+func TestKernelManagerRejectsNonPython(t *testing.T) {
+	dir := t.TempDir()
+	driver := writeFakeDriver(t, dir)
+	km := newKernelManager(kernelConfig{python: "/bin/sh", driverPath: driver})
+	defer km.shutdown()
+
+	var frames []vsock.ExecStreamFrame
+	_ = km.run("puts 1", "ruby", 30, func(fr vsock.ExecStreamFrame) {
+		frames = append(frames, fr)
+	})
+	if frames[0].Kind != vsock.FrameError || frames[0].ErrorInfo == nil || frames[0].ErrorInfo.Name != "KernelUnavailable" {
+		t.Fatalf("want KernelUnavailable for ruby, got %+v", frames[0])
+	}
+}

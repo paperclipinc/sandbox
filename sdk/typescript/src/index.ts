@@ -4,6 +4,9 @@ export type {
   ForkPolicy,
   SandboxPhase,
   ExecResult,
+  Execution,
+  ExecutionError,
+  Result,
   FileInfo,
   SandboxInfo,
   PoolStatus,
@@ -15,8 +18,8 @@ export type { AgentRunErrorOptions } from "./errors.js";
 
 export { HttpClient, validSandboxId } from "./http.js";
 
-export { Sandbox, SandboxFiles, toBaseUrl } from "./sandbox.js";
-export type { SandboxOptions, Terminator } from "./sandbox.js";
+export { Sandbox, SandboxFiles, toBaseUrl, parseRunCodeStream } from "./sandbox.js";
+export type { SandboxOptions, Terminator, RunCodeCallbacks } from "./sandbox.js";
 
 export { SandboxServer } from "./server.js";
 export type { Template, ServerSandbox } from "./server.js";
