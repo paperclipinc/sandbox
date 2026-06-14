@@ -309,31 +309,45 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		activate = ActivateHuskPod
 	}
 
-	// One fork snapshot per SandboxFork, keyed by the fork name. Idempotent: a
-	// re-reconcile that already snapshotted re-runs the op (CreateSnapshot
-	// overwrites), which is cheap and keeps the path simple; the children share
-	// the same fork snapshot dir read-only.
+	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
+	// ONCE and reused for every child across reconcile passes. Children take
+	// several passes to reach Ready; re-snapshotting on each pass would re-pause
+	// the source and OVERWRITE the fork mem/vmstate, so a child activated in a
+	// later pass would restore a NEWER source memory state than an earlier child:
+	// the N children would not be a coherent single fork point. The guard is the
+	// persisted Status.ForkSnapshotTaken flag, so it survives a controller restart
+	// mid-fork (the source is never re-paused once the snapshot exists).
 	forkID := fork.Name
-	srcAddr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
-	snapCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	// The source stub writes the snapshot inside its OWN in-pod forks dir mount
-	// (huskForksMountPath/<fork-id>); the child reads the same node dir mounted
-	// read-only at HuskSnapshotDir.
-	snapRes, err := forkSnap(snapCtx, srcAddr, r.HuskTLS, husk.ForkSnapshotRequest{
-		ForkID:      forkID,
-		SnapshotDir: huskForksInPodDir(forkID),
-		PauseSource: fork.Spec.PauseSource,
-	})
-	if err != nil || !snapRes.OK {
-		msg := "fork snapshot did not complete"
-		if err != nil {
-			msg = fmt.Sprintf("fork snapshot transport error: %v", err)
-		} else if snapRes.Error != "" {
-			msg = "fork snapshot failed: " + snapRes.Error
+	if !fork.Status.ForkSnapshotTaken {
+		srcAddr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
+		snapCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		// The source stub writes the snapshot inside its OWN in-pod forks dir mount
+		// (huskForksMountPath/<fork-id>); the child reads the same node dir mounted
+		// read-only at HuskSnapshotDir.
+		snapRes, err := forkSnap(snapCtx, srcAddr, r.HuskTLS, husk.ForkSnapshotRequest{
+			ForkID:      forkID,
+			SnapshotDir: huskForksInPodDir(forkID),
+			PauseSource: fork.Spec.PauseSource,
+		})
+		if err != nil || !snapRes.OK {
+			msg := "fork snapshot did not complete"
+			if err != nil {
+				msg = fmt.Sprintf("fork snapshot transport error: %v", err)
+			} else if snapRes.Error != "" {
+				msg = "fork snapshot failed: " + snapRes.Error
+			}
+			logger.Info("husk fork snapshot failed, requeueing", "source", srcPod.Name, "detail", msg)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		logger.Info("husk fork snapshot failed, requeueing", "source", srcPod.Name, "detail", msg)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		// Record the snapshot was taken BEFORE creating any child, so a crash
+		// between here and the child loop does not re-snapshot (re-pause) the
+		// source on the next pass. The children always re-read the same fork
+		// snapshot dir, so persisting the flag first is safe.
+		fork.Status.ForkSnapshotTaken = true
+		if err := r.Status().Update(ctx, fork); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	opts := HuskPodOptions{
@@ -343,6 +357,12 @@ func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1a
 		DataDir:         r.DataDir,
 		ForkSnapshotID:  forkID,
 		ForkSourceNode:  source.Status.Node,
+		// BUG 1 fix: the child's per-activation rootfs CoW clone must be sourced
+		// from the SOURCE sandbox's live rootfs (the disk the fork snapshot's
+		// vmstate was baked against), NOT the pristine template rootfs. The source
+		// pod name is its Status.SandboxID; its rootfs is visible to the child
+		// through the shared husk-rootfs hostPath dir.
+		ForkSourceRootfsPath: huskSourceRootfsInPodPath(source.Status.SandboxID),
 	}
 
 	needed := fork.Spec.Replicas - fork.Status.ReadyForks

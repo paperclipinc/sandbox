@@ -120,6 +120,17 @@ const (
 // claim reconciler threads this into the activate request.
 const HuskSnapshotDir = huskSnapshotMountPath
 
+// huskSourceRootfsInPodPath returns the IN-POD path a fork child clones the
+// SOURCE sandbox's live rootfs from. The source pod wrote its own per-activation
+// rootfs clone at <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4 under
+// the shared husk-rootfs hostPath dir; the fork child mounts that SAME dir, so
+// the source pod's rootfs is visible to it at this path. This is the rootfs the
+// fork snapshot's vmstate was baked against, so the child's CoW clone source
+// must be it (not the pristine template rootfs).
+func huskSourceRootfsInPodPath(sourcePodName string) string {
+	return filepath.Join(huskRootfsCoWMountPath, sourcePodName, "rootfs.ext4")
+}
+
 // HuskPodOptions configures the husk pod spec the controller emits.
 type HuskPodOptions struct {
 	// StubImage is the container image that runs cmd/husk-stub.
@@ -164,6 +175,21 @@ type HuskPodOptions struct {
 	// source sandbox's node). Required when ForkSnapshotID is set, since the fork
 	// snapshot is a node-local hostPath that exists only on that node.
 	ForkSourceNode string
+	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the SOURCE
+	// sandbox's live rootfs that the child's per-activation CoW clone is made from.
+	// It is the source pod's own per-activation rootfs clone, exposed to the child
+	// through the shared husk-rootfs hostPath dir at
+	// <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4. This is load-bearing
+	// for fork correctness: the fork snapshot's vmstate was baked against the
+	// SOURCE's rootfs (path_on_host), so the child's restored guest memory (page
+	// cache, ext4 superblock, in-flight metadata) reflects the SOURCE disk. Cloning
+	// from the PRISTINE TEMPLATE rootfs instead (the bug) rebinds the child to a
+	// disk that does not match its memory: any data the source wrote since boot is
+	// lost and the cached-vs-on-disk mismatch can corrupt the child fs. When set,
+	// it replaces the template rootfs as the clone SOURCE; each child still writes
+	// its OWN per-activation clone (independence), only the clone source changes.
+	// Empty (a warm pod, not a fork child) clones from the template rootfs.
+	ForkSourceRootfsPath string
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -532,13 +558,25 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "husk-rootfs-cow", MountPath: huskRootfsCoWMountPath})
 
-		// Tell the stub where to clone from (the in-pod template rootfs at its baked
+		// The clone SOURCE for this pod's per-activation rootfs CoW. A WARM pod
+		// clones from the template rootfs (a fresh boot-time disk). A FORK CHILD
+		// must clone from the SOURCE sandbox's LIVE rootfs instead: the fork
+		// snapshot's vmstate was baked against the source's rootfs, so the child's
+		// restored guest memory reflects the SOURCE disk; cloning from the template
+		// would rebind the child to a disk that does not match its memory (silent
+		// data divergence / fs corruption). ForkSourceRootfsPath is the in-pod path
+		// of the source pod's rootfs (exposed through the shared husk-rootfs dir).
+		cloneSourceRootfs := filepath.Join(templateDir, "rootfs.ext4")
+		if opts.ForkSourceRootfsPath != "" {
+			cloneSourceRootfs = opts.ForkSourceRootfsPath
+		}
+		// Tell the stub where to clone from (the clone source rootfs at its in-pod
 		// path) and to (the writable CoW dir). At Prepare the stub reflink-clones the
-		// template rootfs to a per-pod file under the CoW dir and at Activate rebinds
-		// the rootfs drive to it, so concurrent activations never share a rootfs.
+		// source rootfs to a per-pod file under the CoW dir and at Activate rebinds
+		// the rootfs drive to it, so each activation gets its OWN rootfs clone.
 		args = append(args,
 			"--rootfs-cow-dir", huskRootfsCoWMountPath,
-			"--template-rootfs", filepath.Join(templateDir, "rootfs.ext4"),
+			"--template-rootfs", cloneSourceRootfs,
 		)
 	}
 

@@ -874,6 +874,52 @@ func TestBuildHuskPodForkChildActivatesFromForkSnapshot(t *testing.T) {
 	}
 }
 
+// TestBuildHuskPodForkChildClonesFromSourceRootfs is the BUG 1 regression: a
+// fork child restores the SOURCE's live fork snapshot, whose vmstate was baked
+// against the SOURCE's rootfs. Its per-activation CoW clone MUST therefore be
+// sourced from the SOURCE pod's rootfs, not the pristine template rootfs;
+// otherwise the child's guest memory (page cache, ext4 superblock) reflects the
+// source disk while the block device is the template disk: silent divergence /
+// fs corruption. The controller threads the source pod's in-pod rootfs path
+// through ForkSourceRootfsPath; --template-rootfs (the clone SOURCE) must be it.
+func TestBuildHuskPodForkChildClonesFromSourceRootfs(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1alpha1.SandboxTemplate{}
+	srcRootfs := filepath.Join("/var/lib/mitos", "husk-rootfs", "src-pod-xyz", "rootfs.ext4")
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage:            "img",
+		SnapshotID:           "tmpl-a",
+		DataDir:              "/data",
+		ForkSnapshotID:       "fork-1",
+		ForkSourceNode:       "kvm-node-1",
+		ForkSourceRootfsPath: srcRootfs,
+	})
+
+	var container corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == "husk-stub" {
+			container = pod.Spec.Containers[i]
+		}
+	}
+	args := strings.Join(container.Args, " ")
+	// The clone SOURCE must be the SOURCE pod's rootfs, not the template's.
+	if !strings.Contains(args, "--template-rootfs "+srcRootfs) {
+		t.Fatalf("fork child --template-rootfs must be the source rootfs %q; args=%v", srcRootfs, container.Args)
+	}
+	// And it must NOT clone from the pristine template rootfs (the bug).
+	templateRootfs := filepath.Join("/data", "templates", "tmpl-a", "rootfs.ext4")
+	if strings.Contains(args, "--template-rootfs "+templateRootfs) {
+		t.Fatalf("fork child must NOT clone from the template rootfs %q (source/disk divergence); args=%v", templateRootfs, container.Args)
+	}
+	// Each child still gets its OWN per-activation CoW clone (independence):
+	// the CoW DEST dir is still the per-pod writable dir.
+	const cowMountPath = "/var/lib/mitos/husk-rootfs"
+	if !strings.Contains(args, "--rootfs-cow-dir "+cowMountPath) {
+		t.Errorf("fork child must still write its own per-activation clone under %q; args=%v", cowMountPath, container.Args)
+	}
+}
+
 func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 	fork := &v1alpha1.SandboxFork{ObjectMeta: metav1.ObjectMeta{Name: "f1", Namespace: "default", UID: "uid-f1"}}
 	pod := controller.BuildForkChildPodForTest(fork, "child-0", controller.HuskPodOptions{

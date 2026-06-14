@@ -46,6 +46,31 @@ gets. Each child is its own husk pod + VM + per-activation rootfs CoW clone, so
 guest writes never cross between children or back to the source. The Python-level
 PRNG caveat in section 1 applies to husk fork children identically.
 
+Memory/disk consistency (the disk half of the fork). The fork snapshot's
+`vmstate` is baked against the SOURCE sandbox's rootfs (`path_on_host`), so a
+restored child's guest memory (page cache, ext4 superblock, in-flight metadata)
+reflects the SOURCE disk, not the pristine template disk. The child's
+per-activation rootfs CoW clone is therefore made from the SOURCE pod's live
+rootfs (`<dataDir>/husk-rootfs/<source-pod-name>/rootfs.ext4`, threaded as
+`HuskPodOptions.ForkSourceRootfsPath` and passed to the stub as
+`--template-rootfs`), NOT the template rootfs. Cloning from the template instead
+would rebind the child to a disk that does not match its restored memory: any
+data the source wrote since boot would be lost in children and the
+cached-vs-on-disk mismatch could corrupt the child fs. This mirrors the raw-forkd
+`ForkRunning` path, which threads `source.rootfsPath` into the fork so memory and
+disk stay consistent. The clone is still per-child (keyed by the child pod name),
+so children remain independent; only the clone SOURCE is the source rootfs.
+Verified by `internal/controller` `TestBuildHuskPodForkChildClonesFromSourceRootfs`.
+
+Single coherent fork point. The source VM is snapshotted EXACTLY ONCE per
+`SandboxFork` (guarded by `Status.ForkSnapshotTaken`, persisted so it survives a
+controller restart mid-fork). Children take several reconcile passes to reach
+Ready; re-snapshotting on each pass would re-pause the source and overwrite the
+fork `mem`/`vmstate`, so a child activated in a later pass would restore a NEWER
+source memory state than an earlier child and the N children would not share one
+fork point. Verified by `internal/controller`
+`TestHuskForkSnapshotTakenExactlyOnce`.
+
 ## 1. RNG and entropy after restore
 
 Every VM restored from the same snapshot wakes up with byte-identical kernel

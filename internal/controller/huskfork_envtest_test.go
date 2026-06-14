@@ -13,6 +13,7 @@ package controller_test
 import (
 	"context"
 	"crypto/tls"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +128,79 @@ func TestHuskForkProducesReadyChildren(t *testing.T) {
 
 	if snapCalls < 1 {
 		t.Fatalf("expected at least one fork-snapshot call, got %d", snapCalls)
+	}
+}
+
+// TestHuskForkSnapshotTakenExactlyOnce is the BUG 2 regression: the fork
+// snapshot must be taken EXACTLY ONCE for a SandboxFork and reused for all
+// children across reconcile passes. Children take several passes to reach Ready;
+// re-snapshotting on each pass re-pauses the source and overwrites the fork
+// mem/vmstate, so a child activated in a later pass would restore a NEWER source
+// memory state than an earlier child: the N children would not be a coherent
+// single fork point. The children are deliberately NOT forced Ready until after
+// several reconcile passes have elapsed, so the bug (per-pass re-snapshot) would
+// show snapCalls > 1.
+func TestHuskForkSnapshotTakenExactlyOnce(t *testing.T) {
+	srcPod := makeDormantHuskPod(t, "pool-once", "10.0.0.7")
+	makeForkSourceClaim(t, "src-claim-once", "pool-once", srcPod)
+
+	var snapCalls int32
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		atomic.AddInt32(&snapCalls, 1)
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	fork := &v1alpha1.SandboxFork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hf-once",
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1alpha1.SandboxForkSpec{SourceRef: v1alpha1.LocalObjectReference{Name: "src-claim-once"}, Replicas: 2},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	// Wait for the child pods to be created (this guarantees the snapshot op has
+	// run at least once) WITHOUT forcing them Ready, so the reconciler requeues
+	// repeatedly with children pending. A per-pass re-snapshot would bump
+	// snapCalls above 1 during this window.
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren("hf-once"))
+		return len(pods.Items) == 2
+	})
+	// Let several requeue passes elapse with children still pending.
+	time.Sleep(3 * time.Second)
+
+	if got := atomic.LoadInt32(&snapCalls); got != 1 {
+		t.Fatalf("fork snapshot must be taken exactly once across passes; got %d calls", got)
+	}
+
+	// Now drive the children Ready and confirm the fork still completes WITHOUT
+	// any further snapshot calls (reuse of the single snapshot).
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren("hf-once"))
+		for i := range pods.Items {
+			forceHuskPodReady(t, &pods.Items[i])
+		}
+		var got v1alpha1.SandboxFork
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hf-once", Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyForks == 2
+	})
+
+	if got := atomic.LoadInt32(&snapCalls); got != 1 {
+		t.Fatalf("fork snapshot re-taken after children came Ready; got %d calls, want 1", got)
 	}
 }
 

@@ -151,6 +151,18 @@ spec:
                   - type
                   type: object
                 type: array
+              forkSnapshotTaken:
+                description: |-
+                  ForkSnapshotTaken records that the husk fork snapshot of the source VM has
+                  already been written for this SandboxFork. It guards the snapshot op so it
+                  runs EXACTLY ONCE across reconcile passes: children take several passes to
+                  reach Ready, and re-snapshotting on each pass would re-pause the source and
+                  overwrite the fork mem/vmstate, so a child activated in a later pass would
+                  restore a newer source memory state than an earlier child (an incoherent
+                  fork set). Once true, subsequent passes reuse the existing snapshot and only
+                  reconcile child readiness. Persisting it in status keeps the guard correct
+                  across a controller restart mid-fork (the source is never re-paused).
+                type: boolean
               forks:
                 items:
                   properties:
