@@ -34,6 +34,10 @@ rules:
       - sandboxpools
       - sandboxclaims
       - sandboxforks
+      # The workspace e2e creates/forks/reverts/deletes Workspaces and reads back
+      # the WorkspaceRevisions the controller commits (W4, #21).
+      - workspaces
+      - workspacerevisions
     verbs:
       - create
       - delete
@@ -50,6 +54,8 @@ rules:
       - sandboxpools/status
       - sandboxclaims/status
       - sandboxforks/status
+      - workspaces/status
+      - workspacerevisions/status
     verbs:
       - get
       - list
