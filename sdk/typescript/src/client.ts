@@ -7,7 +7,9 @@
 import { AgentRunError } from "./errors.js";
 import type { CustomObject, K8sApi } from "./k8s.js";
 import { Sandbox, toBaseUrl } from "./sandbox.js";
+import type { TerminateOptions } from "./sandbox.js";
 import type { SandboxInfo, SandboxPhase } from "./types.js";
+import { Workspace } from "./workspace.js";
 
 const API_GROUP = "mitos.run";
 const API_VERSION = "v1alpha1";
@@ -71,6 +73,12 @@ export interface CreateOptions {
   name?: string;
   env?: Record<string, string>;
   timeout?: string;
+  /**
+   * Bind the sandbox to a durable Workspace by name. On activation the
+   * controller hydrates the workspace head into /workspace; on terminate it
+   * dehydrates a new committed revision.
+   */
+  workspace?: string;
 }
 
 function randomName(): string {
@@ -161,9 +169,7 @@ export class AgentRun {
       id: name,
       endpoint: toBaseUrl(endpoint),
       token,
-      terminator: async () => {
-        await this.k8s.deleteClaim(this.namespace, name);
-      },
+      terminator: this.makeTerminator(name),
     });
   }
 
@@ -271,6 +277,9 @@ export class AgentRun {
     if (opts?.timeout) {
       spec["timeout"] = opts.timeout;
     }
+    if (opts?.workspace) {
+      spec["workspaceRef"] = { name: opts.workspace };
+    }
 
     const claim: CustomObject = {
       apiVersion: `${API_GROUP}/${API_VERSION}`,
@@ -300,10 +309,87 @@ export class AgentRun {
       id: name,
       endpoint: toBaseUrl(resolved),
       token,
-      terminator: async () => {
-        await this.k8s.deleteClaim(this.namespace, name);
-      },
+      terminator: this.makeTerminator(name),
     });
+  }
+
+  /**
+   * Builds the workspace-aware terminator for a claim: when terminate is called
+   * with outputs or checkpoint, it merge-patches the claim spec first (the
+   * controller dehydrates with those outputs on the way out), then reads the
+   * claim's workspaceRef, deletes the claim, and returns the bound workspace
+   * name (or undefined when the sandbox is unbound).
+   */
+  private makeTerminator(name: string): (opts?: TerminateOptions) => Promise<string | undefined> {
+    return async (opts?: TerminateOptions) => {
+      const specOutputs: Array<Record<string, unknown>> = [];
+      for (const o of opts?.outputs ?? []) {
+        if (typeof o === "string") {
+          specOutputs.push({ path: o });
+        } else {
+          specOutputs.push(o);
+        }
+      }
+      const patchSpec: Record<string, unknown> = {};
+      if (specOutputs.length > 0) {
+        patchSpec["outputs"] = specOutputs;
+      }
+      if (opts?.checkpoint) {
+        patchSpec["checkpointOnTerminate"] = true;
+      }
+      if (Object.keys(patchSpec).length > 0) {
+        await this.k8s.patchClaim(this.namespace, name, { spec: patchSpec });
+      }
+      let workspaceRef: string | undefined;
+      try {
+        const claim = await this.k8s.getClaim(this.namespace, name);
+        const ref = ((claim.spec ?? {})["workspaceRef"] ?? {}) as { name?: string };
+        workspaceRef = ref.name;
+      } catch {
+        // Claim already gone; report unbound.
+      }
+      await this.k8s.deleteClaim(this.namespace, name);
+      return workspaceRef;
+    };
+  }
+
+  /** Create an empty durable Workspace. */
+  async createWorkspace(name: string): Promise<Workspace> {
+    const body: CustomObject = {
+      apiVersion: `${API_GROUP}/${API_VERSION}`,
+      kind: "Workspace",
+      metadata: { name, namespace: this.namespace },
+      spec: {},
+    };
+    await this.k8s.createWorkspace(this.namespace, body);
+    return new Workspace(name, this.namespace, this.k8s);
+  }
+
+  /** Lazy handle to a workspace (does not touch the cluster). */
+  workspace(name: string): Workspace {
+    return new Workspace(name, this.namespace, this.k8s);
+  }
+
+  /** Reconnect to an existing workspace, throwing if it is absent. */
+  async getWorkspace(name: string): Promise<Workspace> {
+    try {
+      await this.k8s.getWorkspace(this.namespace, name);
+    } catch (e) {
+      throw new AgentRunError(`workspace ${name} not found`, {
+        code: "workspace_not_found",
+        cause: `getting Workspace ${name} failed with status ${statusOf(e) ?? "unknown"}`,
+        remediation: "Create it with createWorkspace(name) first.",
+      });
+    }
+    return new Workspace(name, this.namespace, this.k8s);
+  }
+
+  /** List the workspaces in the client's namespace. */
+  async listWorkspaces(): Promise<Workspace[]> {
+    const list = await this.k8s.listWorkspaces(this.namespace);
+    return (list.items ?? []).map(
+      (o) => new Workspace(o.metadata?.name ?? "", this.namespace, this.k8s),
+    );
   }
 
   /**

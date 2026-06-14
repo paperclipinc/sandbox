@@ -19,7 +19,16 @@ export type { AgentRunErrorOptions } from "./errors.js";
 export { HttpClient, validSandboxId } from "./http.js";
 
 export { Sandbox, SandboxFiles, toBaseUrl, parseRunCodeStream } from "./sandbox.js";
-export type { SandboxOptions, Terminator, RunCodeCallbacks } from "./sandbox.js";
+export type {
+  SandboxOptions,
+  Terminator,
+  TerminateOptions,
+  TerminateOutput,
+  RunCodeCallbacks,
+} from "./sandbox.js";
+
+export { Workspace } from "./workspace.js";
+export type { RevisionInfo, DiffInfo } from "./workspace.js";
 export { Pty, createPty } from "./pty.js";
 export type { CreatePtyOptions } from "./pty.js";
 

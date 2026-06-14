@@ -117,7 +117,9 @@ export class SandboxServer {
       endpoint: this.url,
       http: this.http,
       terminator: async () => {
+        // Direct mode has no workspaces; terminate deletes and reports unbound.
         await this.terminate(resolvedId);
+        return undefined;
       },
     });
   }

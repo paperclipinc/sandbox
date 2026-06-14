@@ -17,7 +17,26 @@ import type {
 /** A function that tears a sandbox down. Injected by the owning client so the
  * cluster client deletes a SandboxClaim while the direct client issues a
  * DELETE /v1/sandboxes/{id}. */
-export type Terminator = () => Promise<void>;
+/**
+ * A terminate output: a "/workspace/..." path string keeps only that subtree, a
+ * { diff: true } records a content-hash diff, and a { git: {...} } pushes repo
+ * paths to a rendezvous remote (mirrors docs/api/v2-spec.md onTerminate.outputs).
+ */
+export type TerminateOutput = string | Record<string, unknown>;
+
+export interface TerminateOptions {
+  /** Narrow and enrich the dehydrated workspace revision. */
+  outputs?: TerminateOutput[];
+  /** Pair the revision with a VM memory snapshot (resumable head). */
+  checkpoint?: boolean;
+}
+
+/**
+ * Tears the sandbox down. When bound to a workspace, the controller dehydrates
+ * /workspace into a new committed revision; the returned string is the bound
+ * workspace name (or undefined when unbound).
+ */
+export type Terminator = (opts?: TerminateOptions) => Promise<string | undefined>;
 
 export interface SandboxOptions {
   id: string;
@@ -356,12 +375,15 @@ export class Sandbox {
 
   /**
    * Tears the sandbox down via the injected terminator. A bare Sandbox with no
-   * terminator is a no-op.
+   * terminator is a no-op. When bound to a workspace, outputs narrow and enrich
+   * the dehydrated revision and checkpoint pairs it with a memory snapshot;
+   * returns the bound workspace name (or undefined when unbound or a no-op).
    */
-  async terminate(): Promise<void> {
+  async terminate(opts?: TerminateOptions): Promise<string | undefined> {
     if (this.terminator) {
-      await this.terminator();
+      return this.terminator(opts);
     }
+    return undefined;
   }
 }
 

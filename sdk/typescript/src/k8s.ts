@@ -54,6 +54,25 @@ export interface K8sApi {
    * Secret key. Values are held in memory only and must never be logged.
    */
   readSecret(namespace: string, name: string): Promise<Record<string, string>>;
+
+  // --- Workspace verbs (mitos.run/v1alpha1 Workspace and WorkspaceRevision) ---
+
+  /** Creates a Workspace custom object. */
+  createWorkspace(namespace: string, workspace: CustomObject): Promise<CustomObject>;
+  /** Gets a Workspace custom object. */
+  getWorkspace(namespace: string, name: string): Promise<CustomObject>;
+  /** Lists Workspace custom objects. */
+  listWorkspaces(namespace: string): Promise<CustomObjectList>;
+  /** Deletes a Workspace; its revisions are garbage-collected by owner ref. */
+  deleteWorkspace(namespace: string, name: string): Promise<void>;
+  /** Lists WorkspaceRevision custom objects. */
+  listRevisions(namespace: string): Promise<CustomObjectList>;
+  /** Gets a WorkspaceRevision custom object. */
+  getRevision(namespace: string, name: string): Promise<CustomObject>;
+  /** Creates a WorkspaceRevision custom object (the fork/revert tip). */
+  createRevision(namespace: string, revision: CustomObject): Promise<CustomObject>;
+  /** Merge-patches a SandboxClaim's spec (used by bind and terminate outputs). */
+  patchClaim(namespace: string, name: string, patch: Record<string, unknown>): Promise<void>;
 }
 
 /**
@@ -190,5 +209,111 @@ export class KubeConfigApi implements K8sApi {
       data[k] = Buffer.from(v, "base64").toString("utf-8");
     }
     return data;
+  }
+
+  async createWorkspace(namespace: string, workspace: CustomObject): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.createNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspaces",
+      body: workspace,
+    });
+    return res as CustomObject;
+  }
+
+  async getWorkspace(namespace: string, name: string): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.getNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspaces",
+      name,
+    });
+    return res as CustomObject;
+  }
+
+  async listWorkspaces(namespace: string): Promise<CustomObjectList> {
+    await this.ready;
+    const res = await this.customApi.listNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspaces",
+    });
+    return res as CustomObjectList;
+  }
+
+  async deleteWorkspace(namespace: string, name: string): Promise<void> {
+    await this.ready;
+    await this.customApi.deleteNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspaces",
+      name,
+    });
+  }
+
+  async listRevisions(namespace: string): Promise<CustomObjectList> {
+    await this.ready;
+    const res = await this.customApi.listNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspacerevisions",
+    });
+    return res as CustomObjectList;
+  }
+
+  async getRevision(namespace: string, name: string): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.getNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspacerevisions",
+      name,
+    });
+    return res as CustomObject;
+  }
+
+  async createRevision(namespace: string, revision: CustomObject): Promise<CustomObject> {
+    await this.ready;
+    const res = await this.customApi.createNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: "workspacerevisions",
+      body: revision,
+    });
+    return res as CustomObject;
+  }
+
+  async patchClaim(
+    namespace: string,
+    name: string,
+    patch: Record<string, unknown>,
+  ): Promise<void> {
+    await this.ready;
+    await this.customApi.patchNamespacedCustomObject(
+      {
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: "sandboxclaims",
+        name,
+        body: patch,
+      },
+      // A merge patch so spec.outputs/checkpointOnTerminate/workspaceRef are set
+      // without clobbering the rest of the claim spec.
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { "Content-Type": "application/merge-patch+json" } },
+    );
   }
 }
