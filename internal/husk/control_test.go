@@ -80,3 +80,33 @@ func TestActivateResultErrorRoundTrip(t *testing.T) {
 		t.Fatalf("error result mismatch: got %+v want %+v", got, want)
 	}
 }
+
+func TestForkSnapshotRequestRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	want := ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: "/var/lib/mitos/forks/fork-1", PauseSource: true}
+	if err := WriteForkSnapshotRequest(&buf, want); err != nil {
+		t.Fatalf("WriteForkSnapshotRequest: %v", err)
+	}
+	got, err := ReadForkSnapshotRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadForkSnapshotRequest: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+}
+
+func TestForkSnapshotResultRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	want := ForkSnapshotResult{OK: true, SnapshotDir: "/var/lib/mitos/forks/fork-1", LatencyMs: 12.5}
+	if err := WriteForkSnapshotResult(&buf, want); err != nil {
+		t.Fatalf("WriteForkSnapshotResult: %v", err)
+	}
+	got, err := ReadForkSnapshotResult(&buf)
+	if err != nil {
+		t.Fatalf("ReadForkSnapshotResult: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+}

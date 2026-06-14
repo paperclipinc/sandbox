@@ -100,6 +100,80 @@ func ReadResult(r io.Reader) (ActivateResult, error) {
 	return res, err
 }
 
+// ForkSnapshotRequest asks a husk stub holding a RUNNING (active) VM to snapshot
+// that VM in place: pause it, write a Full Firecracker snapshot to SnapshotDir
+// (mem + vmstate, the same layout the fork engine and the activate path use),
+// then resume it unless PauseSource is set. The result snapshot is the restore
+// image the controller activates N independent CHILD husk pods from, so a husk
+// sandbox can be live-forked even though forkd's engine does not own its VM.
+//
+// ForkID is the node-local fork identifier the controller mints (the SandboxFork
+// child group); it is a content/address-like value, never a secret, and is the
+// directory leaf under the node forks dir. SnapshotDir is the in-pod path the
+// node forks dir is mounted at for THIS fork; the stub writes SnapshotDir/mem
+// and SnapshotDir/vmstate.
+type ForkSnapshotRequest struct {
+	ForkID      string `json:"fork_id"`
+	SnapshotDir string `json:"snapshot_dir"`
+	PauseSource bool   `json:"pause_source,omitempty"`
+}
+
+// ForkSnapshotResult is the control reply for a ForkSnapshot op. OK is true only
+// when the VM paused, the snapshot was written, and (unless PauseSource) the VM
+// resumed. SnapshotDir echoes where the snapshot was written (it carries no
+// secret). Error carries actionable remediation text when OK is false; it never
+// carries secrets.
+type ForkSnapshotResult struct {
+	OK          bool    `json:"ok"`
+	SnapshotDir string  `json:"snapshot_dir,omitempty"`
+	LatencyMs   float64 `json:"latency_ms"`
+	Error       string  `json:"error,omitempty"`
+}
+
+// RemoveForkSnapshotRequest asks the source stub to delete a fork snapshot dir it
+// previously created. The controller sends it when the SandboxFork is deleted so
+// the node-local fork snapshot does not outlive its owner.
+type RemoveForkSnapshotRequest struct {
+	ForkID      string `json:"fork_id"`
+	SnapshotDir string `json:"snapshot_dir"`
+}
+
+// WriteForkSnapshotRequest writes a ForkSnapshotRequest as one JSON line.
+func WriteForkSnapshotRequest(w io.Writer, req ForkSnapshotRequest) error {
+	return writeLine(w, req)
+}
+
+// ReadForkSnapshotRequest reads one line-delimited ForkSnapshotRequest.
+func ReadForkSnapshotRequest(r io.Reader) (ForkSnapshotRequest, error) {
+	var req ForkSnapshotRequest
+	err := readLine(r, &req)
+	return req, err
+}
+
+// WriteForkSnapshotResult writes a ForkSnapshotResult as one JSON line.
+func WriteForkSnapshotResult(w io.Writer, res ForkSnapshotResult) error {
+	return writeLine(w, res)
+}
+
+// ReadForkSnapshotResult reads one line-delimited ForkSnapshotResult.
+func ReadForkSnapshotResult(r io.Reader) (ForkSnapshotResult, error) {
+	var res ForkSnapshotResult
+	err := readLine(r, &res)
+	return res, err
+}
+
+// WriteRemoveForkSnapshotRequest writes a RemoveForkSnapshotRequest as one JSON line.
+func WriteRemoveForkSnapshotRequest(w io.Writer, req RemoveForkSnapshotRequest) error {
+	return writeLine(w, req)
+}
+
+// ReadRemoveForkSnapshotRequest reads one line-delimited RemoveForkSnapshotRequest.
+func ReadRemoveForkSnapshotRequest(r io.Reader) (RemoveForkSnapshotRequest, error) {
+	var req RemoveForkSnapshotRequest
+	err := readLine(r, &req)
+	return req, err
+}
+
 func writeLine(w io.Writer, v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
