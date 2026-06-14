@@ -1,6 +1,7 @@
 package husk
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -122,13 +123,48 @@ func serveControlConn(ctx context.Context, conn net.Conn, stub *Stub, authorize 
 		return
 	}
 
-	req, err := ReadRequest(conn)
+	br := bufio.NewReader(conn)
+	op, err := ReadControlOp(br)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "husk control: read activate request: %v\n", err)
+		fmt.Fprintf(os.Stderr, "husk control: read control op: %v\n", err)
 		return
 	}
-	res, _ := stub.Activate(ctx, req)
-	if werr := WriteResult(conn, res); werr != nil {
-		fmt.Fprintf(os.Stderr, "husk control: write activate result: %v\n", werr)
+	switch op {
+	case OpActivate:
+		req, rerr := readActivateRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read activate request: %v\n", rerr)
+			return
+		}
+		res, _ := stub.Activate(ctx, req)
+		if werr := WriteResult(conn, res); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write activate result: %v\n", werr)
+		}
+	case OpForkSnapshot:
+		req, rerr := readForkSnapshotRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read fork-snapshot request: %v\n", rerr)
+			return
+		}
+		res, _ := stub.ForkSnapshot(ctx, req)
+		if werr := WriteForkSnapshotResult(conn, res); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write fork-snapshot result: %v\n", werr)
+		}
+	case OpRemoveForkSnapshot:
+		req, rerr := readRemoveForkSnapshotRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read remove-fork-snapshot request: %v\n", rerr)
+			return
+		}
+		rmErr := stub.RemoveForkSnapshot(ForkSnapshotRequest{ForkID: req.ForkID, SnapshotDir: req.SnapshotDir})
+		out := ForkSnapshotResult{OK: rmErr == nil, SnapshotDir: req.SnapshotDir}
+		if rmErr != nil {
+			out.Error = rmErr.Error()
+		}
+		if werr := WriteForkSnapshotResult(conn, out); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write remove-fork-snapshot result: %v\n", werr)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "husk control: unknown control op %q\n", op)
 	}
 }

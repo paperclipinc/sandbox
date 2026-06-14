@@ -201,6 +201,34 @@ A SEPARATE follow-up (a per-node verify cache so the second dormant pod on a nod
 skips the ~680 MiB re-hash) WILL touch the integrity gate and must land with its
 own threat-model delta; it is intentionally out of scope here.
 
+### Husk fork snapshot (live fork on the husk path)
+
+A `SandboxFork` of a husk-backed source drives a `ForkSnapshot` control op against
+the SOURCE husk pod's stub over the SAME mTLS channel as activate (authorized to
+the controller identity only: `internal/husk.ServeTLS` plus
+`AuthorizeControllerIdentity`; the op rides the same op-dispatched channel that
+delivers secrets on activate). The op carries NO secrets (a fork id and a
+node-local snapshot path). The stub pauses the running VM, writes a Full
+Firecracker snapshot to a node hostPath `<dataDir>/forks/<fork-id>` (read-write
+only to the source pod that owns the VM; read-only to the child pods on the SAME
+node), then resumes the source unless `pauseSource`. The fork snapshot is a LIVE,
+EPHEMERAL artifact created by a trusted node-local stub and consumed by child
+stubs on the same node within the same trust boundary; it is NOT content-addressed,
+so the children activate it with verify disabled (`--allow-unverified-snapshots`),
+the same posture a pre-digest pool uses. This is acceptable because the artifact
+is root-owned, never tenant-writable, and re-hashing would gate on a digest that
+does not exist for a live fork. The child still runs the full fail-closed RNG/clock
+reseed handshake (see `docs/fork-correctness.md`, husk fork children). Per-child
+independence: each child is its own husk pod + dormant VMM + per-activation rootfs
+CoW clone, so guest writes never cross between children or back to the source; the
+children share only the read-only fork snapshot mem+vmstate as a restore image,
+exactly as warm pods share the template snapshot. Each child mints its OWN bearer
+token (the source's token never opens a child). Lifecycle: the fork snapshot is
+owned by the `SandboxFork` and removed by its finalizer (`RemoveForkSnapshot` op)
+on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes GC.
+Residual: a compromised controller can drive a fork-snapshot of any husk pod it
+can reach, the same residual already stated for activate (Surface 2).
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts

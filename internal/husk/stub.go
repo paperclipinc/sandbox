@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,15 @@ type vmm interface {
 	// The husk activate path calls it AFTER the rootfs drive rebind so the guest
 	// resumes already bound to its own per-activation rootfs clone.
 	Resume() error
+	// Pause transitions the loaded/running VM to Paused (PATCH /vm Paused). The
+	// fork-snapshot op pauses the source VM before CreateSnapshot, which requires
+	// a paused VM, then resumes it (unless the fork asked to keep it paused).
+	Pause() error
+	// CreateSnapshot writes a Full Firecracker snapshot of the PAUSED VM: the
+	// guest memory to memPath and the device/vm state to snapshotPath. The
+	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
+	// restore independent copies of it.
+	CreateSnapshot(memPath, snapshotPath string) error
 	// Close tears the VMM down.
 	Close() error
 }
@@ -255,6 +265,14 @@ type Options struct {
 	// seam (volume.Backend.ReflinkCopy, which is FICLONE with a full-copy
 	// fallback). Tests inject a fake.
 	Reflink reflinker
+	// ForksDir is the node forks directory mounted into this pod. When set, the
+	// fork-snapshot and remove-fork-snapshot control ops confine their writes to
+	// within it (fail-closed: a request naming a SnapshotDir outside it is
+	// refused), so the control channel can never be steered to write or delete a
+	// path outside the mounted forks dir. Empty disables the check (the request's
+	// SnapshotDir is used as-is, the prior behavior). A node-local path, not a
+	// secret.
+	ForksDir string
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -288,6 +306,10 @@ type Stub struct {
 	reflink            reflinker
 	rootfsClonePath    string
 
+	// forksDir confines fork-snapshot / remove-fork-snapshot writes to within it
+	// when set; empty disables the check.
+	forksDir string
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -314,6 +336,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		rootfsTemplatePath: opts.RootfsTemplatePath,
 		rootfsCoWDir:       opts.RootfsCoWDir,
 		reflink:            opts.Reflink,
+		forksDir:           opts.ForksDir,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -550,6 +573,116 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		VsockPath: vsockPath,
 		LatencyMs: float64(latency.Microseconds()) / 1000.0,
 	}, nil
+}
+
+// ForkSnapshot snapshots the CURRENTLY RUNNING VM this stub holds, in place, so
+// the controller can restore N independent child husk pods from it. It is the
+// husk analog of the fork engine's ForkRunning: the source VM is owned by THIS
+// husk pod's stub (not forkd's engine), so the only way to live-fork it is for
+// the owning stub to snapshot it.
+//
+// It pauses the VM (CreateSnapshot requires a paused VM), writes a Full snapshot
+// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), then resumes
+// it UNLESS req.PauseSource is set, in which case it leaves the source paused.
+// The stub stays StateActive throughout: it still owns its one VM.
+//
+// FAIL CLOSED: it requires StateActive (else error, no snapshot); a pause,
+// snapshot-create, or resume failure returns OK=false plus an error. On a
+// snapshot failure it still attempts to resume the source so a transient
+// snapshot error does not leave a live sandbox frozen. The fork id and snapshot
+// paths carry no secrets.
+func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state != StateActive {
+		return ForkSnapshotResult{OK: false, Error: fmt.Sprintf("fork-snapshot in state %s: must be active", s.state)},
+			fmt.Errorf("husk: fork-snapshot in state %s: must be active", s.state)
+	}
+	if err := ctx.Err(); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	if req.SnapshotDir == "" {
+		return ForkSnapshotResult{OK: false, Error: "fork-snapshot: empty snapshot dir"},
+			fmt.Errorf("husk: fork-snapshot: empty snapshot dir")
+	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+
+	memFile := filepath.Join(req.SnapshotDir, "mem")
+	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
+	if err := os.MkdirAll(req.SnapshotDir, 0o755); err != nil {
+		werr := fmt.Errorf("husk: create fork snapshot dir %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	start := time.Now()
+
+	if err := s.vm.Pause(); err != nil {
+		werr := fmt.Errorf("husk: pause source VM for fork snapshot: %w", err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	if err := s.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
+		// Best effort: resume the source so a transient snapshot error does not
+		// leave a tenant's live sandbox frozen. The resume error is reported only
+		// if the snapshot itself succeeded; here the snapshot already failed.
+		_ = s.vm.Resume()
+		werr := fmt.Errorf("husk: create fork snapshot in %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Resume the source UNLESS the fork asked to keep it paused. PauseSource
+	// trades a brief source interruption for a colder, quiescent snapshot.
+	if !req.PauseSource {
+		if err := s.vm.Resume(); err != nil {
+			werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	latency := time.Since(start)
+	return ForkSnapshotResult{
+		OK:          true,
+		SnapshotDir: req.SnapshotDir,
+		LatencyMs:   float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// RemoveForkSnapshot deletes a fork snapshot dir this stub previously created. It
+// is the GC counterpart of ForkSnapshot: the controller calls it when the owning
+// SandboxFork is deleted so the node-local snapshot does not outlive its owner.
+// It does not touch the VM and is safe in any state. The path carries no secret.
+func (s *Stub) RemoveForkSnapshot(req ForkSnapshotRequest) error {
+	if req.SnapshotDir == "" {
+		return fmt.Errorf("husk: remove fork snapshot: empty snapshot dir")
+	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(req.SnapshotDir); err != nil {
+		return fmt.Errorf("husk: remove fork snapshot %s: %w", req.SnapshotDir, err)
+	}
+	return nil
+}
+
+// confineToForksDir refuses a fork-snapshot / remove-fork-snapshot SnapshotDir
+// that resolves outside the configured forks dir, so the control channel can
+// never be steered to write or delete a path outside the mounted node forks dir.
+// It is a fail-closed defense-in-depth gate; when no forks dir is configured
+// (the empty default) it permits any dir, preserving the prior behavior. The dir
+// carries no secret, so it is safe to name in the error.
+func (s *Stub) confineToForksDir(dir string) error {
+	if s.forksDir == "" {
+		return nil
+	}
+	base := filepath.Clean(s.forksDir)
+	target := filepath.Clean(dir)
+	if target != base && !strings.HasPrefix(target, base+string(filepath.Separator)) {
+		return fmt.Errorf("husk: fork snapshot dir %q is outside the configured forks dir %q", dir, s.forksDir)
+	}
+	return nil
 }
 
 // Serve accepts control connections on ln and dispatches each to Activate,

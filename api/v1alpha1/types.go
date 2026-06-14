@@ -474,11 +474,21 @@ type ForkInfo struct {
 }
 
 type SandboxForkStatus struct {
-	ReadyForks     int32              `json:"readyForks"`
-	TotalForks     int32              `json:"totalForks"`
-	Forks          []ForkInfo         `json:"forks,omitempty"`
-	CheckpointTime *metav1.Time       `json:"checkpointTime,omitempty"`
-	Conditions     []metav1.Condition `json:"conditions,omitempty"`
+	ReadyForks int32      `json:"readyForks"`
+	TotalForks int32      `json:"totalForks"`
+	Forks      []ForkInfo `json:"forks,omitempty"`
+	// ForkSnapshotTaken records that the husk fork snapshot of the source VM has
+	// already been written for this SandboxFork. It guards the snapshot op so it
+	// runs EXACTLY ONCE across reconcile passes: children take several passes to
+	// reach Ready, and re-snapshotting on each pass would re-pause the source and
+	// overwrite the fork mem/vmstate, so a child activated in a later pass would
+	// restore a newer source memory state than an earlier child (an incoherent
+	// fork set). Once true, subsequent passes reuse the existing snapshot and only
+	// reconcile child readiness. Persisting it in status keeps the guard correct
+	// across a controller restart mid-fork (the source is never re-paused).
+	ForkSnapshotTaken bool               `json:"forkSnapshotTaken,omitempty"`
+	CheckpointTime    *metav1.Time       `json:"checkpointTime,omitempty"`
+	Conditions        []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

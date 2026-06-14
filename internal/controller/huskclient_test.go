@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -112,15 +113,32 @@ func (s *fakeHuskServer) handle(conn net.Conn) {
 	if err := husk.AuthorizeControllerIdentity(&state); err != nil {
 		return
 	}
-	req, err := husk.ReadRequest(conn)
+	br := bufio.NewReader(conn)
+	op, err := husk.ReadControlOp(br)
 	if err != nil {
 		return
 	}
-	s.mu.Lock()
-	s.calls++
-	s.gotSecret = req.Secrets["API_KEY"]
-	s.mu.Unlock()
-	_ = husk.WriteResult(conn, husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock", LatencyMs: 1.5})
+	switch op {
+	case husk.OpForkSnapshot:
+		req, rerr := husk.ReadForkSnapshotRequestReader(br)
+		if rerr != nil {
+			return
+		}
+		s.mu.Lock()
+		s.calls++
+		s.mu.Unlock()
+		_ = husk.WriteForkSnapshotResult(conn, husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir, LatencyMs: 2.0})
+	default:
+		req, rerr := husk.ReadActivateRequestReader(br)
+		if rerr != nil {
+			return
+		}
+		s.mu.Lock()
+		s.calls++
+		s.gotSecret = req.Secrets["API_KEY"]
+		s.mu.Unlock()
+		_ = husk.WriteResult(conn, husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock", LatencyMs: 1.5})
+	}
 }
 
 func TestActivateHuskPodRoundTrip(t *testing.T) {
@@ -144,6 +162,33 @@ func TestActivateHuskPodRoundTrip(t *testing.T) {
 	defer s.mu.Unlock()
 	if s.gotSecret != "s3cr3t-value" {
 		t.Fatalf("husk did not receive the secret over mTLS")
+	}
+}
+
+func TestForkSnapshotOnHuskRoundTrip(t *testing.T) {
+	p := newHuskClientPKI(t)
+	s := newFakeHuskServer(t, p)
+	defer s.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := ForkSnapshotOnHusk(ctx, s.addr, p.clientConf, husk.ForkSnapshotRequest{
+		ForkID:      "fork-1",
+		SnapshotDir: "/var/lib/mitos/snapshot",
+		PauseSource: true,
+	})
+	if err != nil {
+		t.Fatalf("ForkSnapshotOnHusk: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestForkSnapshotOnHuskRefusesWithoutTLS(t *testing.T) {
+	_, err := ForkSnapshotOnHusk(context.Background(), "127.0.0.1:1", nil, husk.ForkSnapshotRequest{ForkID: "f", SnapshotDir: "/d"})
+	if err == nil {
+		t.Fatalf("ForkSnapshotOnHusk must refuse a nil TLS config")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -52,6 +53,12 @@ const (
 	// huskClaimLabel marks a husk pod as claimed by a specific SandboxClaim.
 	// Selection skips any pod carrying it: one claim activates one husk pod.
 	huskClaimLabel = "mitos.run/claim"
+
+	// huskForkLabel marks a husk pod as a fork CHILD and carries the owning
+	// SandboxFork name, so a reconcile can list exactly this fork's children and
+	// they are never counted as warm-pool slots (the pool selector requires
+	// huskPoolLabel, which fork children do not carry).
+	huskForkLabel = "mitos.run/fork"
 
 	// huskKVMNodeLabel is the node label the KVM device plugin / node bootstrap
 	// sets on a node that has /dev/kvm (deploy/talos). A husk pod is pinned to
@@ -100,12 +107,29 @@ const (
 	// reflink-capable filesystem (a full copy fallback otherwise). Each activation
 	// writes its own clone under here, never the shared read-only template rootfs.
 	huskRootfsCoWMountPath = "/var/lib/mitos/husk-rootfs"
+
+	// huskForksMountPath is the in-pod path the node forks DIRECTORY is mounted at
+	// (read-write for a source pod that may be forked; the child's read-only
+	// snapshot mount points at a subdir of the node forks dir instead). The stub
+	// writes <huskForksMountPath>/<fork-id>/{mem,vmstate} on a fork-snapshot op.
+	huskForksMountPath = "/var/lib/mitos/forks"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
 // .SnapshotDir: the mounted forkd snapshot subdir holding mem and vmstate. The
 // claim reconciler threads this into the activate request.
 const HuskSnapshotDir = huskSnapshotMountPath
+
+// huskSourceRootfsInPodPath returns the IN-POD path a fork child clones the
+// SOURCE sandbox's live rootfs from. The source pod wrote its own per-activation
+// rootfs clone at <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4 under
+// the shared husk-rootfs hostPath dir; the fork child mounts that SAME dir, so
+// the source pod's rootfs is visible to it at this path. This is the rootfs the
+// fork snapshot's vmstate was baked against, so the child's CoW clone source
+// must be it (not the pristine template rootfs).
+func huskSourceRootfsInPodPath(sourcePodName string) string {
+	return filepath.Join(huskRootfsCoWMountPath, sourcePodName, "rootfs.ext4")
+}
 
 // HuskPodOptions configures the husk pod spec the controller emits.
 type HuskPodOptions struct {
@@ -141,6 +165,31 @@ type HuskPodOptions struct {
 	// separate from the leaf so the CA private key never reaches the husk pod,
 	// mirroring the forkd DaemonSet's /etc/forkd/ca split. Empty means no CA mount.
 	CASecretName string
+	// ForkSnapshotID, when set, makes this a FORK CHILD pod: it activates from
+	// the node fork snapshot <DataDir>/forks/<ForkSnapshotID> instead of the
+	// template snapshot. The fork snapshot was written by the source sandbox's
+	// husk stub (the fork-snapshot control op). It is a node-local id, not a
+	// secret.
+	ForkSnapshotID string
+	// ForkSourceNode pins a fork child to the node holding the fork snapshot (the
+	// source sandbox's node). Required when ForkSnapshotID is set, since the fork
+	// snapshot is a node-local hostPath that exists only on that node.
+	ForkSourceNode string
+	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the SOURCE
+	// sandbox's live rootfs that the child's per-activation CoW clone is made from.
+	// It is the source pod's own per-activation rootfs clone, exposed to the child
+	// through the shared husk-rootfs hostPath dir at
+	// <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4. This is load-bearing
+	// for fork correctness: the fork snapshot's vmstate was baked against the
+	// SOURCE's rootfs (path_on_host), so the child's restored guest memory (page
+	// cache, ext4 superblock, in-flight metadata) reflects the SOURCE disk. Cloning
+	// from the PRISTINE TEMPLATE rootfs instead (the bug) rebinds the child to a
+	// disk that does not match its memory: any data the source wrote since boot is
+	// lost and the cached-vs-on-disk mismatch can corrupt the child fs. When set,
+	// it replaces the template rootfs as the clone SOURCE; each child still writes
+	// its OWN per-activation clone (independence), only the clone source changes.
+	// Empty (a warm pod, not a fork child) clones from the template rootfs.
+	ForkSourceRootfsPath string
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -323,7 +372,15 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// fall back to the development escape hatch so the warm pool still activates;
 	// the stub logs this loudly. The manifest mount itself is added in the snapshot
 	// block below (it shares the snapshot placement requirement).
-	if opts.ExpectedDigest != "" {
+	if opts.ForkSnapshotID != "" {
+		// Fork child: the fork snapshot is a LIVE, node-local artifact created by
+		// the source stub and consumed by child stubs on the SAME node within the
+		// same trust boundary. It is NOT content-addressed (re-hashing would gate
+		// on a digest that does not exist for a live fork), so the child activates
+		// it with verify disabled, the same posture a pre-digest pool uses. The
+		// child still runs the full fail-closed RNG/clock reseed handshake.
+		args = append(args, "--allow-unverified-snapshots")
+	} else if opts.ExpectedDigest != "" {
 		args = append(args, "--manifest", filepath.Join(huskManifestDirMountPath, opts.ExpectedDigest))
 		// Pass the snapshot dir + expected digest so the dormant pod verifies the
 		// snapshot (the ~680 MiB re-hash) during Prepare, off the claim's Activate
@@ -380,11 +437,38 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// CAS manifest digest before loading (fail-closed), so an empty or wrong
 		// snapshot is rejected at activation, not silently run.
 		hostType := corev1.HostPathDirectoryOrCreate
+
+		// The node forks dir, mounted READ-WRITE so this pod's stub can write a
+		// fork snapshot of its running VM (<forks>/<fork-id>/{mem,vmstate}) when
+		// the controller drives a fork-snapshot op against it. Co-located with the
+		// template dir on the SAME node filesystem so a child's read-only mount of
+		// a subdir resolves and any CoW stays on one filesystem.
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-forks",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "forks"),
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-forks", MountPath: huskForksMountPath})
+		// Tell the stub where to write fork snapshots so a fork-snapshot op writes
+		// inside the mounted node forks dir.
+		args = append(args, "--forks-dir", huskForksMountPath)
+
+		// The snapshot SOURCE path. A warm pod activates from the template's
+		// snapshot subdir; a FORK CHILD activates from the node fork snapshot
+		// <dataDir>/forks/<fork-id> instead (mounted at the SAME in-pod path).
+		snapshotHostPath := filepath.Join(dataDir, "templates", opts.SnapshotID, "snapshot")
+		if opts.ForkSnapshotID != "" {
+			snapshotHostPath = filepath.Join(dataDir, "forks", opts.ForkSnapshotID)
+		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "snapshot",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: filepath.Join(dataDir, "templates", opts.SnapshotID, "snapshot"),
+					Path: snapshotHostPath,
 					Type: &hostType,
 				},
 			},
@@ -474,13 +558,25 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "husk-rootfs-cow", MountPath: huskRootfsCoWMountPath})
 
-		// Tell the stub where to clone from (the in-pod template rootfs at its baked
+		// The clone SOURCE for this pod's per-activation rootfs CoW. A WARM pod
+		// clones from the template rootfs (a fresh boot-time disk). A FORK CHILD
+		// must clone from the SOURCE sandbox's LIVE rootfs instead: the fork
+		// snapshot's vmstate was baked against the source's rootfs, so the child's
+		// restored guest memory reflects the SOURCE disk; cloning from the template
+		// would rebind the child to a disk that does not match its memory (silent
+		// data divergence / fs corruption). ForkSourceRootfsPath is the in-pod path
+		// of the source pod's rootfs (exposed through the shared husk-rootfs dir).
+		cloneSourceRootfs := filepath.Join(templateDir, "rootfs.ext4")
+		if opts.ForkSourceRootfsPath != "" {
+			cloneSourceRootfs = opts.ForkSourceRootfsPath
+		}
+		// Tell the stub where to clone from (the clone source rootfs at its in-pod
 		// path) and to (the writable CoW dir). At Prepare the stub reflink-clones the
-		// template rootfs to a per-pod file under the CoW dir and at Activate rebinds
-		// the rootfs drive to it, so concurrent activations never share a rootfs.
+		// source rootfs to a per-pod file under the CoW dir and at Activate rebinds
+		// the rootfs drive to it, so each activation gets its OWN rootfs clone.
 		args = append(args,
 			"--rootfs-cow-dir", huskRootfsCoWMountPath,
-			"--template-rootfs", filepath.Join(templateDir, "rootfs.ext4"),
+			"--template-rootfs", cloneSourceRootfs,
 		)
 	}
 
@@ -503,6 +599,24 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 							Key:      hostnameNodeLabel,
 							Operator: corev1.NodeSelectorOpIn,
 							Values:   nodes,
+						}},
+					}},
+				},
+			},
+		}
+	}
+	// A fork child can only run where its fork snapshot exists (the source node's
+	// node-local hostPath), so pin it to exactly that node. This takes precedence
+	// over SnapshotNodes; a fork child never sets SnapshotNodes.
+	if opts.ForkSourceNode != "" {
+		affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      hostnameNodeLabel,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{opts.ForkSourceNode},
 						}},
 					}},
 				},
@@ -627,7 +741,43 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// when the pool is deleted. c.Scheme() is the manager scheme (it carries
 	// core/v1 and mitos.run/v1alpha1). An error here means the scheme is
 	// missing a type and is a programming error; the caller logs and skips.
-	_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
+	// buildForkChildPod reuses this shape with a Client-less throwaway reconciler
+	// and sets its OWN owner ref (to the SandboxFork) afterward, so skip the
+	// pool owner ref when no Client (hence no scheme) is available.
+	if r.Client != nil {
+		_ = controllerutil.SetControllerReference(pool, pod, r.Scheme())
+	}
+	return pod
+}
+
+// buildForkChildPod builds a husk pod that activates from a fork snapshot. It
+// reuses the same pod shape buildHuskPod emits (buildHuskPod needs a pool for
+// GenerateName/namespace; a fork child is owned by the SandboxFork, not a pool),
+// then rewrites the ownership, labels, and name for the fork. The pod is pinned
+// to the source node (opts.ForkSourceNode) and activates from
+// <DataDir>/forks/<ForkSnapshotID> (opts.ForkSnapshotID), both set by the caller.
+func buildForkChildPod(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	// buildHuskPod only reads r.Scheme() (for the owner ref we overwrite) and the
+	// opts, so a zero reconciler is sufficient to build the spec. A synthetic pool
+	// carrier supplies GenerateName/namespace; ownership and labels are overwritten
+	// below.
+	r := &SandboxPoolReconciler{}
+	carrier := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
+	pod := r.buildHuskPod(carrier, &v1alpha1.SandboxTemplate{}, opts)
+
+	// Rewrite identity: owned by the SandboxFork (GC with it), labeled as a fork
+	// child (never a warm-pool slot), deterministic name so re-reconcile is
+	// idempotent.
+	pod.OwnerReferences = nil
+	pod.GenerateName = ""
+	pod.Name = childName
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	delete(pod.Labels, huskPoolLabel)
+	pod.Labels[huskLabel] = "true"
+	pod.Labels[huskForkLabel] = fork.Name
+	_ = controllerutil.SetControllerReference(fork, pod, scheme)
 	return pod
 }
 

@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -44,11 +45,55 @@ func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1alpha1.SandboxPool, 
 	return r.buildHuskPod(pool, template, opts)
 }
 
+// BuildForkChildPodForTest exposes buildForkChildPod to the external
+// controller_test package so the fork child pod spec can be unit-tested.
+func BuildForkChildPodForTest(fork *v1alpha1.SandboxFork, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	return buildForkChildPod(fork, childName, opts, scheme)
+}
+
+// SetForkSnapshotForTest installs the fork-snapshot seam (tests only).
+func (r *SandboxForkReconciler) SetForkSnapshotForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+	r.forkSnapshot = fn
+}
+
+// SetActivateForTest installs the activate seam on the fork reconciler (tests only).
+func (r *SandboxForkReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
+	r.activate = fn
+}
+
+// SetForkSnapshotRemoverForTest installs the remove seam (tests only).
+func (r *SandboxForkReconciler) SetForkSnapshotRemoverForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+	r.removeForkSnapshot = fn
+}
+
+// SkipForkLabel restricts the fork reconciler to forks WITHOUT the given label;
+// only used by the test harness so a raw and a husk fork reconciler can share one
+// manager.
+func (r *SandboxForkReconciler) SkipForkLabel(label string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[label] == ""
+	})
+	r.controllerName = "sandboxfork-raw"
+}
+
+// OnlyForkLabel restricts the fork reconciler to forks WITH the given label.
+func (r *SandboxForkReconciler) OnlyForkLabel(label string) {
+	r.eventFilter = predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[label] != ""
+	})
+	r.controllerName = "sandboxfork-husk"
+}
+
 // HuskTestClaimLabel marks a claim as owned by the husk-activation tests. The
 // suite registers the raw claim reconciler to SKIP these (so it does not fight a
 // manually driven husk reconciler over the same object) and a husk-enabled
 // reconciler to handle ONLY these.
 const HuskTestClaimLabel = "mitos.run/husk-test"
+
+// HuskForkTestLabel marks a SandboxFork as owned by the husk-fork tests. The
+// suite registers the raw fork reconciler to SKIP these and a husk-enabled fork
+// reconciler to handle ONLY these.
+const HuskForkTestLabel = "mitos.run/husk-fork-test"
 
 // SkipLabel restricts this reconciler to claims WITHOUT the given label; only
 // used by the test harness so a raw and a husk reconciler can share one manager.

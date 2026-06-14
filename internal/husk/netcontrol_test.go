@@ -105,6 +105,9 @@ func activateClient(t *testing.T, addr string, clientConf *tls.Config, req Activ
 		return ActivateResult{}, err
 	}
 	defer conn.Close()
+	if err := WriteControlOp(conn, OpActivate); err != nil {
+		return ActivateResult{}, err
+	}
 	if err := WriteRequest(conn, req); err != nil {
 		return ActivateResult{}, err
 	}
@@ -142,6 +145,44 @@ func TestServeTLSControllerRoundTrip(t *testing.T) {
 	}
 	if n.gotReq[0].Secrets["API_KEY"] != "s3cr3t-value" {
 		t.Fatalf("stub did not receive the secret")
+	}
+}
+
+func TestServeTLSDispatchesForkSnapshot(t *testing.T) {
+	// A serving stub holding an ACTIVE fake VM answers a fork-snapshot op over the
+	// mTLS control channel: it pauses, snapshots, resumes, and replies OK.
+	p := newNetTestPKI(t)
+	f := &fakeVMM{}
+	stub := &Stub{state: StateActive, vm: f}
+
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	dir := t.TempDir()
+	dialer := &tls.Dialer{Config: p.clientConf(t, p.ctrlCert)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := WriteControlOp(conn, OpForkSnapshot); err != nil {
+		t.Fatalf("WriteControlOp: %v", err)
+	}
+	if err := WriteForkSnapshotRequest(conn, ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir}); err != nil {
+		t.Fatalf("WriteForkSnapshotRequest: %v", err)
+	}
+	res, err := ReadForkSnapshotResult(conn)
+	if err != nil {
+		t.Fatalf("ReadForkSnapshotResult: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("fork-snapshot op not OK: %+v", res)
+	}
+	if !f.paused {
+		t.Fatalf("source VM not paused via the control channel")
 	}
 }
 

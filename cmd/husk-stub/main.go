@@ -160,6 +160,8 @@ func run() error {
 		vcpus           = flag.Int("vcpus", 1, "guest vCPU count")
 		memMiB          = flag.Int("mem-mib", 512, "guest memory in MiB")
 		activate        = flag.Bool("activate", false, "act as a control CLIENT: connect to --control-socket (or --control-addr over mTLS), send one activate request for --snapshot-dir, print the result, and exit (spawns no VMM)")
+		forkSnapshot    = flag.Bool("fork-snapshot", false, "act as a control CLIENT: connect to --control-addr over mTLS, send one fork-snapshot op for --fork-id writing into the source pod's forks dir, print the result, and exit (spawns no VMM)")
+		forkID          = flag.String("fork-id", "", "fork-snapshot client mode: the node-local fork id (the forks dir leaf the source stub writes the snapshot under)")
 		controlAddr     = flag.String("control-addr", "", "activate client mode: TCP address (host:port) of a husk pod's mTLS NETWORK control to activate over; uses ActivateHuskPod and requires --tls-cert/--tls-key/--tls-ca. Mutually exclusive with --control-socket")
 		snapshotDir     = flag.String("snapshot-dir", "", "activate client mode: the template snapshot directory (expects snapshot/{mem,vmstate} layout) to activate")
 		secretFile      = flag.String("secret-file", "", "activate client mode: path to a KEY=VALUE secret file (one per line) delivered to the guest; values are never logged")
@@ -171,6 +173,7 @@ func run() error {
 		rootfsCoWDir    = flag.String("rootfs-cow-dir", "", "directory on the SAME node filesystem as the template rootfs where this activation's copy-on-write rootfs clone is written (reflink where supported, full copy otherwise). Empty keeps the prior behavior of writing the shared template rootfs in place. A content address, not a secret")
 		templateRootfs  = flag.String("template-rootfs", "", "host path of the template rootfs.ext4 to clone per activation. Empty (with --rootfs-cow-dir) disables the per-activation clone")
 		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
+		forksDir        = flag.String("forks-dir", "", "directory the node forks dir is mounted at, where a fork-snapshot op writes <forks-dir>/<fork-id>/{mem,vmstate}. When set, the serving stub confines fork-snapshot and remove-fork-snapshot writes to within it (fail-closed: a request naming a path outside it is refused). Empty leaves the prior behavior (the request's snapshot dir is used as-is). A node-local path, not a secret")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -207,6 +210,49 @@ func run() error {
 			return runNetworkActivateClient(*controlAddr, *snapshotDir, *expectedDigest, *tlsCert, *tlsKey, *tlsCA, envFlag.orNil(), secrets, token)
 		}
 		return runActivateClient(*controlSocket, *snapshotDir, *expectedDigest, envFlag.orNil(), secrets, token)
+	}
+
+	if *forkSnapshot {
+		if *controlAddr == "" {
+			return fmt.Errorf("--fork-snapshot requires --control-addr")
+		}
+		if *forkID == "" {
+			return fmt.Errorf("--fork-snapshot requires --fork-id")
+		}
+		if *tlsCert == "" || *tlsKey == "" || *tlsCA == "" {
+			return fmt.Errorf("--fork-snapshot requires --tls-cert, --tls-key, and --tls-ca")
+		}
+		certPEM, err := os.ReadFile(*tlsCert)
+		if err != nil {
+			return fmt.Errorf("read --tls-cert: %w", err)
+		}
+		keyPEM, err := os.ReadFile(*tlsKey)
+		if err != nil {
+			return fmt.Errorf("read --tls-key: %w", err)
+		}
+		caPEM, err := os.ReadFile(*tlsCA)
+		if err != nil {
+			return fmt.Errorf("read --tls-ca: %w", err)
+		}
+		tlsConf, err := pki.ClientTLSConfig(certPEM, keyPEM, caPEM)
+		if err != nil {
+			return fmt.Errorf("build controller client TLS config: %w", err)
+		}
+		res, err := controller.ForkSnapshotOnHusk(context.Background(), *controlAddr, tlsConf, husk.ForkSnapshotRequest{
+			ForkID:      *forkID,
+			SnapshotDir: filepath.Join("/var/lib/mitos/forks", *forkID),
+		})
+		if err != nil {
+			return fmt.Errorf("fork-snapshot over network control: %w", err)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		if err := enc.Encode(res); err != nil {
+			return fmt.Errorf("encode fork-snapshot result: %w", err)
+		}
+		if !res.OK {
+			return fmt.Errorf("fork-snapshot failed: %s", res.Error)
+		}
+		return nil
 	}
 
 	if *workdir == "" {
@@ -322,6 +368,9 @@ func run() error {
 		// shared-rootfs behavior.
 		RootfsTemplatePath: *templateRootfs,
 		RootfsCoWDir:       *rootfsCoWDir,
+		// The node forks dir this pod mounts: the serving stub confines
+		// fork-snapshot / remove-fork-snapshot writes to within it (fail-closed).
+		ForksDir: *forksDir,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")
