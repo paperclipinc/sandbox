@@ -46,12 +46,20 @@ type plainStore struct{ *cas.Store }
 var _ ChunkStore = plainStore{}
 
 // EncryptedStore is a content-addressed chunk store whose chunks and manifests
-// are encrypted at rest with AES-256-GCM under a per-workspace data-encryption
-// key (DEK). It mirrors the envelope pattern in internal/fork: the DEK is a
-// secret VALUE supplied by the KMS-backed key custody path (the controller wraps
-// a per-workspace DEK with the KEK; the node unwraps it via internal/kms and
-// hands the plaintext DEK here), and it is NEVER logged, never placed in an
-// error, and never written to disk.
+// are encrypted at rest with AES-256-GCM under a data-encryption key (DEK). The
+// DEK scope is per-template (keyed by templateID, see
+// internal/controller/enc_key_secret.go), NOT per-workspace: a single template's
+// workspaces share the template's DEK. The nonce scheme is digest-keyed and so
+// stays safe under a shared key (each distinct plaintext chunk gets a distinct,
+// deterministic nonce; see nonceFor), but isolation granularity is the template,
+// not the individual workspace. Per-workspace crypto-shred is a future option if
+// finer-grained key destruction is wanted.
+//
+// It mirrors the envelope pattern in internal/fork: the DEK is a secret VALUE
+// supplied by the KMS-backed key custody path (the controller wraps a per-template
+// DEK with the KEK; the node unwraps it via internal/kms and hands the plaintext
+// DEK here), and it is NEVER logged, never placed in an error, and never written
+// to disk.
 //
 // At-rest layout mirrors *cas.Store so dedup is preserved by plaintext digest:
 //

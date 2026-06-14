@@ -66,10 +66,13 @@ type WorkspaceStore struct {
 	// +optional
 	S3 *WorkspaceS3Store `json:"s3,omitempty"`
 
-	// EncryptionKeyRef names a Secret key holding the wrapped per-workspace
+	// EncryptionKeyRef names a Secret key holding the wrapped at-rest
 	// data-encryption key (DEK). When set, every revision chunk and manifest is
 	// encrypted at rest with AES-256-GCM under that DEK before it reaches the
-	// store (node CAS or S3), and decrypted on hydrate. The DEK is a secret VALUE
+	// store (node CAS or S3), and decrypted on hydrate. The DEK the controller
+	// generates is keyed per-template (by templateID), so a template's workspaces
+	// share its DEK; per-workspace crypto-shred is a future option if finer
+	// granularity is wanted. The DEK is a secret VALUE
 	// delivered wrapped (envelope encryption via internal/kms): it is unwrapped
 	// only in node memory for the duration of a hydrate/dehydrate and is never
 	// logged, never placed in an error or condition, and never written to a host

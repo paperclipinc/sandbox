@@ -418,10 +418,15 @@ PROVEN:
   `clusterbackend.go`), the Python `Workspace` handle plus
   `terminate(outputs=..., checkpoint=...)` (`sdk/python/mitos/workspace.py`), and
   the TypeScript parity (`sdk/typescript/src/workspace.ts`), each unit-tested.
-- Per-workspace encryption at rest (#31): when `spec.store.encryptionKeyRef` is
+- Workspace store encryption at rest (#31): when `spec.store.encryptionKeyRef` is
   set, every revision chunk and manifest is encrypted with AES-256-GCM under a
-  per-workspace DEK (the same KMS envelope custody as templates; the DEK is
-  unwrapped only in node memory and never logged). The manifest digest stays
+  data-encryption key (DEK). The DEK the controller generates is keyed
+  per-template (by templateID, `internal/controller/enc_key_secret.go`), so a
+  template's workspaces share its DEK; the nonce scheme is digest-keyed and safe
+  under a shared key, but isolation granularity is the template. Per-workspace
+  crypto-shred is a future option if finer granularity is wanted. It uses the same
+  KMS envelope custody as templates; the DEK is unwrapped only in node memory and
+  never logged. The manifest digest stays
   computed over plaintext, so an encrypted dehydrate yields the SAME content
   identifier as a plaintext dehydrate (dedup preserved) and the round trip is
   byte-identical with chunks ciphertext at rest; a wrong key fails closed. All
