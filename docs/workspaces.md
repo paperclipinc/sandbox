@@ -227,6 +227,61 @@ await ws.revert("proj-x-1");
 
 CLI: `mitos ws create|ls|log|diff|fork|revert|rm|bind` (see `docs/cli.md`).
 
+## Resumable head: pairing the workspace with a VM memory snapshot
+
+A plain terminate dehydrates `/workspace` into a content-only revision. A
+`terminate(checkpoint=True)` additionally pairs the new revision with the
+sandbox's VM MEMORY snapshot, so the workspace head becomes RESUMABLE: a later
+claim bound to the workspace resumes MID-EXECUTION from the captured VM state
+(memory image + filesystem state, restored together) instead of a cold start.
+This is the "sleep / wake" of the reversible sleep-consolidation demo
+(`examples/sleep-consolidation/`).
+
+The pairing is two refs on the committed `WorkspaceRevision`:
+
+- `memorySnapshotRef`: the snapshot pointer (a content address / snapshot id,
+  never the memory bytes);
+- `memorySnapshotPrincipal`: the principal the image is BOUND to (the capturing
+  claim's `ServiceAccount`).
+
+On a new claim's activation the controller resumes the head's memory image ONLY
+when (a) the head pairs a snapshot, (b) the snapshot still exists (a GC'd
+snapshot degrades to a content-only hydrate), AND (c) the activating claim's
+principal MATCHES `memorySnapshotPrincipal`. A principal MISMATCH is REFUSED,
+fail-closed (an error, never a silent cold-start downgrade): a memory image
+carries secrets-in-RAM and is never served across principals. A resume reseeds
+the guest CRNG and steps the wall clock exactly like a fork (see
+`docs/fork-correctness.md`); the principal binding is a threat-model row (see
+`docs/threat-model.md`).
+
+The disk+memory pairing logic, the resumable status, and the principal-binding
+refusal are proven END TO END in envtest behind the checkpoint/resume/exists
+seams (`internal/controller/resumable_envtest_test.go`,
+`TestResumableHeadFromMemorySnapshot`, including the cross-principal `sa-b`
+intruder case). The seams are bound to the husk live-VM snapshot path behind the
+controller `--workspace-memory-snapshots` flag
+(`internal/controller/workspace_memory_snapshot.go`); off by default a
+checkpoint-on-terminate fails loud rather than producing a falsely-resumable
+revision.
+
+CLUSTER-GATED: the real bare-metal VM-memory image (a live Firecracker memory
+snapshot resuming mid-execution) needs a KVM-capable node, the same gate as the
+husk e2e (`.github/workflows/cluster-e2e.yaml`). Cluster-verify:
+
+```bash
+# Controller deployed with the flag:
+kubectl -n mitos get deploy mitos-controller -o yaml | grep workspace-memory-snapshots
+# Run the demo on the KVM cluster, then confirm the head is resumable:
+examples/sleep-consolidation/run.sh mitos-e2e ~/.kube/kvm-cluster
+mitos -n mitos-e2e ws log sleep-demo   # head row RESUMABLE = true
+```
+
+Without the gate the filesystem state still round-trips (hydrate/dehydrate is
+KVM-proven), so the head is content-only and a wake restores disk state but not
+the live memory image. Timing for the sleep (checkpoint+dehydrate) and wake
+(resume+hydrate) phases is reproducible from `bench/sleep-consolidation.sh`; no
+number is published until it is recorded from that script (no-unverified-claims).
+
 ## Proven vs open
 
 PROVEN:
@@ -264,8 +319,12 @@ OPEN (later W4 slices):
 - A real external rendezvous server and its credentials (a referenced Secret,
   principal-bound); this slice proves the push against a local bare repo with no
   auth. There is no auto-merge by design: git is the merge layer.
-- The CloudEvents revision change feed and the memory-snapshot pairing that
-  produces a resumable head from a real checkpoint (slice 4).
+- The CloudEvents revision change feed (later W4 slice).
+- The memory-snapshot pairing that produces a resumable head is DONE: the
+  disk+memory pairing, the resumable status, and the principal-binding refusal are
+  envtest-proven and wired behind `--workspace-memory-snapshots` (see "Resumable
+  head" above). OPEN tail: the real bare-metal live-VM memory image resuming
+  mid-execution, which is cluster-gated on a KVM node.
 - A streaming (non-buffered) tar for very large workspaces (this slice caps and
   buffers; see `vsock.MaxTarBytes`).
 - The production controller-to-guest transport wiring for the default

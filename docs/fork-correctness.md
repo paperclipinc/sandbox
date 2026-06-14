@@ -71,6 +71,30 @@ source memory state than an earlier child and the N children would not share one
 fork point. Verified by `internal/controller`
 `TestHuskForkSnapshotTakenExactlyOnce`.
 
+### Workspace resume from a memory snapshot
+
+A resumable workspace head (W4) restores a captured VM MEMORY image into a fresh
+sandbox on activation (the "wake" of the sleep-consolidation demo). A resume is a
+restore-from-snapshot exactly like a fork, so it inherits the SAME
+fork-correctness hazards and the SAME mitigations: the resumed VM activates
+through the standard `Activate` path and runs the RNG-reseed + clock-step
+`NotifyForked` handshake, so the resumed guest reseeds its kernel CRNG with fresh
+host entropy and steps its wall clock rather than waking with the captured
+snapshot's stale CRNG/clock state. A resumed VM is therefore NOT a CRNG/clock
+clone of the sandbox that captured it; it gets the same per-restore reseed an
+engine fork or a husk fork child gets (sections 1 and 2). The Python-level PRNG
+caveat in section 1 applies to a resumed sandbox identically (a long-lived
+interpreter that seeded its PRNG before the checkpoint keeps that PRNG state
+across the resume; reseed in-process after wake if it matters).
+
+Disk/memory consistency: the resume pairs the memory image with the SAME
+workspace filesystem state it was captured against (the revision's
+`contentManifest`, hydrated alongside the memory restore), so the resumed guest
+memory matches the disk it sees, the same disk-half invariant the husk fork child
+maintains above. The memory image is principal-bound and is never served across
+principals (`docs/threat-model.md`); that is a security property, not a
+correctness one, but it is enforced fail-closed BEFORE any restore runs.
+
 ## 1. RNG and entropy after restore
 
 Every VM restored from the same snapshot wakes up with byte-identical kernel
