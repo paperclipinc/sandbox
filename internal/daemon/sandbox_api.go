@@ -42,6 +42,20 @@ type SandboxAPI struct {
 	// allowTokenless permits requests for sandboxes that have NO registered
 	// token. Opt-in: see AllowTokenless.
 	allowTokenless bool
+	// singleSandbox, when set, switches the API into single-sandbox mode: it
+	// serves exactly ONE sandbox, registered locally under singleSandboxID, and
+	// the auth gate (requireBearer, ptyAuth) validates the presented bearer
+	// against that one sandbox's token regardless of the request's "sandbox" id,
+	// then routes the request to singleSandboxID. This is used ONLY by the
+	// husk-stub, whose OnActivated hook registers its single VM under a fixed
+	// local id while the SDK addresses the in-pod API with the claim's
+	// status.sandboxID (the husk pod name), which never equals that local id.
+	// forkd NEVER sets it, so forkd's multi-sandbox per-id token lookup is
+	// byte-identical: a token for sandbox A still cannot authorize sandbox B.
+	// Opt-in: see SetSingleSandbox.
+	singleSandbox bool
+	// singleSandboxID is the one local sandbox id served in single-sandbox mode.
+	singleSandboxID string
 	// auditor records a structured event after each exec/file op. Defaults to
 	// NopAuditor (auditing off); set via SetAuditor. It only ever sees safe
 	// summaries (command, path, byte count): never file content or secrets.
@@ -166,6 +180,39 @@ func (api *SandboxAPI) LastActivity(sandboxID string) (time.Time, bool) {
 // Must be called before the API serves requests; the flag is not synchronized.
 func (api *SandboxAPI) AllowTokenless() {
 	api.allowTokenless = true
+}
+
+// SetSingleSandbox switches the API into single-sandbox mode for the husk-stub,
+// which serves exactly ONE VM per pod. In this mode the auth gate (requireBearer
+// and ptyAuth) validates the presented bearer against the single sandbox's
+// registered token regardless of the request's "sandbox" id, then routes the
+// request to id. This is required because the husk-stub registers its one VM
+// under a fixed local id while the SDK addresses the in-pod API with the claim's
+// status.sandboxID (the husk pod name), which never equals that local id; a
+// strict per-id lookup would 401 every SDK request.
+//
+// The token gate is NOT weakened: a wrong or absent bearer is still rejected
+// (401), the comparison stays constant-time, and a sandbox with no registered
+// token still fails closed (unless AllowTokenless). forkd never calls this, so
+// its multi-sandbox per-id token lookup is unchanged: a token for sandbox A
+// cannot authorize sandbox B.
+//
+// Must be called before the API serves requests; the fields are not synchronized.
+func (api *SandboxAPI) SetSingleSandbox(id string) {
+	api.singleSandbox = true
+	api.singleSandboxID = id
+}
+
+// resolveSandboxID maps the request's sandbox id to the id the API operates on.
+// In single-sandbox mode every request resolves to the one served sandbox id,
+// so an SDK that sends the husk pod name still reaches the single VM. In the
+// default (forkd) multi-sandbox mode it returns the request id unchanged, so the
+// per-id token lookup and agent routing are exactly as before.
+func (api *SandboxAPI) resolveSandboxID(requested string) string {
+	if api.singleSandbox {
+		return api.singleSandboxID
+	}
+	return requested
 }
 
 // RegisterToken registers the bearer token required on every HTTP request
@@ -360,8 +407,15 @@ func (api *SandboxAPI) requireBearer(next http.Handler) http.Handler {
 			return
 		}
 
+		// In single-sandbox mode (husk-stub) the request id is whatever the SDK
+		// sent (the husk pod name); resolve it to the one served sandbox id so
+		// the token lookup hits the single registered token. In forkd's default
+		// multi-sandbox mode this is the request id unchanged, so the per-id gate
+		// is byte-identical.
+		sandboxID := api.resolveSandboxID(peek.Sandbox)
+
 		api.mu.RLock()
-		token, hasToken := api.tokens[peek.Sandbox]
+		token, hasToken := api.tokens[sandboxID]
 		api.mu.RUnlock()
 
 		if !hasToken {
@@ -383,8 +437,49 @@ func (api *SandboxAPI) requireBearer(next http.Handler) http.Handler {
 			writeErr(w, "unauthorized: invalid token", 401)
 			return
 		}
+
+		// Single-sandbox mode: the downstream handlers route the agent and stream
+		// by the body's "sandbox" field, but the SDK sent the pod name, which is
+		// not the local id the VM is registered under. Rewrite the body so the
+		// handlers reach the single VM. This rewrite ONLY happens in single-
+		// sandbox mode; in forkd's multi-sandbox mode the body is untouched.
+		if api.singleSandbox && peek.Sandbox != sandboxID {
+			if rewritten, err := rewriteSandboxField(body, sandboxID); err == nil {
+				body = rewritten
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				r.ContentLength = int64(len(body))
+			} else {
+				writeErr(w, "invalid json", 400)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rewriteSandboxField returns body with its top-level "sandbox" field set to
+// id, preserving every other field. Used only in single-sandbox mode to route
+// the SDK's request (which carries the husk pod name) to the one local sandbox
+// id the VM is registered under. The body was already buffered and size-bounded
+// by requireBearer before this is called.
+func rewriteSandboxField(body []byte, id string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, fmt.Errorf("rewrite sandbox field: %w", err)
+	}
+	idJSON, err := json.Marshal(id)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite sandbox field: %w", err)
+	}
+	if m == nil {
+		m = make(map[string]json.RawMessage, 1)
+	}
+	m["sandbox"] = idJSON
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite sandbox field: %w", err)
+	}
+	return out, nil
 }
 
 type execRequest struct {

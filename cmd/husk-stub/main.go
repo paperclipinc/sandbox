@@ -277,6 +277,16 @@ func run() error {
 	// logged. The vsock UDS dir is the per-VM workdir (the agent UDS lives there);
 	// EnableUnixFallback is deliberately NOT set, matching forkd.
 	sandboxAPI := daemon.NewSandboxAPI(*workdir)
+	// Single-sandbox mode: a husk pod serves exactly ONE VM, registered locally
+	// under huskSandboxID, but the SDK addresses this in-pod API with the claim's
+	// status.sandboxID (the husk pod name), which never equals huskSandboxID. In
+	// single-sandbox mode the per-sandbox bearer token is the auth gate: every
+	// request is validated against the one registered token regardless of its
+	// "sandbox" id and routed to the single VM, fixing the cluster-e2e 401 while
+	// keeping forkd's multi-sandbox per-id gate untouched (forkd never sets this).
+	// A wrong/absent token is still rejected and an untokened activate stays
+	// fail-closed.
+	sandboxAPI.SetSingleSandbox(huskSandboxID)
 	onActivated := makeSandboxServer(ctx, sandboxAPI, *sandboxListen)
 
 	// Snapshot verify gate (fail-closed): detect this node's environment so the
