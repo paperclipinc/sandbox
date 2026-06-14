@@ -10,3 +10,15 @@ metadata:
     # the production pod-native path. They are scheduled by the controller, not
     # by the runner. This namespace is the blast-radius boundary for the e2e:
     # the runner's RBAC can only touch claims/pods/exec HERE.
+    #
+    # PSA enforce: privileged. Husk pods REQUIRE hostPath volumes (the read-only
+    # snapshot, kernel, and template, plus the per-activation CoW dir), which PSA
+    # baseline and restricted both forbid. This matches the production husk
+    # namespace (the cluster `default` ns is enforce: privileged). The isolation
+    # boundary is NOT the namespace PSA: it is the unprivileged husk POD (drop ALL
+    # caps, seccomp RuntimeDefault, no privilege) plus the Firecracker microVM.
+    # An unlabeled namespace inherits the cluster default (baseline here), which
+    # rejects the husk hostPaths, so the label is required.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
