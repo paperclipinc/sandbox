@@ -194,3 +194,88 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 		t.Fatalf("bearer token value leaked into stub logs:\n%s", logged)
 	}
 }
+
+// TestActivateSingleSandboxAcceptsSDKPodID is the regression test for the
+// cluster-e2e auth bug: the husk-stub serves ONE sandbox registered under a
+// fixed local id, but the SDK addresses the in-pod API with the claim's
+// status.sandboxID (the husk pod name), which never equals that local id. With
+// single-sandbox mode set (as cmd/husk-stub does), the per-sandbox bearer token
+// authorizes an exec whose request body carries the POD NAME, the wrong/absent
+// token is still rejected (401), and the token value never leaks to the log.
+func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
+	const localID = "husk"
+	const podID = "mitos-py-husk-5gwmh" // the id the SDK sends in cluster mode
+	const token = "per-sandbox-bearer-CANARY-do-not-log"
+
+	dir, err := os.MkdirTemp("/tmp", "husk-sb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "vsock.sock")
+	fakeVsockAgent(t, sockPath)
+
+	api := daemon.NewSandboxAPI(dir)
+	// Single-sandbox mode: gate on the one registered token regardless of the
+	// request's sandbox id, exactly as cmd/husk-stub configures it.
+	api.SetSingleSandbox(localID)
+	ts := httptest.NewServer(api.Handler())
+	t.Cleanup(ts.Close)
+
+	logged := captureStderr(t, func() {
+		onActivated := func(vsockPath, tok string) error {
+			if err := api.RegisterSandbox(localID, vsockPath); err != nil {
+				return err
+			}
+			api.RegisterToken(localID, tok)
+			return nil
+		}
+
+		vm := &pathVMM{vsockPath: sockPath}
+		stub := New(firecracker.VMConfig{ID: localID}, Options{
+			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
+			Ready:       func(string, time.Duration) error { return nil },
+			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Verify:      verifyOK,
+			OnActivated: onActivated,
+		})
+
+		if err := stub.Prepare(context.Background()); err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		res, err := stub.Activate(context.Background(), ActivateRequest{
+			SnapshotDir: "/data/templates/tmpl/snapshot",
+			Token:       token,
+		})
+		if err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		if !res.OK {
+			t.Fatalf("activate not OK: %s", res.Error)
+		}
+
+		// The SDK sends the POD NAME, not the local id; the correct token
+		// authorizes and the exec reaches the single VM's guest agent.
+		code, body := postHuskExec(t, ts.URL, podID, token)
+		if code != 200 {
+			t.Fatalf("exec with pod id + correct token: status = %d, body = %s, want 200", code, body)
+		}
+		if !strings.Contains(body, "husk-exec-ok") {
+			t.Fatalf("exec did not reach the guest agent: %s", body)
+		}
+
+		// Wrong and absent tokens are still rejected, even with the pod id.
+		code, _ = postHuskExec(t, ts.URL, podID, "")
+		if code != 401 {
+			t.Fatalf("exec with pod id + no token: status = %d, want 401", code)
+		}
+		code, _ = postHuskExec(t, ts.URL, podID, "wrong-token")
+		if code != 401 {
+			t.Fatalf("exec with pod id + wrong token: status = %d, want 401", code)
+		}
+	})
+
+	if strings.Contains(logged, token) {
+		t.Fatalf("bearer token value leaked into stub logs:\n%s", logged)
+	}
+}

@@ -28,11 +28,18 @@ const ptySubprotocol = "mitos.pty.v1"
 //
 // Token values are never logged. Returns the resolved sandbox id on success.
 func (api *SandboxAPI) ptyAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
-	sandbox := r.URL.Query().Get("sandbox")
-	if sandbox == "" {
+	requested := r.URL.Query().Get("sandbox")
+	if requested == "" {
 		writeErr(w, "missing sandbox query parameter", http.StatusBadRequest)
 		return "", false
 	}
+
+	// In single-sandbox mode (husk-stub) the ?sandbox= id is whatever the SDK
+	// sent (the husk pod name); resolve it to the one served sandbox id so the
+	// token lookup hits the single registered token and the returned id routes
+	// the PTY to the single VM. In forkd's default multi-sandbox mode this is the
+	// request id unchanged, so the per-id gate is byte-identical.
+	sandbox := api.resolveSandboxID(requested)
 
 	api.mu.RLock()
 	token, hasToken := api.tokens[sandbox]
