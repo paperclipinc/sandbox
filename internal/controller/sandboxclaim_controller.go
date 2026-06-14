@@ -396,18 +396,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Mark as restoring
-	claim.Status.Phase = v1alpha1.SandboxRestoring
-	if err := r.Status().Update(ctx, &claim); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Husk-pod activation path (issue #18, slice 2). When enabled, the claim
 	// activates a dormant warm husk pod in place over the mTLS control channel
 	// instead of SelectNode+forkOnNode. The default (flag off) leaves the
-	// raw-forkd path below unchanged.
+	// raw-forkd path below unchanged. The husk path stamps Restoring itself only
+	// once it has actually selected a dormant pod to activate: a claim that cannot
+	// place (NoHuskPod) must stay Pending and settle, not cycle
+	// Pending -> Restoring -> Pending on every reconcile. That cycle is a hot loop
+	// (each write re-triggers the claim's own watch) whose continuous full-status
+	// writes from a stale read clobber an externally applied status (the husk e2e's
+	// merge-patch Ready stamp), so the claim never settles.
 	if r.EnableHuskPods {
 		return r.reconcileHuskClaim(ctx, &claim, &pool, &template)
+	}
+
+	// Raw-forkd path: mark as restoring before attempting placement.
+	claim.Status.Phase = v1alpha1.SandboxRestoring
+	if err := r.Status().Update(ctx, &claim); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Pick a node with a ready snapshot
@@ -612,19 +618,44 @@ func (r *SandboxClaimReconciler) reconcileHuskClaim(ctx context.Context, claim *
 	}
 	if pod == nil {
 		// No warm husk slot: pend and retry. The pool reconciler is expected to
-		// scale the warm pool up; this is a transient placement precondition.
+		// scale the warm pool up; this is a transient placement precondition. The
+		// status write is IDEMPOTENT: a claim already Pending with the same
+		// NoHuskPod condition is left untouched, so a re-reconcile of an unplaceable
+		// claim does not bump the object and re-trigger its own watch (a hot loop
+		// whose stale-read full-status writes would clobber an externally applied
+		// status). recordClaimPending is the pending-gauge signal and runs each
+		// pass regardless.
 		logger.Info("no dormant husk pod available, pending", "pool", pool.Name)
-		claim.Status.Phase = v1alpha1.SandboxPending
 		recordClaimPending()
-		setCondition(&claim.Status.Conditions, metav1.Condition{
+		changed := claim.Status.Phase != v1alpha1.SandboxPending ||
+			claim.Status.Endpoint != "" || claim.Status.Node != "" || claim.Status.SandboxID != ""
+		claim.Status.Phase = v1alpha1.SandboxPending
+		claim.Status.Endpoint = ""
+		claim.Status.Node = ""
+		claim.Status.SandboxID = ""
+		if setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.NewTime(r.now()),
 			Reason:             "NoHuskPod",
 			Message:            "no warm husk pod is ready in the pool; the claim will retry once the pool scales a dormant slot up",
-		})
-		_ = r.Status().Update(ctx, claim)
+		}) {
+			changed = true
+		}
+		if changed {
+			_ = r.Status().Update(ctx, claim)
+		}
 		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+
+	// A dormant pod is available: mark the claim Restoring before activating it.
+	// This is stamped here (not before pod selection) so a claim that cannot place
+	// stays Pending and settles, never cycling Pending -> Restoring -> Pending.
+	if claim.Status.Phase != v1alpha1.SandboxRestoring {
+		claim.Status.Phase = v1alpha1.SandboxRestoring
+		if err := r.Status().Update(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Resolve env + secrets (same path as the forkd fork). Secret VALUES live

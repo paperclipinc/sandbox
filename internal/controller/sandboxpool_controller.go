@@ -528,14 +528,40 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func setCondition(conditions *[]metav1.Condition, condition metav1.Condition) {
+// setCondition upserts a condition by Type, preserving LastTransitionTime when
+// the condition's Status has not changed (the same semantics as apimachinery's
+// meta.SetStatusCondition). This is load-bearing: a reconcile that re-asserts an
+// unchanged condition (a Pending claim re-pended with the same reason every pass)
+// must NOT stamp a fresh LastTransitionTime, because a fresh timestamp makes the
+// status write a real change, which re-triggers the object's own watch, which
+// re-reconciles, which writes again: a self-sustaining hot loop. Worse, that loop
+// of full Status().Update writes from a stale read clobbers any externally
+// applied status (for example the husk e2e's merge-patch Ready stamp), so the
+// claim never settles. Preserving the timestamp on an unchanged Status makes the
+// re-assert a no-op write, so the loop terminates and external stamps survive.
+func setCondition(conditions *[]metav1.Condition, condition metav1.Condition) bool {
 	for i, c := range *conditions {
 		if c.Type == condition.Type {
+			// Carry the existing transition time forward unless the Status flips,
+			// so an unchanged condition does not churn the object.
+			if c.Status == condition.Status && !c.LastTransitionTime.IsZero() {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
+			// Report whether anything meaningful changed: an identical re-assert
+			// (same Status, Reason, Message, and carried-forward transition time) is
+			// a no-op, so the caller can skip a status write that would otherwise
+			// re-trigger the object's own watch.
+			unchanged := c.Status == condition.Status &&
+				c.Reason == condition.Reason &&
+				c.Message == condition.Message &&
+				c.ObservedGeneration == condition.ObservedGeneration &&
+				c.LastTransitionTime.Equal(&condition.LastTransitionTime)
 			(*conditions)[i] = condition
-			return
+			return !unchanged
 		}
 	}
 	*conditions = append(*conditions, condition)
+	return true
 }
 
 func conditionStatus(ok bool) metav1.ConditionStatus {
