@@ -35,6 +35,25 @@ sb.terminate()
 
 `c.sandbox("python")` lazily creates a default pool `mitos-default-python` (a SandboxTemplate plus a SandboxPool) if you have none; pass `pool="my-pool"` to use an existing pool, which never creates anything. Errors raise `AgentRunError(code, cause, remediation)`.
 
+Beyond `exec`, the same `Sandbox` gives agents a stateful code interpreter, streaming output, and an interactive terminal:
+
+```python
+# Streaming exec: callbacks fire per chunk; the ExecResult still carries the aggregate.
+sb.exec("pip install rich", on_stdout=lambda b: print(b.decode(), end=""))
+
+# Stateful code interpreter: state persists across run_code calls for the sandbox lifetime.
+ex = sb.run_code("import pandas as pd; df = pd.DataFrame({'x':[1,2,3]}); df.describe()")
+print(ex.text)            # the REPL's last value, rendered
+for r in ex.results:      # rich multi-MIME display artifacts (tables, images, ...)
+    print(r.mime)
+# run_code returns a KernelUnavailable error until the kernel ships in the husk base image.
+
+# Detach a long-running process and keep working.
+sb.exec_background("python train.py > /workspace/train.log 2>&1")
+```
+
+The async client (`AsyncAgentRun`) mirrors these for the hot paths and adds `create_pty()` for an interactive terminal over WebSocket. The TypeScript SDK (`@mitos/sdk`) exposes the same surface.
+
 ## Why
 
 Agent harnesses need fast, isolated environments where agents can read and write files, install packages, and run untrusted code. Every existing option forces a trade you should not have to make: speed without ownership, isolation without forking, Kubernetes-nativeness without warm starts, durability as someone else's proprietary cloud.
@@ -63,7 +82,8 @@ Two ways to run it:
 **Kubernetes-native**
 - Declarative CRDs: `SandboxPool`, `SandboxClaim`, `SandboxFork`
 - Templates with volume topology and fork behavior
-- Capacity-aware scheduling ([#17](https://github.com/paperclipinc/mitos/issues/17)): CoW bin-packing onto warm snapshot-holders, an overcommit budget checked against CoW-aware memory accounting, and backpressure that pends claims with a typed `NoCapacity` condition rather than OOMing a node (see [docs/scheduling.md](docs/scheduling.md))
+- Capacity-aware scheduling ([#17](https://github.com/paperclipinc/mitos/issues/17)): CoW bin-packing onto warm snapshot-holders, an overcommit budget checked against CoW-aware memory accounting, a `MaxSandboxes` host-DoS ceiling enforced with an atomic slot reservation, and backpressure that pends claims with a typed `NoCapacity` condition rather than OOMing a node (see [docs/scheduling.md](docs/scheduling.md))
+- Demand-driven warm-pool autoscaling: `SandboxPool.spec.autoscale` (`minWarm`/`maxWarm`/`targetSpare`) scales the dormant husk-pod count to `clamp(inUse + targetSpare, minWarm, maxWarm)` from live claim demand, with an anti-thrash scale-down cooldown; a fixed pool is just `minWarm == replicas`
 - RBAC and namespace scoping; pod-native execution via unprivileged, PSA-restricted husk pods is the DEFAULT ([#18](https://github.com/paperclipinc/mitos/issues/18)): the per-sandbox VM runs inside an unprivileged pod (`/dev/kvm` from a device plugin, not `privileged`), so its CPU/memory requests are scheduler truth and PSA governs the pod. The sandbox itself is the VM, not the pod
 - Works with Prometheus and standard k8s tooling
 
@@ -78,10 +98,16 @@ Two ways to run it:
 **Operable**
 - Node and controller Prometheus metrics, a per-claim OpenTelemetry trace (`--otlp-endpoint`), and a toggleable structured audit log of every exec/file op (`--audit-log`) that records command, path, and byte counts but never content or secrets ([#29](https://github.com/paperclipinc/mitos/issues/29), see [docs/observability.md](docs/observability.md))
 - `kubectl sandbox` plugin (`ls` / `ps`) for operators
-- Failure and GC semantics: claim TTLs (`maxLifetime`, `idleTimeout`), orphan-VM sweeps, and controller-restart reconciliation of the desired set are implemented and CI-proven; forkd crash reaping and saturation queuing are open ([#12](https://github.com/paperclipinc/mitos/issues/12), see [docs/failure-gc.md](docs/failure-gc.md))
+- Failure and GC semantics: claim TTLs (`maxLifetime`, `idleTimeout`), orphan-VM sweeps, controller-restart reconciliation of the desired set, forkd crash reaping (running VMs re-adopted or reaped via an on-disk journal, PID-recycle and TOCTOU guarded), node-loss handling tied to a forkd liveness probe, and saturation backpressure (a typed `NoCapacity` condition with bounded backoff, then a clean capacity-exhaustion failure) are implemented and CI-proven ([#12](https://github.com/paperclipinc/mitos/issues/12), see [docs/failure-gc.md](docs/failure-gc.md))
+
+**Agent-runtime DX**
+- Streaming exec: incremental stdout/stderr and background processes over the sandbox API, with a streaming-callback exec in both SDKs ([#24](https://github.com/paperclipinc/mitos/issues/24))
+- Code interpreter: `run_code` with a stateful kernel and rich multi-MIME results, in both SDKs and the MCP server. It fails closed with a `KernelUnavailable` error until the kernel ships in the husk cluster base image (a tracked follow-up below)
+- Interactive PTY: a token-gated bidirectional WebSocket terminal (`sandbox.pty`), guest-side PTY shell pumped over vsock ([#24](https://github.com/paperclipinc/mitos/issues/24))
+- LLM-legible errors: every failure carries `{code, cause, remediation}` ([#28](https://github.com/paperclipinc/mitos/issues/28)), parsed by both SDKs into a structured `AgentRunError`
 
 **Surfaces**
-- Python SDK (`sdk/python`) and TypeScript SDK (`@mitos/sdk`)
+- Python SDK (`sdk/python`) and TypeScript SDK (`@mitos/sdk`), both with a one-liner `sandbox(image)`, a lazy default pool, `from_name` reconnect, streaming exec, and (Python) an async client
 - `mitos` CLI with one-command local dev (`mitos dev up`) and an MCP server (`mitos-mcp`) that exposes sandboxes as MCP tools
 - Bare metal is a first-class target: Talos + Hetzner is the reference platform ([#16](https://github.com/paperclipinc/mitos/issues/16), see [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md))
 
@@ -156,12 +182,10 @@ the backends, and what is proven. For the no-cluster REST loop, run
 ### On a cluster
 
 ```bash
-kubectl apply -f deploy/crds/
-kubectl apply -f deploy/controller/
-kubectl apply -f deploy/daemon/
+kubectl apply -k deploy/
 ```
 
-A Helm chart is planned ([#37](https://github.com/paperclipinc/mitos/issues/37) tracks release machinery). Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`; the controller discovers forkd pods automatically.
+The self-contained kustomize base installs the CRDs, the controller in the default husk mode, the forkd builder DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. A Helm chart is planned ([#37](https://github.com/paperclipinc/mitos/issues/37) tracks release machinery). Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`; the controller discovers forkd pods automatically.
 
 ### Create a pool, claim, fork
 
@@ -316,7 +340,7 @@ Per-topic docs in [`docs/`](docs/):
 
 Early development, pre-1.0. Do not run untrusted code with this project in production yet, and note that there has been no external security review ([docs/threat-model.md](docs/threat-model.md)). The control plane is real end-to-end (claim to running sandbox, proven in CI against mock engines and real Firecracker VMs, and exercised on a bare-metal Talos KVM cluster). Implemented and CI-proven: pod-native execution via unprivileged, PSA-restricted husk pods as the DEFAULT (the per-sandbox VM runs inside an unprivileged pod with `/dev/kvm` from a device plugin, not `privileged`), with raw-forkd under the Firecracker jailer as the fallback; OCI image to rootfs template builds; per-activation copy-on-write rootfs (each activation gets its own reflink clone of the template rootfs); mTLS plus per-sandbox token auth; LLM-legible structured errors (`code`, `cause`, `remediation`); KMS envelope encryption with crypto-shredding; RNG reseed and clock resync on fork (remaining fork-correctness items in [#3](https://github.com/paperclipinc/mitos/issues/3)); `Fresh` and `Snapshot` volume policies; content-addressed snapshot integrity, version-compatibility, and peer-to-peer distribution; default-deny IP and name-based egress; CoW-aware metering; capacity-aware scheduling; the observability surface; the MCP server; the CLI; incremental streaming exec with background processes; a stateful code interpreter (`run_code` with rich multi-MIME results and structured errors); an interactive PTY over WebSocket; a one-liner SDK with a lazy default pool, an async Python client, and durable `from_name` handles; and the Python and TypeScript SDKs. Bare-metal warm-claim activate latency (P50 ~27 ms) is published and reproducible ([BENCHMARKS.md](BENCHMARKS.md)).
 
-Documented follow-ups and targets, not yet shipped: preview URLs / inbound port exposure into the sandbox; the code-interpreter kernel in the husk cluster base image (`run_code` is fail-closed with a clear `KernelUnavailable` until then); the durable Workspace git verbs ([#21](https://github.com/paperclipinc/mitos/issues/21)); pluggable engine tiers ([#43](https://github.com/paperclipinc/mitos/issues/43)); multi-node snapshot distribution validation ([#3](https://github.com/paperclipinc/mitos/issues/3)); a Helm chart ([#37](https://github.com/paperclipinc/mitos/issues/37)); a bare-metal self-hosted CI runner ([#16](https://github.com/paperclipinc/mitos/issues/16)); and the remaining failure/GC items ([#12](https://github.com/paperclipinc/mitos/issues/12)). The sandbox is the VM, not the husk pod: the husk pod is the VM's unprivileged host, so pod-scoped Kubernetes policies (NetworkPolicy, ResourceQuota, PSA) govern the husk pod, not the workload inside the microVM. [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated; the operating rule is that this repository never describes a system that does not exist.
+Documented follow-ups and targets, not yet shipped: preview URLs / inbound port exposure into the sandbox; the code-interpreter kernel in the husk cluster base image (`run_code` is fail-closed with a clear `KernelUnavailable` until then); the durable Workspace git verbs ([#21](https://github.com/paperclipinc/mitos/issues/21)); pluggable engine tiers ([#43](https://github.com/paperclipinc/mitos/issues/43)); multi-node snapshot distribution validation ([#3](https://github.com/paperclipinc/mitos/issues/3)); a Helm chart ([#37](https://github.com/paperclipinc/mitos/issues/37)); and the remaining failure/GC items ([#12](https://github.com/paperclipinc/mitos/issues/12)). The bare-metal self-hosted CI runner ([#16](https://github.com/paperclipinc/mitos/issues/16)) is built and CI-validated; arming it as standing CI is a maintainer apply step (the registration Secret plus the manifests). The sandbox is the VM, not the husk pod: the husk pod is the VM's unprivileged host, so pod-scoped Kubernetes policies (NetworkPolicy, ResourceQuota, PSA) govern the husk pod, not the workload inside the microVM. [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated; the operating rule is that this repository never describes a system that does not exist.
 
 Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md) for conventions, [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
