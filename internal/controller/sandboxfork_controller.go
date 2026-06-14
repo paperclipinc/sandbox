@@ -2,20 +2,72 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/husk"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
+
+// huskForkSnapshotter is the controller->husk fork-snapshot transport seam. Nil
+// defaults to ForkSnapshotOnHusk; tests inject a fake.
+type huskForkSnapshotter func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+
+// huskForkSnapshotRemover is the controller->husk remove-fork-snapshot seam. Nil
+// defaults to RemoveForkSnapshotOnHusk; tests inject a fake.
+type huskForkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+
+// huskForkFinalizer guards a husk fork so its node-local fork snapshot is
+// removed from the source pod before the SandboxFork object is deleted.
+const huskForkFinalizer = "mitos.run/husk-fork-snapshot"
 
 type SandboxForkReconciler struct {
 	client.Client
 	NodeRegistry *NodeRegistry
+
+	// EnableHuskPods selects the husk fork path: snapshot the source husk pod's
+	// running VM, then create + activate N child husk pods from that fork
+	// snapshot. Off (default in this struct's zero value) keeps the raw-forkd
+	// ForkRunning path unchanged.
+	EnableHuskPods bool
+	// HuskTLS is the controller client mTLS config used to dial a husk stub's
+	// control channel (the SAME config the claim reconciler uses). Required when
+	// EnableHuskPods is true.
+	HuskTLS *tls.Config
+	// HuskControlPort / HuskSandboxPort default to HuskControlPort / huskSandboxPort.
+	HuskControlPort int
+	HuskSandboxPort int
+	// HuskStubImage / DataDir / KVMResourceName configure the fork child pods.
+	HuskStubImage   string
+	DataDir         string
+	KVMResourceName string
+
+	// forkSnapshot / activate / removeForkSnapshot are the husk control seams.
+	// Nil defaults to ForkSnapshotOnHusk / ActivateHuskPod / RemoveForkSnapshotOnHusk.
+	// Tests inject fakes.
+	forkSnapshot       huskForkSnapshotter
+	activate           huskActivator
+	removeForkSnapshot huskForkSnapshotRemover
+
+	// eventFilter / controllerName optionally restrict which forks this reconciler
+	// watches and name the controller, so a raw and a husk fork reconciler can
+	// share one manager in tests. Production leaves them unset.
+	eventFilter    predicate.Predicate
+	controllerName string
 }
 
 // SandboxFork ownership: get/list/watch to reconcile, update to write
@@ -32,6 +84,22 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var fork v1alpha1.SandboxFork
 	if err := r.Get(ctx, req.NamespacedName, &fork); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Husk fork deletion + finalizer handling MUST come before the terminal and
+	// already-satisfied short-circuits below: a fork being deleted (or one that
+	// has reached its replicas) still needs its node-local fork snapshot GC'd.
+	if r.EnableHuskPods {
+		if !fork.DeletionTimestamp.IsZero() {
+			return r.finalizeHuskFork(ctx, &fork)
+		}
+		if !controllerutil.ContainsFinalizer(&fork, huskForkFinalizer) {
+			controllerutil.AddFinalizer(&fork, huskForkFinalizer)
+			if err := r.Update(ctx, &fork); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// A rejected fork is terminal: never reconcile it again.
@@ -91,6 +159,14 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if source.Status.Phase != v1alpha1.SandboxReady {
 		logger.Info("source sandbox not ready, waiting", "source", source.Name, "phase", source.Status.Phase)
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
+	// Husk fork path: the source VM is owned by the source husk pod's stub, not
+	// forkd's engine, so the only way to live-fork it is for the owning stub to
+	// snapshot it and N child husk pods to restore that snapshot. The raw-forkd
+	// ForkRunning path below is left unchanged for the non-husk default.
+	if r.EnableHuskPods {
+		return r.reconcileHuskFork(ctx, &fork, &source)
 	}
 
 	// Find the node running the source sandbox. A live/standard fork is pinned
@@ -192,6 +268,231 @@ func (r *SandboxForkReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
+// huskForksInPodDir is the in-pod path a husk stub writes a fork snapshot to for
+// forkID; it matches the --forks-dir mount the pod builder set (huskForksMountPath).
+func huskForksInPodDir(forkID string) string { return filepath.Join(huskForksMountPath, forkID) }
+
+// reconcileHuskFork forks a husk-backed source: it snapshots the source pod's
+// running VM ONCE (fork-snapshot control op), then creates and activates N child
+// husk pods from the fork snapshot, recording each Ready child in the fork
+// status. It is the husk analog of the forkd ForkRunning loop. The fork snapshot
+// is node-local and shared read-only by the children on the same node, while each
+// child gets its own pod + VM + per-activation rootfs CoW clone (independence) and
+// runs the same fail-closed RNG/clock reseed handshake a warm pod does.
+func (r *SandboxForkReconciler) reconcileHuskFork(ctx context.Context, fork *v1alpha1.SandboxFork, source *v1alpha1.SandboxClaim) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Resolve the source husk pod: a husk claim records Status.SandboxID = pod
+	// name and Status.Node = the pod's node.
+	srcPod, err := r.findHuskPod(ctx, fork.Namespace, source.Status.SandboxID)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+	if srcPod.Status.PodIP == "" {
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
+	controlPort := r.HuskControlPort
+	if controlPort == 0 {
+		controlPort = HuskControlPort
+	}
+	sandboxPort := r.HuskSandboxPort
+	if sandboxPort == 0 {
+		sandboxPort = huskSandboxPort
+	}
+	forkSnap := r.forkSnapshot
+	if forkSnap == nil {
+		forkSnap = ForkSnapshotOnHusk
+	}
+	activate := r.activate
+	if activate == nil {
+		activate = ActivateHuskPod
+	}
+
+	// One fork snapshot per SandboxFork, keyed by the fork name. Idempotent: a
+	// re-reconcile that already snapshotted re-runs the op (CreateSnapshot
+	// overwrites), which is cheap and keeps the path simple; the children share
+	// the same fork snapshot dir read-only.
+	forkID := fork.Name
+	srcAddr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
+	snapCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	// The source stub writes the snapshot inside its OWN in-pod forks dir mount
+	// (huskForksMountPath/<fork-id>); the child reads the same node dir mounted
+	// read-only at HuskSnapshotDir.
+	snapRes, err := forkSnap(snapCtx, srcAddr, r.HuskTLS, husk.ForkSnapshotRequest{
+		ForkID:      forkID,
+		SnapshotDir: huskForksInPodDir(forkID),
+		PauseSource: fork.Spec.PauseSource,
+	})
+	if err != nil || !snapRes.OK {
+		msg := "fork snapshot did not complete"
+		if err != nil {
+			msg = fmt.Sprintf("fork snapshot transport error: %v", err)
+		} else if snapRes.Error != "" {
+			msg = "fork snapshot failed: " + snapRes.Error
+		}
+		logger.Info("husk fork snapshot failed, requeueing", "source", srcPod.Name, "detail", msg)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	opts := HuskPodOptions{
+		StubImage:       r.HuskStubImage,
+		KVMResourceName: r.KVMResourceName,
+		SnapshotID:      source.Spec.PoolRef.Name, // template id, for resource/kernel mounts
+		DataDir:         r.DataDir,
+		ForkSnapshotID:  forkID,
+		ForkSourceNode:  source.Status.Node,
+	}
+
+	needed := fork.Spec.Replicas - fork.Status.ReadyForks
+	for i := int32(0); i < needed; i++ {
+		childName := fmt.Sprintf("%s-fork-%d", fork.Name, fork.Status.TotalForks+i)
+
+		// Create the child pod if absent (idempotent across requeues).
+		child, err := r.ensureForkChildPod(ctx, fork, childName, opts)
+		if err != nil {
+			logger.Error(err, "create fork child pod failed", "child", childName)
+			continue
+		}
+		// The child must be Running+Ready before it can be activated.
+		if child.Status.PodIP == "" || !huskPodReady(child) {
+			// Not ready yet; requeue and try again next pass.
+			continue
+		}
+
+		apiToken, err := mintAPIToken()
+		if err != nil {
+			logger.Error(err, "token minting failed", "child", childName)
+			continue
+		}
+
+		addr := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(controlPort))
+		actRes, err := activate(ctx, addr, r.HuskTLS, husk.ActivateRequest{
+			// The child reads the FORK snapshot here (its <dataDir>/forks/<fork-id>
+			// hostPath is mounted at HuskSnapshotDir). No ExpectedDigest: the fork
+			// snapshot is node-local, not content-addressed.
+			SnapshotDir: HuskSnapshotDir,
+			Token:       apiToken,
+		})
+		if err != nil || !actRes.OK {
+			logger.Info("fork child activation failed, will retry", "child", childName)
+			continue
+		}
+
+		endpoint := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(sandboxPort))
+		if err := ensureSandboxTokenSecret(ctx, r.Client, fork, childName+tokenSecretSuffix, apiToken, endpoint); err != nil {
+			logger.Error(err, "token secret write failed", "child", childName)
+			continue
+		}
+
+		fork.Status.Forks = append(fork.Status.Forks, v1alpha1.ForkInfo{
+			Name:      childName,
+			SandboxID: child.Name,
+			Endpoint:  endpoint,
+			Node:      child.Spec.NodeName,
+			Phase:     v1alpha1.SandboxReady,
+		})
+		fork.Status.ReadyForks++
+		fork.Status.TotalForks++
+	}
+
+	now := metav1.Now()
+	fork.Status.CheckpointTime = &now
+	setCondition(&fork.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             conditionStatus(fork.Status.ReadyForks >= fork.Spec.Replicas),
+		LastTransitionTime: now,
+		Reason:             "ForksCreated",
+		Message:            fmt.Sprintf("%d/%d husk forks ready", fork.Status.ReadyForks, fork.Spec.Replicas),
+	})
+	if err := r.Status().Update(ctx, fork); err != nil {
+		return ctrl.Result{}, err
+	}
+	if fork.Status.ReadyForks < fork.Spec.Replicas {
+		// Children still coming up; requeue to drive them Ready.
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// findHuskPod returns the husk pod named name in ns (a husk claim's
+// Status.SandboxID is the pod name). It returns an error when not found so the
+// caller can requeue.
+func (r *SandboxForkReconciler) findHuskPod(ctx context.Context, ns, name string) (*corev1.Pod, error) {
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &pod); err != nil {
+		return nil, fmt.Errorf("get source husk pod %s/%s: %w", ns, name, err)
+	}
+	return &pod, nil
+}
+
+// ensureForkChildPod creates the fork child pod if it does not exist and returns
+// the current pod object. Idempotent across requeues (a child already created is
+// fetched and returned).
+func (r *SandboxForkReconciler) ensureForkChildPod(ctx context.Context, fork *v1alpha1.SandboxFork, name string, opts HuskPodOptions) (*corev1.Pod, error) {
+	var existing corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: name}, &existing)
+	if err == nil {
+		return &existing, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("get fork child pod %s: %w", name, err)
+	}
+	pod := buildForkChildPod(fork, name, opts, r.Scheme())
+	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("create fork child pod %s: %w", name, err)
+	}
+	// Re-get so the caller sees the server object (with any defaults applied).
+	if err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: name}, &existing); err != nil {
+		return nil, fmt.Errorf("re-get fork child pod %s: %w", name, err)
+	}
+	return &existing, nil
+}
+
+// finalizeHuskFork removes the node-local fork snapshot from the source husk pod
+// (best effort) and clears the finalizer so deletion proceeds. The child pods are
+// owner-ref'd to the fork and reaped by Kubernetes GC; only the snapshot dir
+// needs explicit cleanup. A transport failure does not block deletion: the dir is
+// reclaimed when the source pod is recycled.
+func (r *SandboxForkReconciler) finalizeHuskFork(ctx context.Context, fork *v1alpha1.SandboxFork) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(fork, huskForkFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	remove := r.removeForkSnapshot
+	if remove == nil {
+		remove = RemoveForkSnapshotOnHusk
+	}
+
+	// Resolve the source pod to dial; if it is gone the snapshot went with it.
+	var source v1alpha1.SandboxClaim
+	if err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: fork.Spec.SourceRef.Name}, &source); err == nil && source.Status.SandboxID != "" {
+		if srcPod, err := r.findHuskPod(ctx, fork.Namespace, source.Status.SandboxID); err == nil && srcPod.Status.PodIP != "" {
+			controlPort := r.HuskControlPort
+			if controlPort == 0 {
+				controlPort = HuskControlPort
+			}
+			addr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
+			rmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			if _, err := remove(rmCtx, addr, r.HuskTLS, husk.RemoveForkSnapshotRequest{
+				ForkID:      fork.Name,
+				SnapshotDir: huskForksInPodDir(fork.Name),
+			}); err != nil {
+				logger.Info("remove fork snapshot failed; proceeding with delete", "fork", fork.Name, "detail", err.Error())
+			}
+		}
+	}
+
+	controllerutil.RemoveFinalizer(fork, huskForkFinalizer)
+	if err := r.Update(ctx, fork); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
 type forkRunningResult struct {
 	SandboxID    string
 	Endpoint     string
@@ -199,8 +500,18 @@ type forkRunningResult struct {
 	CheckpointMs float64
 }
 
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 func (r *SandboxForkReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.SandboxFork{}).
-		Complete(r)
+	b := ctrl.NewControllerManagedBy(mgr)
+	if r.eventFilter != nil {
+		b = b.For(&v1alpha1.SandboxFork{}, builder.WithPredicates(r.eventFilter))
+	} else {
+		b = b.For(&v1alpha1.SandboxFork{})
+	}
+	// The husk fork path owns child husk pods (created + GC'd with the fork).
+	b = b.Owns(&corev1.Pod{})
+	if r.controllerName != "" {
+		b = b.Named(r.controllerName)
+	}
+	return b.Complete(r)
 }

@@ -132,6 +132,13 @@ var (
 	huskTestCheckpointerMu sync.Mutex
 	huskTestCheckpointer   func(ctx context.Context, claim *v1alpha1.SandboxClaim, pod *corev1.Pod) (bool, error)
 
+	// forkSnapshotterMu guards the swappable husk fork-snapshot / activator /
+	// remover seams the suite's husk-enabled fork reconciler dials through.
+	forkSnapshotterMu   sync.Mutex
+	forkSnapshotter     func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+	forkActivator       func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
+	forkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+
 	// wsTransferMu guards the swappable workspace hydrate/dehydrate fakes the
 	// suite's raw claim reconciler drives. Tests set them via setWSTransfer.
 	wsTransferMu sync.Mutex
@@ -287,6 +294,63 @@ func currentHuskTestActivator() func(ctx context.Context, addr string, tlsConf *
 		}
 	}
 	return huskTestActivator
+}
+
+// setForkSnapshotter / currentForkSnapshotter swap the fork-snapshot seam the
+// suite's husk fork reconciler dials through.
+func setForkSnapshotter(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	forkSnapshotter = fn
+}
+
+func currentForkSnapshotter() func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	if forkSnapshotter == nil {
+		return func(context.Context, string, *tls.Config, husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+			return husk.ForkSnapshotResult{OK: false, Error: "no fork snapshotter installed"}, nil
+		}
+	}
+	return forkSnapshotter
+}
+
+// setForkActivator / currentForkActivator swap the activate seam the suite's
+// husk fork reconciler dials through.
+func setForkActivator(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	forkActivator = fn
+}
+
+func currentForkActivator() func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	if forkActivator == nil {
+		return func(context.Context, string, *tls.Config, husk.ActivateRequest) (husk.ActivateResult, error) {
+			return husk.ActivateResult{OK: false, Error: "no fork activator installed"}, nil
+		}
+	}
+	return forkActivator
+}
+
+// setForkSnapshotRemover / currentForkSnapshotRemover swap the remove-fork-snapshot
+// seam the suite's husk fork reconciler dials through on delete.
+func setForkSnapshotRemover(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	forkSnapshotRemover = fn
+}
+
+func currentForkSnapshotRemover() func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	if forkSnapshotRemover == nil {
+		return func(context.Context, string, *tls.Config, husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+			return husk.ForkSnapshotResult{OK: true}, nil
+		}
+	}
+	return forkSnapshotRemover
 }
 
 // syncBuffer is a concurrency-safe io.Writer that accumulates everything
@@ -478,10 +542,40 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	_ = (&controller.SandboxForkReconciler{
+	// The raw-forkd fork reconciler handles forks WITHOUT the husk-fork label, so
+	// it does not fight the husk fork reconciler over the same object.
+	rawFork := &controller.SandboxForkReconciler{
 		Client:       mgr.GetClient(),
 		NodeRegistry: nodeRegistry,
-	}).SetupWithManager(mgr)
+	}
+	rawFork.SkipForkLabel(controller.HuskForkTestLabel)
+	if err := rawFork.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+
+	// A husk-enabled fork reconciler that handles ONLY husk-fork-test forks, with
+	// swappable fork-snapshot / activate / remove seams.
+	huskFork := &controller.SandboxForkReconciler{
+		Client:         mgr.GetClient(),
+		NodeRegistry:   nodeRegistry,
+		EnableHuskPods: true,
+		HuskTLS:        &tls.Config{}, //nolint:gosec // test stub; fakes ignore it
+		HuskStubImage:  "mitos-husk-stub:test",
+		DataDir:        "/var/lib/mitos",
+	}
+	huskFork.OnlyForkLabel(controller.HuskForkTestLabel)
+	huskFork.SetForkSnapshotForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return currentForkSnapshotter()(c, addr, tlsConf, req)
+	})
+	huskFork.SetActivateForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+		return currentForkActivator()(c, addr, tlsConf, req)
+	})
+	huskFork.SetForkSnapshotRemoverForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return currentForkSnapshotRemover()(c, addr, tlsConf, req)
+	})
+	if err := huskFork.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
 
 	// The Workspace reconciler (W4): manages the revision DAG, retention,
 	// lineage, and head/revisions/resumable status. Core, not behind any flag.
