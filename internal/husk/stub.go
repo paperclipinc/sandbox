@@ -561,6 +561,92 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	}, nil
 }
 
+// ForkSnapshot snapshots the CURRENTLY RUNNING VM this stub holds, in place, so
+// the controller can restore N independent child husk pods from it. It is the
+// husk analog of the fork engine's ForkRunning: the source VM is owned by THIS
+// husk pod's stub (not forkd's engine), so the only way to live-fork it is for
+// the owning stub to snapshot it.
+//
+// It pauses the VM (CreateSnapshot requires a paused VM), writes a Full snapshot
+// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), then resumes
+// it UNLESS req.PauseSource is set, in which case it leaves the source paused.
+// The stub stays StateActive throughout: it still owns its one VM.
+//
+// FAIL CLOSED: it requires StateActive (else error, no snapshot); a pause,
+// snapshot-create, or resume failure returns OK=false plus an error. On a
+// snapshot failure it still attempts to resume the source so a transient
+// snapshot error does not leave a live sandbox frozen. The fork id and snapshot
+// paths carry no secrets.
+func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state != StateActive {
+		return ForkSnapshotResult{OK: false, Error: fmt.Sprintf("fork-snapshot in state %s: must be active", s.state)},
+			fmt.Errorf("husk: fork-snapshot in state %s: must be active", s.state)
+	}
+	if err := ctx.Err(); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	if req.SnapshotDir == "" {
+		return ForkSnapshotResult{OK: false, Error: "fork-snapshot: empty snapshot dir"},
+			fmt.Errorf("husk: fork-snapshot: empty snapshot dir")
+	}
+
+	memFile := filepath.Join(req.SnapshotDir, "mem")
+	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
+	if err := os.MkdirAll(req.SnapshotDir, 0o755); err != nil {
+		werr := fmt.Errorf("husk: create fork snapshot dir %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	start := time.Now()
+
+	if err := s.vm.Pause(); err != nil {
+		werr := fmt.Errorf("husk: pause source VM for fork snapshot: %w", err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	if err := s.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
+		// Best effort: resume the source so a transient snapshot error does not
+		// leave a tenant's live sandbox frozen. The resume error is reported only
+		// if the snapshot itself succeeded; here the snapshot already failed.
+		_ = s.vm.Resume()
+		werr := fmt.Errorf("husk: create fork snapshot in %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Resume the source UNLESS the fork asked to keep it paused. PauseSource
+	// trades a brief source interruption for a colder, quiescent snapshot.
+	if !req.PauseSource {
+		if err := s.vm.Resume(); err != nil {
+			werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	latency := time.Since(start)
+	return ForkSnapshotResult{
+		OK:          true,
+		SnapshotDir: req.SnapshotDir,
+		LatencyMs:   float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// RemoveForkSnapshot deletes a fork snapshot dir this stub previously created. It
+// is the GC counterpart of ForkSnapshot: the controller calls it when the owning
+// SandboxFork is deleted so the node-local snapshot does not outlive its owner.
+// It does not touch the VM and is safe in any state. The path carries no secret.
+func (s *Stub) RemoveForkSnapshot(req ForkSnapshotRequest) error {
+	if req.SnapshotDir == "" {
+		return fmt.Errorf("husk: remove fork snapshot: empty snapshot dir")
+	}
+	if err := os.RemoveAll(req.SnapshotDir); err != nil {
+		return fmt.Errorf("husk: remove fork snapshot %s: %w", req.SnapshotDir, err)
+	}
+	return nil
+}
+
 // Serve accepts control connections on ln and dispatches each to Activate,
 // replying with the ActivateResult.
 //
