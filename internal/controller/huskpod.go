@@ -100,6 +100,12 @@ const (
 	// reflink-capable filesystem (a full copy fallback otherwise). Each activation
 	// writes its own clone under here, never the shared read-only template rootfs.
 	huskRootfsCoWMountPath = "/var/lib/mitos/husk-rootfs"
+
+	// huskForksMountPath is the in-pod path the node forks DIRECTORY is mounted at
+	// (read-write for a source pod that may be forked; the child's read-only
+	// snapshot mount points at a subdir of the node forks dir instead). The stub
+	// writes <huskForksMountPath>/<fork-id>/{mem,vmstate} on a fork-snapshot op.
+	huskForksMountPath = "/var/lib/mitos/forks"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -141,6 +147,16 @@ type HuskPodOptions struct {
 	// separate from the leaf so the CA private key never reaches the husk pod,
 	// mirroring the forkd DaemonSet's /etc/forkd/ca split. Empty means no CA mount.
 	CASecretName string
+	// ForkSnapshotID, when set, makes this a FORK CHILD pod: it activates from
+	// the node fork snapshot <DataDir>/forks/<ForkSnapshotID> instead of the
+	// template snapshot. The fork snapshot was written by the source sandbox's
+	// husk stub (the fork-snapshot control op). It is a node-local id, not a
+	// secret.
+	ForkSnapshotID string
+	// ForkSourceNode pins a fork child to the node holding the fork snapshot (the
+	// source sandbox's node). Required when ForkSnapshotID is set, since the fork
+	// snapshot is a node-local hostPath that exists only on that node.
+	ForkSourceNode string
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -323,7 +339,15 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 	// fall back to the development escape hatch so the warm pool still activates;
 	// the stub logs this loudly. The manifest mount itself is added in the snapshot
 	// block below (it shares the snapshot placement requirement).
-	if opts.ExpectedDigest != "" {
+	if opts.ForkSnapshotID != "" {
+		// Fork child: the fork snapshot is a LIVE, node-local artifact created by
+		// the source stub and consumed by child stubs on the SAME node within the
+		// same trust boundary. It is NOT content-addressed (re-hashing would gate
+		// on a digest that does not exist for a live fork), so the child activates
+		// it with verify disabled, the same posture a pre-digest pool uses. The
+		// child still runs the full fail-closed RNG/clock reseed handshake.
+		args = append(args, "--allow-unverified-snapshots")
+	} else if opts.ExpectedDigest != "" {
 		args = append(args, "--manifest", filepath.Join(huskManifestDirMountPath, opts.ExpectedDigest))
 		// Pass the snapshot dir + expected digest so the dormant pod verifies the
 		// snapshot (the ~680 MiB re-hash) during Prepare, off the claim's Activate
@@ -380,11 +404,38 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// CAS manifest digest before loading (fail-closed), so an empty or wrong
 		// snapshot is rejected at activation, not silently run.
 		hostType := corev1.HostPathDirectoryOrCreate
+
+		// The node forks dir, mounted READ-WRITE so this pod's stub can write a
+		// fork snapshot of its running VM (<forks>/<fork-id>/{mem,vmstate}) when
+		// the controller drives a fork-snapshot op against it. Co-located with the
+		// template dir on the SAME node filesystem so a child's read-only mount of
+		// a subdir resolves and any CoW stays on one filesystem.
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-forks",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "forks"),
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-forks", MountPath: huskForksMountPath})
+		// Tell the stub where to write fork snapshots so a fork-snapshot op writes
+		// inside the mounted node forks dir.
+		args = append(args, "--forks-dir", huskForksMountPath)
+
+		// The snapshot SOURCE path. A warm pod activates from the template's
+		// snapshot subdir; a FORK CHILD activates from the node fork snapshot
+		// <dataDir>/forks/<fork-id> instead (mounted at the SAME in-pod path).
+		snapshotHostPath := filepath.Join(dataDir, "templates", opts.SnapshotID, "snapshot")
+		if opts.ForkSnapshotID != "" {
+			snapshotHostPath = filepath.Join(dataDir, "forks", opts.ForkSnapshotID)
+		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "snapshot",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: filepath.Join(dataDir, "templates", opts.SnapshotID, "snapshot"),
+					Path: snapshotHostPath,
 					Type: &hostType,
 				},
 			},
@@ -503,6 +554,24 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 							Key:      hostnameNodeLabel,
 							Operator: corev1.NodeSelectorOpIn,
 							Values:   nodes,
+						}},
+					}},
+				},
+			},
+		}
+	}
+	// A fork child can only run where its fork snapshot exists (the source node's
+	// node-local hostPath), so pin it to exactly that node. This takes precedence
+	// over SnapshotNodes; a fork child never sets SnapshotNodes.
+	if opts.ForkSourceNode != "" {
+		affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      hostnameNodeLabel,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{opts.ForkSourceNode},
 						}},
 					}},
 				},

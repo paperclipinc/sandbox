@@ -828,3 +828,48 @@ func TestReconcileHuskPodsFlagOffCreatesNone(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+func TestBuildHuskPodMountsForksDir(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1alpha1.SandboxTemplate{}
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", SnapshotID: "tmpl-a", DataDir: "/data"})
+
+	var found bool
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "husk-forks" && v.HostPath != nil && v.HostPath.Path == "/data/forks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("husk pod missing the read-write forks hostPath volume; volumes=%+v", pod.Spec.Volumes)
+	}
+}
+
+func TestBuildHuskPodForkChildActivatesFromForkSnapshot(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pool := &v1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	tmpl := &v1alpha1.SandboxTemplate{}
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "fork-1",
+		ForkSourceNode: "kvm-node-1",
+	})
+
+	// The snapshot mount must point at the FORK snapshot dir, not the template's.
+	var snapPath string
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "snapshot" && v.HostPath != nil {
+			snapPath = v.HostPath.Path
+		}
+	}
+	if snapPath != "/data/forks/fork-1" {
+		t.Fatalf("fork child snapshot mount = %q, want /data/forks/fork-1", snapPath)
+	}
+	// The child is pinned to the source node.
+	if pod.Spec.Affinity == nil {
+		t.Fatalf("fork child must be pinned to the source node via affinity")
+	}
+}
