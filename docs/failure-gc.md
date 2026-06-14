@@ -173,17 +173,27 @@ trades a possible leak of a wedged claim's VM for never killing a live VM whose
 status simply has not landed; the wedged claim is itself observable and
 deletable, at which point its VM is swept.
 
+Shipped (was open, now in main):
+
+- forkd-crash supervision of running VMs: a restarted forkd recognizes its own
+  pre-crash Firecracker processes from an on-disk journal and either re-adopts
+  the live ones (so the controller GC can reconcile them) or reaps the dead
+  ones' leaked artifacts (jailer chroot, rootfs CoW clone, fork network, uid),
+  with a procfs PID-recycle guard before any kill (issue #12, the crash-reap PR).
+- saturation behavior: the node enforces a per-node MaxSandboxes ceiling (an
+  atomic slot reservation, fail-closed), the scheduler avoids a node at its
+  ceiling, and the controller pends a claim with a typed NoCapacity condition
+  then fails it with CapacityExhausted after a bounded MaxPendingDuration; a
+  forkd ResourceExhausted or Unavailable re-pends rather than hard-failing.
+
 The following remain OPEN and are tracked in epic #12:
 
-- forkd-crash supervision of running VMs: a restarted forkd reaping its own
-  pre-crash Firecracker processes. This needs forkd-local state so forkd can
-  recognize VMs it owned before the crash; it is separate from the controller's
-  orphan sweep, which only reaps VMs forkd still reports.
-- pool replica rebuild after node loss: NodeLost fails the claims on a dead node
-  within the GC interval, but pools do not yet rebuild the lost replicas
-  elsewhere.
-- saturation behavior: queue-with-deadline then a typed fail-fast condition when
-  capacity is exhausted.
+- pool replica rebuild after raw-forkd node loss: in the husk default the warm
+  pool self-heals a lost node's dormant slots, but a raw-forkd claim on a dead
+  node fails (NodeLost) with no automatic replacement (acceptable for ephemeral
+  sandboxes; the caller re-claims).
 - status-update rate-limiting and batching: status writes are not yet
   rate-limited or batched.
-- chaos CI suite: kill -9 of components under load is not yet exercised in CI.
+- chaos CI suite: kill -9 of components under load is not yet exercised in CI;
+  the in-cluster self-hosted runner (issue #16) plus the cluster-e2e workflow are
+  the substrate a chaos suite would build on.
