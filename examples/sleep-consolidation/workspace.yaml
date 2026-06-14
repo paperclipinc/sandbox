@@ -1,0 +1,19 @@
+# The durable, forkable workspace the sleep-consolidation demo binds to.
+#
+# A Workspace is the head of a revision DAG. Each terminate of a bound sandbox
+# dehydrates /workspace into a new committed WorkspaceRevision and advances the
+# head. A checkpoint-on-terminate additionally pairs the head with a VM memory
+# snapshot, so a later claim with the SAME principal can RESUME mid-execution
+# (the "wake") instead of a cold start. A `mitos ws revert` to a pre-sleep
+# revision makes the demo REVERSIBLE.
+apiVersion: mitos.run/v1alpha1
+kind: Workspace
+metadata:
+  name: sleep-demo
+  namespace: mitos-e2e
+spec:
+  store:
+    objectStorageRef: default
+  retention:
+    # Keep enough revisions to revert across the sleep boundary.
+    revisions: 10

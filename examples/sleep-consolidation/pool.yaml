@@ -1,0 +1,27 @@
+# Template and warm pool the sleep-consolidation demo claims sandboxes from.
+#
+# A small pool of pre-snapshotted sandboxes; the demo claims one for the work
+# phase, one for the resume ("wake") phase, and (optionally) one after the
+# revert. Resuming a memory snapshot mid-execution requires the controller run
+# with --workspace-memory-snapshots and a KVM-capable node (cluster-gated).
+apiVersion: mitos.run/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: sleep-demo-tmpl
+  namespace: mitos-e2e
+spec:
+  image: python:3.12-slim
+  resources:
+    cpu: "1"
+    memory: "512Mi"
+---
+apiVersion: mitos.run/v1alpha1
+kind: SandboxPool
+metadata:
+  name: sleep-demo-pool
+  namespace: mitos-e2e
+spec:
+  templateRef:
+    name: sleep-demo-tmpl
+  replicas: 3
+  snapshotAfter: Ready
