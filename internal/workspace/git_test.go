@@ -237,6 +237,96 @@ func TestRendezvousCredentialsDoNotTouchCallerHome(t *testing.T) {
 	}
 }
 
+// TestValidateRemoteNoUserinfoRejectsEmbeddedCredentials proves a remote URL
+// that embeds credentials in the userinfo (https://user:token@host) is rejected
+// before any git invocation, and that the rejection error NEVER echoes the
+// credential substring back: only the scheme and host are named. This steers an
+// operator toward CredentialsSecretRef instead of putting a token in the URL,
+// where it would otherwise land in the claim/revision GitPushRecord.Remote
+// status.
+func TestValidateRemoteNoUserinfoRejectsEmbeddedCredentials(t *testing.T) {
+	const token = "s3cr3t-token-DEADBEEF" //nolint:gosec // test sentinel, not a real credential
+	const user = "leaky-user"
+	cases := []struct {
+		name   string
+		remote string
+		secret []string // substrings that MUST NOT appear in the error
+	}{
+		{
+			name:   "https user and token",
+			remote: "https://" + user + ":" + token + "@github.com/acme/repo.git",
+			secret: []string{token, user},
+		},
+		{
+			name:   "https token only",
+			remote: "https://" + token + "@github.com/acme/repo.git",
+			secret: []string{token},
+		},
+		{
+			name:   "http user and token",
+			remote: "http://" + user + ":" + token + "@internal.example/repo.git",
+			secret: []string{token, user},
+		},
+		{
+			name:   "ssh user and password",
+			remote: "ssh://" + user + ":" + token + "@github.com/acme/repo.git",
+			secret: []string{token},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRemoteNoUserinfo(tc.remote)
+			if err == nil {
+				t.Fatalf("validateRemoteNoUserinfo(%q) must reject embedded credentials", tc.remote)
+			}
+			for _, s := range tc.secret {
+				if strings.Contains(err.Error(), s) {
+					t.Fatalf("credential substring %q leaked into the rejection error: %v", s, err)
+				}
+			}
+			// The remediation must steer the operator to CredentialsSecretRef.
+			if !strings.Contains(err.Error(), "CredentialsSecretRef") {
+				t.Fatalf("rejection error must point to CredentialsSecretRef, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateRemoteNoUserinfoAcceptsCleanRemotes proves the clean remote forms
+// (no embedded credentials) are accepted, including an ssh remote whose userinfo
+// is only the conventional "git" username with no password (auth is by key, not
+// a secret in the URL).
+func TestValidateRemoteNoUserinfoAcceptsCleanRemotes(t *testing.T) {
+	good := []string{
+		"https://github.com/acme/repo.git",
+		"http://internal.example/repo.git",
+		"git://example.com/repo.git",
+		"file:///srv/git/repo.git",
+		"ssh://git@github.com/acme/repo.git",
+		"git@github.com:acme/repo.git",
+	}
+	for _, r := range good {
+		if err := validateRemoteNoUserinfo(r); err != nil {
+			t.Errorf("validateRemoteNoUserinfo(%q) must accept a clean remote, got %v", r, err)
+		}
+	}
+}
+
+// TestRendezvousRejectsRemoteWithUserinfo proves the userinfo guard runs inside
+// Rendezvous before any git step, and the credential never reaches the error.
+func TestRendezvousRejectsRemoteWithUserinfo(t *testing.T) {
+	const token = "rendezvous-secret-FEEDFACE" //nolint:gosec // test sentinel
+	remote := "https://bot:" + token + "@github.com/acme/repo.git"
+	repoFiles := map[string]string{"repo/a.txt": "hello\n"}
+	err := Rendezvous(context.Background(), repoFiles, remote, "attempt/agent-7f3a", nil)
+	if err == nil {
+		t.Fatal("Rendezvous must reject a remote with embedded userinfo")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("credential token leaked into the Rendezvous error: %v", err)
+	}
+}
+
 // TestRendezvousRejectsCredentialsForFileRemote proves a token-credential push
 // to a non-http(s) remote (which cannot carry basic-auth) is rejected with an
 // error that does NOT contain the token.

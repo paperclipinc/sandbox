@@ -56,6 +56,47 @@ func RenderBranch(tmpl, name string) (string, error) {
 	return branch, nil
 }
 
+// validateRemoteNoUserinfo rejects a rendezvous remote URL that embeds
+// credentials in its userinfo component (for example https://user:token@host).
+// Such a URL would persist the token into the claim/revision GitPushRecord.Remote
+// status, defeating the secrets rule. Authentication must instead flow through
+// CredentialsSecretRef, which delivers the token to git only via an ephemeral,
+// isolated credentials file (never in status, never on the argv).
+//
+// The check is scoped to credential-bearing userinfo: an http(s) remote with ANY
+// userinfo is rejected (the userinfo there is a basic-auth credential), and any
+// scheme whose userinfo carries a password is rejected. A bare username with no
+// password on an ssh remote (the conventional "git@host" form, where auth is by
+// key) is left alone, as is an scp-like remote that url.Parse cannot decompose.
+//
+// The returned error NEVER echoes the userinfo back: only the scheme and host are
+// named, so the embedded credential cannot leak into a log line or condition.
+func validateRemoteNoUserinfo(remote string) error {
+	u, err := url.Parse(strings.TrimSpace(remote))
+	if err != nil || u.User == nil {
+		// A parse failure here is the scp-like form ("git@host:path"), which
+		// url.Parse cannot decompose; the remote regex admits it and ssh key auth
+		// carries no secret in the URL. A nil User means no userinfo at all.
+		return nil
+	}
+	_, hasPassword := u.User.Password()
+	httpScheme := u.Scheme == "http" || u.Scheme == "https"
+	if !hasPassword && !httpScheme {
+		// A bare username on a non-http scheme (ssh "git@host") is conventional and
+		// carries no secret; leave it alone.
+		return nil
+	}
+	// Name only the scheme and host; the userinfo (the credential) is dropped.
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "(none)"
+	}
+	return fmt.Errorf(
+		"git rendezvous remote embeds credentials in its URL userinfo (scheme %s, host %s): a token in the remote URL would be persisted into the revision/claim status; remove the userinfo and supply the push token via spec.git.CredentialsSecretRef instead",
+		scheme, u.Host,
+	)
+}
+
 // Credentials carries the resolved git push credentials for an authenticated
 // rendezvous remote. The Token is a secret: it is NEVER logged, never placed on
 // the git argv (so it cannot appear in a process table), and never returned in
@@ -97,6 +138,9 @@ func Rendezvous(ctx context.Context, repoFiles map[string]string, remote, branch
 	}
 	if strings.TrimSpace(remote) == "" {
 		return fmt.Errorf("git rendezvous: empty remote")
+	}
+	if err := validateRemoteNoUserinfo(remote); err != nil {
+		return err
 	}
 	if strings.TrimSpace(branch) == "" {
 		return fmt.Errorf("git rendezvous: empty branch")
