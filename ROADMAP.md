@@ -307,11 +307,23 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
   docs/threat-model.md. The SDK/CLI surface is DONE: the Python and TypeScript
   `Workspace` handles, `terminate(outputs=..., checkpoint=...)`, and the
   `mitos ws` verbs over a cluster `WorkspaceBackend`, with LLM-legible rejection
-  (#28). OPEN: the CloudEvents revision change feed and the memory-snapshot
-  pairing producing a resumable head from a real checkpoint (slice 4); a real
-  external rendezvous server + credentials (a referenced Secret); the
-  per-workspace encryption key (#31); the per-node toolchain cache via Share; the
-  S3 object-store backend (this slice uses the node CAS).
+  (#28). DONE (prod hardening, slice 5): the CloudEvents revision change feed and
+  the memory-snapshot pairing producing a resumable head from a real checkpoint;
+  the authenticated external rendezvous server + referenced-Secret credentials;
+  the per-workspace encryption key (#31), encrypting every revision chunk and
+  manifest at rest under a per-workspace DEK (the same KMS envelope custody as
+  templates) while preserving the byte-identical round trip and content-addressed
+  dedup (the manifest digest stays plaintext-addressed); the S3 object-store
+  backend as an alternative to the node CAS (same content-addressed interface,
+  byte-identical round trip, dedup, credentials from a referenced Secret, and it
+  composes with per-workspace encryption); the workspace hydrate/dehydrate and
+  fork-latency benchmarks (`bench/workspace-*.sh`, method-only per the
+  no-unverified-claims rule); and the gated real-cluster workspace e2e
+  (`test/cluster-e2e/workspace-e2e.sh`, gated identically to the husk e2e). The
+  encryption-at-rest and S3-egress surface deltas are recorded in
+  docs/threat-model.md. OPEN: the per-node toolchain cache via Share; the live
+  cluster verification of the fork-sees-committed-state and resumable-head tails
+  (the gated e2e the maintainer runs on the KVM cluster).
 
 **Compliance & observability addendum (amends W1/W4):** permitted claim
 language is limited to what a CI job proves (CNCF-conformant clusters, PSA
@@ -403,11 +415,16 @@ Format-freeze blockers:
   envtest (Secret stores the wrapped DEK + KEK id and never a raw key, RPC carries
   them, fail-closed). The local AES-256-GCM provider is the CI-testable default;
   cloud KMS (AWS/GCP/Vault) is interface-shaped follow-up where the KEK never
-  leaves the HSM. See docs/encryption.md. Open follow-ups: forkd
+  leaves the HSM. See docs/encryption.md. PER-WORKSPACE SCOPE (#21) is now DONE:
+  the same envelope custody extends to the workspace artifact store, where every
+  revision chunk and manifest is encrypted at rest under a per-workspace DEK
+  while preserving the byte-identical round trip and content-addressed dedup (the
+  manifest digest stays plaintext-addressed); see W4 above and
+  docs/threat-model.md. Open follow-ups: forkd
   container-shred-on-template-GC wiring (the TEARDOWN BOUNDARY in
   enc_key_secret.go); cloud KMS/HSM providers; KEK rotation and DEK re-wrap; DEK
-  rotation / re-encryption; per-workspace scope (#21); encrypting the CAS chunk
-  store.
+  rotation / re-encryption; encrypting the template snapshot CAS chunk store (the
+  workspace artifact store is now encrypted).
 
 With #32 (mechanism done), #33 (mechanism done), and #31 (mechanism + custody
 both done, CI-proven), all three format-freeze blockers are now fully addressed.

@@ -418,15 +418,37 @@ PROVEN:
   `clusterbackend.go`), the Python `Workspace` handle plus
   `terminate(outputs=..., checkpoint=...)` (`sdk/python/mitos/workspace.py`), and
   the TypeScript parity (`sdk/typescript/src/workspace.ts`), each unit-tested.
+- Per-workspace encryption at rest (#31): when `spec.store.encryptionKeyRef` is
+  set, every revision chunk and manifest is encrypted with AES-256-GCM under a
+  per-workspace DEK (the same KMS envelope custody as templates; the DEK is
+  unwrapped only in node memory and never logged). The manifest digest stays
+  computed over plaintext, so an encrypted dehydrate yields the SAME content
+  identifier as a plaintext dehydrate (dedup preserved) and the round trip is
+  byte-identical with chunks ciphertext at rest; a wrong key fails closed. All
+  asserted in `internal/workspace/encryption_test.go`.
+- The S3 object-store backend: an S3-compatible bucket
+  (`spec.store.s3` + `objectStorageRef`) as an alternative to the node CAS, with
+  the same content-addressed interface, the same revision digest for a tree
+  (drop-in), byte-identical round trip, dedup by chunk-digest object key, and
+  composition with per-workspace encryption (ciphertext at rest in the bucket).
+  Credentials come from a referenced Secret; the secret-access-key derives only
+  the SigV4 signing key and never appears on the wire in cleartext. Proven in
+  `internal/workspace/s3store_test.go` and `s3client_test.go`.
+- Workspace benchmarks: `bench/workspace-hydrate-latency.sh` (hydrate /
+  dehydrate wall clock, recording the store mode) and
+  `bench/workspace-fork-latency.sh` (fork wall clock plus an O(0)-new-bytes
+  assertion: the forked revision shares the parent content manifest). Method-only;
+  numbers live in `bench/results/` only when reproducible from the scripts.
 
 OPEN (later W4 slices):
 
-- The per-workspace encryption key (#31).
-- The S3 / object-storage store backend (this slice uses the node CAS).
 - The push to a REAL external rendezvous server on a LIVE cluster is the gated
   tail (`test/cluster-e2e/workspace-e2e.sh`); the credentialed-push logic, the
   token redaction, and the authenticated server are proven in unit + envtest
   above. There is no auto-merge by design: git is the merge layer.
+- The fork-sees-committed-state path and the S3 / encrypted round trip on a LIVE
+  cluster are the gated tail (`test/cluster-e2e/workspace-e2e.sh`); the round
+  trip, the dedup, and the encryption are proven offline in unit tests above.
 - The memory-snapshot pairing that produces a resumable head is DONE: the
   disk+memory pairing, the resumable status, and the principal-binding refusal are
   envtest-proven and wired behind `--workspace-memory-snapshots` (see "Resumable
