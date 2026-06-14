@@ -222,10 +222,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.SandboxForkReconciler{
-		Client:       mgr.GetClient(),
-		NodeRegistry: nodeRegistry,
-	}).SetupWithManager(mgr); err != nil {
+	// The fork reconciler holds the husk fork fields. Its HuskTLS (the controller
+	// client mTLS config used to dial a source husk pod's network control to
+	// snapshot it) is the SAME config EnsurePKI returns; it is assigned below
+	// after bootstrap, exactly like the claim reconciler.
+	forkReconciler := &controller.SandboxForkReconciler{
+		Client:          mgr.GetClient(),
+		NodeRegistry:    nodeRegistry,
+		EnableHuskPods:  enableHuskPods,
+		HuskControlPort: huskControlPort,
+		HuskStubImage:   huskStubImage,
+		DataDir:         huskDataDir,
+		KVMResourceName: "mitos.run/kvm",
+	}
+	if err := forkReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxFork")
 		os.Exit(1)
 	}
@@ -278,6 +288,7 @@ func main() {
 		discovery.TLS = tlsConf
 		// The husk control channel uses the SAME controller client config.
 		claimReconciler.HuskTLS = tlsConf
+		forkReconciler.HuskTLS = tlsConf
 		logger.Info("PKI bootstrap complete; dialing forkd with mTLS", "namespace", discoveryNamespace)
 	}
 
