@@ -39,7 +39,8 @@ on:
     branches: [main]
     types: [labeled, synchronize, reopened]
 
-# Least-privilege token: this job only needs to read the repo to check out.
+# Least-privilege token at the workflow level: read the repo. The build-images
+# job widens this to packages: write for itself only.
 permissions:
   contents: read
 
@@ -50,7 +51,64 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Build the per-commit images the cluster job deploys under test.
+  #
+  # WHY THIS JOB EXISTS: publish.yaml only builds and pushes images on release
+  # git-tags (push: tags: v*), tagging type=ref,event=tag and type=sha. It does
+  # NOT run on every push to main or on workflow_dispatch, so no
+  # `mitos-controller:sha-<commit>` / `mitos-husk-stub:sha-<commit>` image
+  # exists for an arbitrary main commit. Pointing the cluster controller at a
+  # nonexistent sha tag yields ImagePullBackOff and the e2e never runs. This job
+  # builds the controller and husk-stub for THIS commit and pushes them to GHCR
+  # under an `e2e-<sha>` tag the cluster job then deploys.
+  #
+  # SECURITY: this job runs on a GitHub-hosted ubuntu runner and NEVER touches
+  # the cluster. It is still gated by the SAME `if:` as the cluster job so a fork
+  # PR cannot trigger even the build (defense in depth; a fork could not push to
+  # GHCR anyway, but we do not run untrusted code at all).
+  build-images:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+      )
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mitos-controller
+            dockerfile: Dockerfile.controller
+          - name: mitos-husk-stub
+            dockerfile: Dockerfile.husk-stub
+    env:
+      IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the e2e image for this commit
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ env.IMAGE }}:e2e-${{ github.sha }}
+
   cluster-husk-e2e:
+    # Build the per-commit images first; this job deploys them under test.
+    needs: build-images
     # The self-hosted runner in the cluster. Labels match the runner Deployment
     # (deploy/ci-runner/deployment.yaml LABELS).
     runs-on: [self-hosted, mitos-cluster]
@@ -82,11 +140,12 @@ jobs:
       E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
       # The control-plane namespace where the controller runs.
       MITOS_NAMESPACE: mitos
-      # The image tag to deploy under test. On main and dispatch we use the
-      # commit-sha tag the publish/build pipeline pushes to GHCR (type=sha =>
-      # sha-<short>). The full ref is github.sha; GHCR's sha tag is the short
-      # form, computed in the deploy step.
+      # The image tag to deploy under test. The build-images job above built and
+      # pushed the controller and husk-stub for THIS commit under the per-commit
+      # `e2e-<github.sha>` tag; we deploy that exact tag. This tag is gated and
+      # ephemeral (test-only); a per-commit tag is sufficient, no digest pin.
       IMAGE_REGISTRY: ghcr.io/paperclipinc
+      IMAGE_TAG: e2e-${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -101,21 +160,12 @@ jobs:
           kubectl version --client
           kubectl get nodes -l 'mitos.run/kvm=true' -o wide
 
-      - name: Resolve image tag
-        id: tag
-        run: |
-          set -euo pipefail
-          # The build/publish pipeline tags images type=sha => sha-<7 char>.
-          short="$(echo "${{ github.sha }}" | cut -c1-7)"
-          echo "sha_tag=sha-${short}" >> "$GITHUB_OUTPUT"
-          echo "Resolved image tag: sha-${short}"
-
       - name: Deploy images under test
         id: deploy
         run: |
           set -euo pipefail
-          CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${{ steps.tag.outputs.sha_tag }}"
-          HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${{ steps.tag.outputs.sha_tag }}"
+          CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${IMAGE_TAG}"
+          HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${IMAGE_TAG}"
           echo "Deploying controller=${CONTROLLER_IMG}"
           echo "Deploying husk-stub=${HUSK_IMG}"
 

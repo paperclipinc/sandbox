@@ -33,6 +33,10 @@ spec:
       # access, NO privilege, NO KVM. Restricted-PSS compliant.
       securityContext:
         runAsNonRoot: true
+        # The actions-runner image's user is "runner" (a non-numeric name), so the
+        # kubelet cannot verify non-root from runAsNonRoot alone; pin the numeric
+        # uid (1001 is the actions-runner "runner" user) so the check passes.
+        runAsUser: 1001
         seccompProfile:
           type: RuntimeDefault
       # Single runner; if the node is briefly NotReady do not pile up.
@@ -44,10 +48,12 @@ spec:
           # :latest tag is a readability placeholder; replace it with an
           # immutable digest (image@sha256:...) before applying, so a moving tag
           # cannot swap the runner binary out from under the cluster.
-          image: ghcr.io/paperclipinc/mitos-ci-runner:v1@sha256:3d13de2739d6d6e4d737bff55bea370b1db91d1d055b49b24683ab32aae2aa58
+          image: ghcr.io/paperclipinc/mitos-ci-runner:v2@sha256:3abbba066bb4684521e64a4f98c9017888ab98996cbb8867172bdcb9b0f0028a
           imagePullPolicy: IfNotPresent
-          # The official actions-runner entrypoint reads these env vars, runs
-          # config.sh to register, then run.sh. --ephemeral makes it a
+          # The custom registration entrypoint (deploy/ci-runner/entrypoint.sh,
+          # baked into the image) reads these env vars: it exchanges ACCESS_TOKEN
+          # (the fine-grained PAT) for a short-lived runner registration token,
+          # runs config.sh --ephemeral to register, then run.sh. Ephemeral = a
           # single-job runner that re-registers on restart.
           env:
             - name: RUNNER_NAME_PREFIX
@@ -89,6 +95,7 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             runAsNonRoot: true
+            runAsUser: 1001
             capabilities:
               drop:
                 - ALL

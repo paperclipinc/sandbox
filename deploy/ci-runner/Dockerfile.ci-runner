@@ -48,4 +48,10 @@ RUN python3 -m venv /opt/mitos-venv \
     && /opt/mitos-venv/bin/pip install --no-cache-dir /opt/mitos-sdk
 ENV PATH="/opt/mitos-venv/bin:${PATH}"
 
+# Registration entrypoint: the official base ships config.sh + run.sh but does
+# NOT auto-configure from env vars, so this script exchanges the PAT for a
+# registration token and runs an ephemeral runner. See entrypoint.sh.
+COPY --chmod=0755 deploy/ci-runner/entrypoint.sh /usr/local/bin/mitos-runner-entrypoint.sh
+
 USER runner
+ENTRYPOINT ["/usr/local/bin/mitos-runner-entrypoint.sh"]

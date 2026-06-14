@@ -176,7 +176,22 @@ kubectl create secret -n mitos-ci generic mitos-ci-runner-token \
 To rotate: re-create the Secret and restart the Deployment
 (`kubectl -n mitos-ci rollout restart deployment/mitos-ci-runner`).
 
-### 3. Apply the runner manifests
+### 3. Copy the ghcr image-pull Secret into `mitos-ci`
+
+The runner image is in the private `ghcr.io/paperclipinc` registry, and the
+ServiceAccount references an `imagePullSecrets` entry named `ghcr`. Copy the
+existing `ghcr` Secret (already present in the `mitos` namespace) into the new
+`mitos-ci` namespace so the runner pod can pull. The namespace is created by the
+apply in step 4, so create it first:
+
+```bash
+kubectl create namespace mitos-ci --dry-run=client -o yaml | kubectl apply -f -
+kubectl get secret ghcr -n mitos -o yaml \
+  | sed 's/namespace: mitos/namespace: mitos-ci/' \
+  | kubectl apply -n mitos-ci -f -
+```
+
+### 4. Apply the runner manifests
 
 ```bash
 kubectl apply -k deploy/ci-runner/
@@ -184,7 +199,9 @@ kubectl apply -k deploy/ci-runner/
 
 This creates the `mitos-ci` and `mitos-e2e` namespaces, the ServiceAccount, the
 least-privilege RBAC, and the ephemeral runner Deployment. It does NOT create
-the token Secret (you did that in step 2).
+the token Secret (step 2) or the pull Secret (step 3). The runner image is
+already built and pushed (`mitos-ci-runner:v2`, pinned by digest in
+`deployment.yaml`), so step 1 is only needed if you change the runner image.
 
 ### 4. Verify the runner registered
 
