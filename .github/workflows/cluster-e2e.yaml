@@ -88,6 +88,8 @@ jobs:
             dockerfile: Dockerfile.controller
           - name: mitos-husk-stub
             dockerfile: Dockerfile.husk-stub
+          - name: mitos-forkd
+            dockerfile: Dockerfile.forkd
     env:
       IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
     steps:
@@ -171,8 +173,29 @@ jobs:
           set -euo pipefail
           CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${IMAGE_TAG}"
           HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${IMAGE_TAG}"
+          FORKD_IMG="${IMAGE_REGISTRY}/mitos-forkd:${IMAGE_TAG}"
           echo "Deploying controller=${CONTROLLER_IMG}"
           echo "Deploying husk-stub=${HUSK_IMG}"
+          echo "Deploying forkd=${FORKD_IMG}"
+
+          # Update forkd FIRST. forkd is the BUILDER: it builds each template's
+          # snapshot and injects the guest agent into it. The e2e creates a fresh
+          # template in its first stage, so forkd must already run the code under
+          # test before that, otherwise the new template is built with an old
+          # guest agent whose vsock protocol does not match the new husk-stub/SDK.
+          #
+          # Record the current forkd image so teardown can restore it even if a
+          # later step fails.
+          PREV_FORKD_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get daemonset/mitos-forkd \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_forkd_image=${PREV_FORKD_IMG}" >> "$GITHUB_OUTPUT"
+          echo "Previous forkd image: ${PREV_FORKD_IMG}"
+
+          # Point the forkd DaemonSet at the just-built forkd image and wait for
+          # its rollout to finish before the e2e proceeds.
+          kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd \
+            forkd="${FORKD_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
 
           # Record the current controller image so teardown can restore it even
           # if a later step fails.
@@ -245,6 +268,16 @@ jobs:
             kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=180s
           else
             echo "no previous controller image recorded; leaving controller as-is"
+          fi
+
+          echo "=== teardown: restore the forkd DaemonSet image ==="
+          PREV_FORKD="${{ steps.deploy.outputs.prev_forkd_image }}"
+          if [ -n "${PREV_FORKD}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd \
+              forkd="${PREV_FORKD}"
+            kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
+          else
+            echo "no previous forkd image recorded; leaving forkd as-is"
           fi
           echo "teardown done"
           exit 0
