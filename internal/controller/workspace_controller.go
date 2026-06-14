@@ -301,15 +301,18 @@ func (r *WorkspaceReconciler) validateLineage(ctx context.Context, rev *v1alpha1
 	if src == nil {
 		return true, ""
 	}
-	if src.Workspace != rev.Spec.WorkspaceRef.Name {
-		return false, fmt.Sprintf("fromWorkspaceRevision references workspace %q but this revision belongs to %q; cross-workspace lineage is not allowed", src.Workspace, rev.Spec.WorkspaceRef.Name)
-	}
+	// The lineage edge is SAME-workspace for a revert/checkout (a new tip that
+	// shares a past revision's content in this workspace) and CROSS-workspace for
+	// a fork (this revision branches another workspace's committed revision into
+	// this one). Both are valid within the namespace, which is the tenancy
+	// boundary. The edge must resolve to an existing revision that actually
+	// belongs to the workspace the edge names (src.Workspace).
 	var parent v1alpha1.WorkspaceRevision
 	if err := r.Get(ctx, types.NamespacedName{Namespace: rev.Namespace, Name: src.Revision}, &parent); err != nil {
-		return false, fmt.Sprintf("fromWorkspaceRevision references revision %q which does not exist in workspace %q", src.Revision, src.Workspace)
+		return false, fmt.Sprintf("fromWorkspaceRevision references revision %q which does not exist", src.Revision)
 	}
-	if parent.Spec.WorkspaceRef.Name != rev.Spec.WorkspaceRef.Name {
-		return false, fmt.Sprintf("fromWorkspaceRevision parent %q belongs to workspace %q, not %q", src.Revision, parent.Spec.WorkspaceRef.Name, rev.Spec.WorkspaceRef.Name)
+	if parent.Spec.WorkspaceRef.Name != src.Workspace {
+		return false, fmt.Sprintf("fromWorkspaceRevision parent %q belongs to workspace %q, not the referenced %q", src.Revision, parent.Spec.WorkspaceRef.Name, src.Workspace)
 	}
 	return true, ""
 }
