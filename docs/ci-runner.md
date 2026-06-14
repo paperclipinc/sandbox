@@ -158,8 +158,11 @@ short-lived registration tokens from it across ephemeral restarts.
 Create a fine-grained PAT at GitHub Settings -> Developer settings ->
 Fine-grained tokens, scoped to the `paperclipinc/mitos` repo with:
 
-- Repository permissions: `Administration: Read and write` (required to
-  register/remove self-hosted runners), `Actions: Read and write`.
+- Repository permissions: `Administration: Read and write` ONLY (this is what
+  grants self-hosted runner register/remove; the registration-token endpoint is
+  gated on `administration:write`). `Metadata: Read-only` is added automatically.
+  The `Actions` permission is NOT needed: the runner uses its own runner-token
+  (obtained at registration) to run jobs, so the PAT never touches Actions.
 
 Then create the Secret IN the cluster (the token value lives ONLY here, never in
 the repo):
