@@ -6,8 +6,12 @@ import json
 import threading
 from typing import Callable, Optional
 
-import websockets  # the async websockets package
 from websocket import WebSocketApp  # from the websocket-client package
+
+# NOTE: the async 'websockets' package is an OPTIONAL extra (mitos[async]); it is
+# imported lazily inside AsyncPtyHandle.connect so that importing this module (and
+# therefore mitos.sandbox) never fails when only the synchronous path is used and
+# the extra is not installed.
 
 
 class PtyHandle:
@@ -121,6 +125,13 @@ class AsyncPtyHandle:
         on_data: Callable[[bytes], None],
     ) -> "AsyncPtyHandle":
         headers = [("Authorization", f"Bearer {token}")] if token else []
+        try:
+            import websockets  # the async package, the mitos[async] extra
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "the async PTY requires the 'websockets' package; install mitos[async]. "
+                "The synchronous pty.create() path needs only websocket-client."
+            ) from exc
         ws = await websockets.connect(
             url,
             additional_headers=headers,

@@ -165,11 +165,29 @@ echo "--- stages 2-5: claim, exec, fork, run_code, PTY (SDK driver) ---"
 
 driver_out="$(mktemp)"
 set +e
+
+# Install the SDK from the CHECKED-OUT commit into a fresh venv and run the
+# driver with it, rather than the SDK baked into the runner image. This means
+# the e2e always tests THIS commit's SDK, and the runner image never needs a
+# rebuild when the SDK changes. The workspace venv is writable by the runner
+# uid (the baked /opt/mitos-venv may not be). The sync driver needs only the
+# SDK's runtime deps (httpx, websocket-client); the async 'websockets' extra is
+# not required (and is lazy-imported by the SDK).
+DRIVER_PY="python3"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ -d "${REPO_ROOT}/sdk/python" ]; then
+  echo "--- installing the checked-out SDK into a fresh venv ---"
+  python3 -m venv /tmp/e2e-sdk-venv
+  /tmp/e2e-sdk-venv/bin/pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+  /tmp/e2e-sdk-venv/bin/pip install --quiet "${REPO_ROOT}/sdk/python"
+  DRIVER_PY="/tmp/e2e-sdk-venv/bin/python"
+fi
+
 INCLUSTER="false"
 [ -z "${KUBECONFIG:-}" ] && INCLUSTER="true"
 MITOS_NS="$NAMESPACE" MITOS_POOL="$POOL" MITOS_CLAIM="$CLAIM" \
 MITOS_INCLUSTER="$INCLUSTER" MITOS_READY_TIMEOUT="$READY_TIMEOUT" \
-python3 - <<'PYEOF' | tee "$driver_out"
+"$DRIVER_PY" - <<'PYEOF' | tee "$driver_out"
 import os
 import sys
 import time
