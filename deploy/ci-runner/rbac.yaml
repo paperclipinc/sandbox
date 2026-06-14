@@ -146,6 +146,11 @@ rules:
       - apps
     resources:
       - deployments
+      # The husk e2e also deploys-under-test the forkd DaemonSet (the builder
+      # that injects the guest agent into each template snapshot), so the agent
+      # matches the commit's exec_stream protocol. get/patch/update + rollout
+      # status only; no create/delete.
+      - daemonsets
     verbs:
       - get
       - list
