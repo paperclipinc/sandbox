@@ -174,6 +174,7 @@ func run() error {
 		templateRootfs  = flag.String("template-rootfs", "", "host path of the template rootfs.ext4 to clone per activation. Empty (with --rootfs-cow-dir) disables the per-activation clone")
 		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
 		forksDir        = flag.String("forks-dir", "", "directory the node forks dir is mounted at, where a fork-snapshot op writes <forks-dir>/<fork-id>/{mem,vmstate}. When set, the serving stub confines fork-snapshot and remove-fork-snapshot writes to within it (fail-closed: a request naming a path outside it is refused). Empty leaves the prior behavior (the request's snapshot dir is used as-is). A node-local path, not a secret")
+		casDir          = flag.String("cas-dir", "", "directory the node content-addressed store is mounted at (read-write). When set, the dehydrate-workspace control op captures the active VM's /workspace into it and returns the manifest digest, and the hydrate-workspace op restores a manifest back into the VM. Empty disables the workspace ops (they fail closed). A node-local path, not a secret; workspace content is never logged")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -371,6 +372,10 @@ func run() error {
 		// The node forks dir this pod mounts: the serving stub confines
 		// fork-snapshot / remove-fork-snapshot writes to within it (fail-closed).
 		ForksDir: *forksDir,
+		// The node CAS this pod mounts read-write: the dehydrate-workspace op
+		// persists a captured /workspace here and the hydrate-workspace op restores
+		// from it. Empty disables the workspace ops (fail-closed).
+		CASDir: *casDir,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")

@@ -245,6 +245,18 @@ func main() {
 		logger.Info("workspace memory snapshots: disabled (default); a checkpoint-on-terminate fails loud. Pass --workspace-memory-snapshots to enable resumable heads")
 	}
 
+	// Workspace transport (W4): in husk mode the hydrate/dehydrate of a claim's
+	// /workspace is DELEGATED to the husk-stub control op that owns the VM's vsock
+	// and the node CAS (the controller is not on the node). The claim reconciler's
+	// default hydrate/dehydrate path self-wires to dial the claim's husk pod
+	// (defaultHuskHydrate / defaultHuskDehydrate) over the SAME mTLS control
+	// channel that carries Activate + the fork-snapshot ops, using the HuskTLS
+	// assigned after bootstrap below. So the not-wired transport seam no longer
+	// fires in husk mode; the raw-forkd path keeps the documented seam.
+	if enableHuskPods {
+		logger.Info("workspace transport: husk delegation ENABLED; a claim's /workspace hydrate/dehydrate is delegated to the husk-stub control op (the node owns the VM vsock + node CAS); the controller commits the revision and advances the head")
+	}
+
 	if err := claimReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to create controller", "controller", "SandboxClaim")
 		os.Exit(1)

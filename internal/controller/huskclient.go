@@ -90,6 +90,73 @@ func ForkSnapshotOnHusk(ctx context.Context, addr string, tlsConf *tls.Config, r
 	return res, nil
 }
 
+// DehydrateWorkspaceOnHusk dials a husk stub's network control at addr over mTLS
+// and runs the dehydrate-workspace op: it asks the stub holding the claim's
+// running VM to capture its guest /workspace into the node CAS and return the
+// content manifest digest. req carries NO secrets (path lists only); the channel
+// is still mTLS because the same control surface delivers secrets on activate and
+// must not accept an unauthenticated peer for any op. A nil tlsConf is refused.
+//
+// The manifest digest in the result is a content address, not a secret; no
+// workspace content bytes ride the result. The controller records the digest as
+// the new WorkspaceRevision's ContentManifest.
+func DehydrateWorkspaceOnHusk(ctx context.Context, addr string, tlsConf *tls.Config, req husk.DehydrateWorkspaceRequest) (husk.DehydrateWorkspaceResult, error) {
+	if tlsConf == nil {
+		return husk.DehydrateWorkspaceResult{}, fmt.Errorf("dehydrate-workspace on husk %s: refusing to drive the control channel unauthenticated", addr)
+	}
+	dialer := &tls.Dialer{Config: tlsConf}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return husk.DehydrateWorkspaceResult{}, fmt.Errorf("dial husk control %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := husk.WriteControlOp(conn, husk.OpDehydrateWorkspace); err != nil {
+		return husk.DehydrateWorkspaceResult{}, fmt.Errorf("send dehydrate-workspace op to %s: %w", addr, err)
+	}
+	if err := husk.WriteDehydrateWorkspaceRequest(conn, req); err != nil {
+		return husk.DehydrateWorkspaceResult{}, fmt.Errorf("send dehydrate-workspace request to %s: %w", addr, err)
+	}
+	res, err := husk.ReadDehydrateWorkspaceResult(conn)
+	if err != nil {
+		return husk.DehydrateWorkspaceResult{}, fmt.Errorf("read dehydrate-workspace result from %s: %w", addr, err)
+	}
+	return res, nil
+}
+
+// HydrateWorkspaceOnHusk dials a husk stub's network control at addr over mTLS
+// and runs the hydrate-workspace op: it asks the stub holding the claim's running
+// VM to restore a node-CAS manifest into its guest /workspace. req carries NO
+// secrets (a content-address manifest digest only); the channel is still mTLS for
+// the same reason as the other ops. A nil tlsConf is refused.
+func HydrateWorkspaceOnHusk(ctx context.Context, addr string, tlsConf *tls.Config, req husk.HydrateWorkspaceRequest) (husk.HydrateWorkspaceResult, error) {
+	if tlsConf == nil {
+		return husk.HydrateWorkspaceResult{}, fmt.Errorf("hydrate-workspace on husk %s: refusing to drive the control channel unauthenticated", addr)
+	}
+	dialer := &tls.Dialer{Config: tlsConf}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return husk.HydrateWorkspaceResult{}, fmt.Errorf("dial husk control %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := husk.WriteControlOp(conn, husk.OpHydrateWorkspace); err != nil {
+		return husk.HydrateWorkspaceResult{}, fmt.Errorf("send hydrate-workspace op to %s: %w", addr, err)
+	}
+	if err := husk.WriteHydrateWorkspaceRequest(conn, req); err != nil {
+		return husk.HydrateWorkspaceResult{}, fmt.Errorf("send hydrate-workspace request to %s: %w", addr, err)
+	}
+	res, err := husk.ReadHydrateWorkspaceResult(conn)
+	if err != nil {
+		return husk.HydrateWorkspaceResult{}, fmt.Errorf("read hydrate-workspace result from %s: %w", addr, err)
+	}
+	return res, nil
+}
+
 // RemoveForkSnapshotOnHusk dials the source husk stub and asks it to delete a
 // fork snapshot dir it previously created (the GC counterpart of
 // ForkSnapshotOnHusk). It is best-effort from the caller's perspective: the

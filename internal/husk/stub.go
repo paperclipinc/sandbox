@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,10 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/paperclipinc/mitos/internal/cas"
 	"github.com/paperclipinc/mitos/internal/firecracker"
 	"github.com/paperclipinc/mitos/internal/snapcompat"
 	"github.com/paperclipinc/mitos/internal/volume"
 	"github.com/paperclipinc/mitos/internal/vsock"
+	"github.com/paperclipinc/mitos/internal/workspace"
 )
 
 // entropySize is the number of crypto/rand bytes generated per activation and
@@ -153,6 +156,26 @@ func productionNotifier(vsockPath string, generation uint64, entropy []byte, req
 // dst carry no secrets.
 type reflinker func(src, dst string) error
 
+// wsTransporter resolves a workspace.VsockTransport (the bulk tar TarDir/UntarDir
+// slice of the guest agent) for the active VM at vsockPath. The dehydrate and
+// hydrate workspace ops run the KVM-proven internal/workspace round trip through
+// it. The production seam connects a vsock client to the guest agent; tests
+// inject a fake in-memory transport so the ops can be exercised with no VM.
+type wsTransporter func(vsockPath string) (workspace.VsockTransport, error)
+
+// productionWorkspaceTransport connects the vsock client to the guest agent at
+// vsockPath (the SAME AgentPort the activate handshake and sandbox API use) and
+// returns it as a workspace.VsockTransport (it satisfies TarDir/UntarDir). The
+// caller closes the client when done. Workspace content bytes never appear in
+// any log line: only the operation and the transport error are reported.
+func productionWorkspaceTransport(vsockPath string) (workspace.VsockTransport, error) {
+	client, err := vsock.Connect(vsockPath, vsock.AgentPort)
+	if err != nil {
+		return nil, fmt.Errorf("connect guest agent for workspace transfer: %w", err)
+	}
+	return client, nil
+}
+
 // productionStarter wraps firecracker.StartVM. *firecracker.Client satisfies
 // vmm (it has LoadSnapshotWithOverrides, VsockHostPath, and we adapt Kill to
 // Close below).
@@ -273,6 +296,18 @@ type Options struct {
 	// SnapshotDir is used as-is, the prior behavior). A node-local path, not a
 	// secret.
 	ForksDir string
+	// CASDir is the node content-addressed store root mounted into this pod
+	// (the same <dataDir>/cas the forkd build path writes). When set, the
+	// dehydrate-workspace op captures the guest /workspace into it and returns the
+	// manifest digest, and the hydrate-workspace op reads a manifest back from it
+	// into the guest. Empty disables the workspace ops (they fail closed): a stub
+	// without a node CAS cannot persist or restore a workspace. A node-local path,
+	// not a secret; workspace CONTENT is never logged.
+	CASDir string
+	// WorkspaceTransport resolves the guest-agent bulk-tar transport for the
+	// workspace ops. Nil uses the production seam (connect a vsock client to the
+	// active VM's guest agent). Tests inject a fake in-memory transport.
+	WorkspaceTransport wsTransporter
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -310,6 +345,14 @@ type Stub struct {
 	// when set; empty disables the check.
 	forksDir string
 
+	// casStore is the node CAS the workspace dehydrate/hydrate ops persist to and
+	// restore from; nil disables those ops (they fail closed). wsTransport resolves
+	// the guest-agent bulk-tar transport for them; vsockRelPath is the relative
+	// vsock UDS path the active VM's guest agent listens on.
+	casStore     *cas.Store
+	wsTransport  wsTransporter
+	vsockRelPath string
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -337,6 +380,8 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		rootfsCoWDir:       opts.RootfsCoWDir,
 		reflink:            opts.Reflink,
 		forksDir:           opts.ForksDir,
+		wsTransport:        opts.WorkspaceTransport,
+		vsockRelPath:       firecracker.VsockRelPath,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -359,6 +404,21 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.reflink == nil {
 		s.reflink = volume.New("").ReflinkCopy
+	}
+	if s.wsTransport == nil {
+		s.wsTransport = productionWorkspaceTransport
+	}
+	// Open the node CAS when a dir is configured. A failure here is logged (path
+	// only, no content) and leaves casStore nil, so the workspace ops fail closed
+	// rather than the whole stub failing to start: the fork/activate/warm-pool
+	// paths do not need the CAS.
+	if opts.CASDir != "" {
+		store, err := cas.New(opts.CASDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "husk: open node CAS at %s: %v\n", opts.CASDir, err)
+		} else {
+			s.casStore = store
+		}
 	}
 	return s
 }
@@ -665,6 +725,127 @@ func (s *Stub) RemoveForkSnapshot(req ForkSnapshotRequest) error {
 		return fmt.Errorf("husk: remove fork snapshot %s: %w", req.SnapshotDir, err)
 	}
 	return nil
+}
+
+// DehydrateWorkspace captures the active VM's guest /workspace into the node CAS
+// and returns the content manifest digest. It is the node-side delegate of the
+// controller's dehydrate-on-terminate: the controller owns the VM's vsock and
+// the node CAS through THIS husk pod, not in-process, so it asks the owning stub
+// to run the capture. The stub reuses the KVM-proven internal/workspace.Dehydrate
+// (vsock TarDir over /workspace, then store into the node CAS); it does NOT
+// reimplement tar or CAS.
+//
+// FAIL CLOSED: it requires StateActive (else error, no capture) and a configured
+// node CAS (else error). Secret/credential paths in req.ExcludePaths are stripped
+// from the captured tree per the no-secrets-in-revisions policy. The manifest
+// digest is a content address, NOT a secret; workspace CONTENT bytes are never
+// logged or returned in an error. The stub stays StateActive throughout.
+func (s *Stub) DehydrateWorkspace(ctx context.Context, req DehydrateWorkspaceRequest) (DehydrateWorkspaceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state != StateActive {
+		werr := fmt.Errorf("husk: dehydrate-workspace in state %s: must be active", s.state)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: dehydrate-workspace: no node CAS configured; set --cas-dir so the stub can persist a workspace revision")
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgent()
+	if err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	digest, err := workspace.Dehydrate(ctx, agent, s.casStore, req.ExcludePaths, req.CapturePaths)
+	if err != nil {
+		// The error carries the operation and the transport/store error only; it
+		// never carries workspace content bytes.
+		werr := fmt.Errorf("husk: dehydrate workspace: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: dehydrate workspace produced an invalid content digest: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	latency := time.Since(start)
+	return DehydrateWorkspaceResult{
+		OK:             true,
+		ManifestDigest: string(digest),
+		LatencyMs:      float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// HydrateWorkspace restores a node-CAS manifest into the active VM's guest
+// /workspace (the inverse of DehydrateWorkspace), reusing the KVM-proven
+// internal/workspace.Hydrate (materialize the manifest from the node CAS, then
+// vsock UntarDir into /workspace, which sanitizes every member against
+// traversal). It is the node-side delegate of the controller's hydrate-on-activate.
+//
+// FAIL CLOSED: it requires StateActive, a configured node CAS, and a valid
+// content-address manifest digest (else error, no restore). The manifest digest
+// is a content address, NOT a secret; workspace CONTENT bytes are never logged.
+// The stub stays StateActive throughout.
+func (s *Stub) HydrateWorkspace(ctx context.Context, req HydrateWorkspaceRequest) (HydrateWorkspaceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state != StateActive {
+		werr := fmt.Errorf("husk: hydrate-workspace in state %s: must be active", s.state)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: no node CAS configured; set --cas-dir so the stub can restore a workspace revision")
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	digest := cas.Digest(req.ManifestDigest)
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgent()
+	if err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	if err := workspace.Hydrate(ctx, agent, s.casStore, digest); err != nil {
+		werr := fmt.Errorf("husk: hydrate workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	latency := time.Since(start)
+	return HydrateWorkspaceResult{
+		OK:        true,
+		LatencyMs: float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// dialWorkspaceAgent resolves the guest-agent bulk-tar transport for the active
+// VM and returns it plus a close hook. The production transport is a vsock
+// client (closed by the hook); a test transport has no close (the hook is a
+// no-op). The caller holds s.mu.
+func (s *Stub) dialWorkspaceAgent() (workspace.VsockTransport, func(), error) {
+	vsockPath := s.vm.VsockHostPath(s.vsockRelPath)
+	agent, err := s.wsTransport(vsockPath)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("husk: connect guest agent for workspace transfer: %w", err)
+	}
+	closeHook := func() {}
+	if c, ok := agent.(io.Closer); ok {
+		closeHook = func() { _ = c.Close() }
+	}
+	return agent, closeHook, nil
 }
 
 // confineToForksDir refuses a fork-snapshot / remove-fork-snapshot SnapshotDir

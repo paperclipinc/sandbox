@@ -138,6 +138,18 @@ type SandboxClaimReconciler struct {
 	HydrateWorkspace   hydrateFunc
 	DehydrateWorkspace dehydrateFunc
 
+	// WorkspaceHydrateDelegate and WorkspaceDehydrateDelegate are the husk-mode
+	// transport delegates the default hydrate/dehydrate paths route through when
+	// EnableHuskPods is set. The controller is not on the node and cannot reach the
+	// guest vsock or the node CAS, so it delegates the actual transfer to the
+	// husk-stub control op that owns both (dial the claim's husk pod, like the fork
+	// path). Nil defaults to the real path that dials the husk pod
+	// (defaultHuskHydrate / defaultHuskDehydrate); envtest injects a recording
+	// delegate. Only used when EnableHuskPods is true; the controller still owns the
+	// WorkspaceRevision commit + head advance once the delegate returns the digest.
+	WorkspaceHydrateDelegate   hydrateFunc
+	WorkspaceDehydrateDelegate dehydrateFunc
+
 	// DiffWorkspace computes a new revision's content-hash diff against the
 	// workspace head before it, for a terminate {diff: true} output. Nil defaults
 	// to the real store-backed path; envtest injects a fake.

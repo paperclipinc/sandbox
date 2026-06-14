@@ -159,6 +159,20 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	r.RepoFilesForGit = repoFiles
 }
 
+// SetWorkspaceDelegateForTest injects the husk-mode workspace transport
+// delegates (the dial-the-husk-pod hydrate/dehydrate ops) so envtest can prove
+// the husk reconciler routes its default hydrate/dehydrate through the delegate
+// (and the controller still commits the revision + advances the head) without a
+// real husk pod or vsock. hydrate records the manifest it was asked to restore;
+// dehydrate returns a scripted digest and records the excludes/captures.
+func (r *SandboxClaimReconciler) SetWorkspaceDelegateForTest(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+) {
+	r.WorkspaceHydrateDelegate = hydrate
+	r.WorkspaceDehydrateDelegate = dehydrate
+}
+
 // MemSnapshotResultForTest is the exported alias of the unexported
 // memSnapshotResult so the external controller_test package can name the
 // checkpoint fake's return type.

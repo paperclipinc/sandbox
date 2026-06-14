@@ -116,6 +116,12 @@ const (
 	OpForkSnapshot = "fork-snapshot"
 	// OpRemoveForkSnapshot deletes a previously created fork snapshot dir.
 	OpRemoveForkSnapshot = "remove-fork-snapshot"
+	// OpDehydrateWorkspace captures the active VM's /workspace into the node CAS
+	// and returns the content manifest digest.
+	OpDehydrateWorkspace = "dehydrate-workspace"
+	// OpHydrateWorkspace restores a node-CAS manifest into the active VM's
+	// /workspace.
+	OpHydrateWorkspace = "hydrate-workspace"
 )
 
 // WriteControlOp writes the op envelope line that precedes a request.
@@ -257,6 +263,102 @@ func ReadRemoveForkSnapshotRequest(r io.Reader) (RemoveForkSnapshotRequest, erro
 	var req RemoveForkSnapshotRequest
 	err := readLine(r, &req)
 	return req, err
+}
+
+// DehydrateWorkspaceRequest asks a husk stub holding a RUNNING (active) VM to
+// capture its guest /workspace into the node content-addressed store and return
+// the resulting manifest digest. The capture runs the same KVM-proven bulk tar
+// round trip the controller's in-process path used (vsock TarDir over
+// /workspace, then internal/workspace.Dehydrate into the node CAS), so the
+// returned digest is identical to what an in-controller capture would produce.
+//
+// ExcludePaths strips conventional secret/credential paths from the captured
+// tree (defense in depth for the no-secrets-in-revisions rule); CapturePaths
+// narrows the capture to the listed /workspace subtrees (nil captures the whole
+// workspace). Neither carries a secret VALUE: they are path lists, safe to move
+// on the wire. The request itself carries no secret.
+type DehydrateWorkspaceRequest struct {
+	ExcludePaths []string `json:"exclude_paths,omitempty"`
+	CapturePaths []string `json:"capture_paths,omitempty"`
+}
+
+// DehydrateWorkspaceResult is the control reply for a dehydrate-workspace op. OK
+// is true only when the guest workspace was tarred, captured to the node CAS,
+// and a valid content manifest digest was produced. ManifestDigest is that
+// content address (NOT a secret); the controller records it as the new
+// WorkspaceRevision's ContentManifest. Error carries actionable remediation text
+// when OK is false; it never carries secrets or content bytes.
+type DehydrateWorkspaceResult struct {
+	OK             bool    `json:"ok"`
+	ManifestDigest string  `json:"manifest_digest,omitempty"`
+	LatencyMs      float64 `json:"latency_ms"`
+	Error          string  `json:"error,omitempty"`
+}
+
+// HydrateWorkspaceRequest asks a husk stub holding a RUNNING (active) VM to
+// restore a node-CAS manifest into its guest /workspace (the inverse of
+// DehydrateWorkspace), running internal/workspace.Hydrate: it materializes the
+// manifest's files from the node CAS and sends them to the guest over vsock
+// (UntarDir, which sanitizes every member against traversal). ManifestDigest is
+// a content address, NOT a secret. The request carries no secret.
+type HydrateWorkspaceRequest struct {
+	ManifestDigest string `json:"manifest_digest"`
+}
+
+// HydrateWorkspaceResult is the control reply for a hydrate-workspace op. OK is
+// true only when the manifest was read from the node CAS and untarred into the
+// guest workspace. Error carries actionable remediation text when OK is false;
+// it never carries secrets or content bytes.
+type HydrateWorkspaceResult struct {
+	OK        bool    `json:"ok"`
+	LatencyMs float64 `json:"latency_ms"`
+	Error     string  `json:"error,omitempty"`
+}
+
+func readDehydrateWorkspaceRequest(r *bufio.Reader) (DehydrateWorkspaceRequest, error) {
+	var req DehydrateWorkspaceRequest
+	err := readLineReader(r, &req)
+	return req, err
+}
+
+func readHydrateWorkspaceRequest(r *bufio.Reader) (HydrateWorkspaceRequest, error) {
+	var req HydrateWorkspaceRequest
+	err := readLineReader(r, &req)
+	return req, err
+}
+
+// WriteDehydrateWorkspaceRequest writes a DehydrateWorkspaceRequest as one JSON line.
+func WriteDehydrateWorkspaceRequest(w io.Writer, req DehydrateWorkspaceRequest) error {
+	return writeLine(w, req)
+}
+
+// ReadDehydrateWorkspaceResult reads one line-delimited DehydrateWorkspaceResult.
+func ReadDehydrateWorkspaceResult(r io.Reader) (DehydrateWorkspaceResult, error) {
+	var res DehydrateWorkspaceResult
+	err := readLine(r, &res)
+	return res, err
+}
+
+// WriteDehydrateWorkspaceResult writes a DehydrateWorkspaceResult as one JSON line.
+func WriteDehydrateWorkspaceResult(w io.Writer, res DehydrateWorkspaceResult) error {
+	return writeLine(w, res)
+}
+
+// WriteHydrateWorkspaceRequest writes a HydrateWorkspaceRequest as one JSON line.
+func WriteHydrateWorkspaceRequest(w io.Writer, req HydrateWorkspaceRequest) error {
+	return writeLine(w, req)
+}
+
+// ReadHydrateWorkspaceResult reads one line-delimited HydrateWorkspaceResult.
+func ReadHydrateWorkspaceResult(r io.Reader) (HydrateWorkspaceResult, error) {
+	var res HydrateWorkspaceResult
+	err := readLine(r, &res)
+	return res, err
+}
+
+// WriteHydrateWorkspaceResult writes a HydrateWorkspaceResult as one JSON line.
+func WriteHydrateWorkspaceResult(w io.Writer, res HydrateWorkspaceResult) error {
+	return writeLine(w, res)
 }
 
 func writeLine(w io.Writer, v interface{}) error {

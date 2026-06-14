@@ -3,12 +3,16 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
 	"github.com/paperclipinc/mitos/internal/cas"
+	"github.com/paperclipinc/mitos/internal/husk"
 	"github.com/paperclipinc/mitos/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -229,14 +233,18 @@ func (r *SandboxClaimReconciler) memorySnapshotExists() memorySnapshotExistsFunc
 	}
 }
 
-// defaultHydrate is the production hydrate path. It requires the node-side
-// transport that reaches the claim's guest agent (the same path that delivers
-// exec/file traffic). That transport is wired by the node integration; until it
-// is present this returns an actionable error rather than silently skipping the
-// hydrate, so a misconfigured deployment fails loud instead of starting a
-// sandbox with an empty workspace. The seam is what envtest and the KVM proof
-// exercise.
+// defaultHydrate is the production hydrate path. The controller is NOT on the
+// node and cannot reach the guest vsock or the node CAS, so in husk mode it
+// DELEGATES the hydrate to the node component that owns the VM's vsock and the
+// node CAS: the husk-stub control op (dial the claim's husk pod, like the fork
+// path). When EnableHuskPods is set the WorkspaceHydrateDelegate carries that
+// op; nil defaults to dialing the husk pod (defaultHuskHydrate). The raw-forkd
+// path has no in-controller transport, so it falls back to the documented
+// not-wired seam (workspaceTransport) rather than silently skipping the hydrate.
 func (r *SandboxClaimReconciler) defaultHydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+	if r.EnableHuskPods {
+		return r.huskHydrate()(ctx, claim, manifest)
+	}
 	agent, store, err := r.workspaceTransport(claim)
 	if err != nil {
 		return err
@@ -245,13 +253,128 @@ func (r *SandboxClaimReconciler) defaultHydrate(ctx context.Context, claim *v1al
 }
 
 // defaultDehydrate is the production dehydrate path; see defaultHydrate for the
-// transport requirement.
+// husk delegation. In husk mode it delegates the capture to the husk-stub
+// dehydrate-workspace op, which runs the guest vsock TarDir over /workspace and
+// stores it into the node CAS, then returns the manifest digest. The controller
+// still owns the WorkspaceRevision commit + head advance once the digest comes
+// back.
 func (r *SandboxClaimReconciler) defaultDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+	if r.EnableHuskPods {
+		return r.huskDehydrate()(ctx, claim, excludePaths, capturePaths)
+	}
 	agent, store, err := r.workspaceTransport(claim)
 	if err != nil {
 		return "", err
 	}
 	return workspace.Dehydrate(ctx, agent, store, excludePaths, capturePaths)
+}
+
+// huskHydrate returns the configured husk hydrate delegate or the default real
+// path that dials the claim's husk pod control op.
+func (r *SandboxClaimReconciler) huskHydrate() hydrateFunc {
+	if r.WorkspaceHydrateDelegate != nil {
+		return r.WorkspaceHydrateDelegate
+	}
+	return r.defaultHuskHydrate
+}
+
+// huskDehydrate returns the configured husk dehydrate delegate or the default
+// real path that dials the claim's husk pod control op.
+func (r *SandboxClaimReconciler) huskDehydrate() dehydrateFunc {
+	if r.WorkspaceDehydrateDelegate != nil {
+		return r.WorkspaceDehydrateDelegate
+	}
+	return r.defaultHuskDehydrate
+}
+
+// huskWorkspaceTransferTimeout bounds a single hydrate/dehydrate control op
+// against a husk pod. A workspace tar over vsock plus a node-CAS write is bounded
+// but can be large; this is generous enough for a real transfer and short enough
+// that a wedged husk pod cannot block the reconcile indefinitely.
+const huskWorkspaceTransferTimeout = 120 * time.Second
+
+// defaultHuskDehydrate is the production husk dehydrate path: it dials the
+// claim's husk pod control channel and runs the dehydrate-workspace op, which
+// captures the guest /workspace into the node CAS and returns the content
+// manifest digest. The controller commits the WorkspaceRevision and advances the
+// head from that digest; the transfer itself runs on the node that owns the VM's
+// vsock and the node CAS. It fails closed: an unreachable pod or a not-OK result
+// is an error, so the terminate retries rather than committing a revision the
+// node never produced.
+func (r *SandboxClaimReconciler) defaultHuskDehydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+	addr, err := r.huskPodControlAddr(ctx, claim)
+	if err != nil {
+		return "", err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
+	defer cancel()
+	res, err := DehydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, husk.DehydrateWorkspaceRequest{
+		ExcludePaths: excludePaths,
+		CapturePaths: capturePaths,
+	})
+	if err != nil {
+		return "", fmt.Errorf("dehydrate workspace on husk pod %s: %w", claim.Status.SandboxID, err)
+	}
+	if !res.OK {
+		// res.Error carries actionable remediation from the stub; it never carries
+		// secrets or content bytes.
+		return "", fmt.Errorf("dehydrate workspace on husk pod %s: %s", claim.Status.SandboxID, res.Error)
+	}
+	d := cas.Digest(res.ManifestDigest)
+	if err := d.Validate(); err != nil {
+		return "", fmt.Errorf("husk dehydrate for claim %s returned an invalid content digest: %w", claim.Name, err)
+	}
+	return d, nil
+}
+
+// defaultHuskHydrate is the production husk hydrate path: it dials the claim's
+// husk pod control channel and runs the hydrate-workspace op, which restores the
+// given node-CAS manifest into the guest /workspace. It fails closed: an
+// unreachable pod or a not-OK result is an error, so the activate retries rather
+// than starting a sandbox with an empty workspace.
+func (r *SandboxClaimReconciler) defaultHuskHydrate(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+	if err := manifest.Validate(); err != nil {
+		return fmt.Errorf("husk hydrate manifest digest: %w", err)
+	}
+	addr, err := r.huskPodControlAddr(ctx, claim)
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, huskWorkspaceTransferTimeout)
+	defer cancel()
+	res, err := HydrateWorkspaceOnHusk(opCtx, addr, r.HuskTLS, husk.HydrateWorkspaceRequest{
+		ManifestDigest: string(manifest),
+	})
+	if err != nil {
+		return fmt.Errorf("hydrate workspace on husk pod %s: %w", claim.Status.SandboxID, err)
+	}
+	if !res.OK {
+		return fmt.Errorf("hydrate workspace on husk pod %s: %s", claim.Status.SandboxID, res.Error)
+	}
+	return nil
+}
+
+// huskPodControlAddr resolves the mTLS control address of the claim's husk pod
+// (podIP:controlPort). A husk claim records Status.SandboxID = pod name; the pod
+// IP is read live so a rescheduled pod resolves. A missing pod, an unscheduled
+// pod (no IP), or a claim with no SandboxID is an error so the caller retries
+// rather than dialing a stale address.
+func (r *SandboxClaimReconciler) huskPodControlAddr(ctx context.Context, claim *v1alpha1.SandboxClaim) (string, error) {
+	if claim.Status.SandboxID == "" {
+		return "", fmt.Errorf("claim %s has no husk pod yet (empty SandboxID); cannot run the workspace transfer", claim.Name)
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Status.SandboxID}, &pod); err != nil {
+		return "", fmt.Errorf("resolve husk pod %s for workspace transfer: %w", claim.Status.SandboxID, err)
+	}
+	if pod.Status.PodIP == "" {
+		return "", fmt.Errorf("husk pod %s has no IP yet; cannot run the workspace transfer", claim.Status.SandboxID)
+	}
+	controlPort := r.HuskControlPort
+	if controlPort == 0 {
+		controlPort = HuskControlPort
+	}
+	return net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort)), nil
 }
 
 // defaultDiff is the production diff path. It reads both manifests from the CAS

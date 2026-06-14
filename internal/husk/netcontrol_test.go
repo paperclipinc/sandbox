@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/paperclipinc/mitos/internal/pki"
+	"github.com/paperclipinc/mitos/internal/workspace"
 )
 
 // netTestPKI issues the husk server (forkd identity) and controller client
@@ -183,6 +184,65 @@ func TestServeTLSDispatchesForkSnapshot(t *testing.T) {
 	}
 	if !f.paused {
 		t.Fatalf("source VM not paused via the control channel")
+	}
+}
+
+func TestServeTLSDispatchesDehydrateAndHydrateWorkspace(t *testing.T) {
+	// A serving stub holding an ACTIVE fake VM answers dehydrate-workspace then
+	// hydrate-workspace over the mTLS control channel: the dehydrate captures the
+	// guest /workspace into the node CAS and returns a manifest digest; the hydrate
+	// reads it back and untars it into the guest.
+	p := newNetTestPKI(t)
+	agent := &fakeWorkspaceAgent{tar: tarOf(t, map[string]string{"main.go": "package main"})}
+	stub, _ := newWorkspaceStub(t, agent)
+
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	dial := func() net.Conn {
+		dialer := &tls.Dialer{Config: p.clientConf(t, p.ctrlCert)}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return conn
+	}
+
+	conn := dial()
+	if err := WriteControlOp(conn, OpDehydrateWorkspace); err != nil {
+		t.Fatalf("WriteControlOp dehydrate: %v", err)
+	}
+	if err := WriteDehydrateWorkspaceRequest(conn, DehydrateWorkspaceRequest{}); err != nil {
+		t.Fatalf("WriteDehydrateWorkspaceRequest: %v", err)
+	}
+	dres, err := ReadDehydrateWorkspaceResult(conn)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("ReadDehydrateWorkspaceResult: %v", err)
+	}
+	if !dres.OK || dres.ManifestDigest == "" {
+		t.Fatalf("dehydrate-workspace op not OK: %+v", dres)
+	}
+
+	conn = dial()
+	if err := WriteControlOp(conn, OpHydrateWorkspace); err != nil {
+		t.Fatalf("WriteControlOp hydrate: %v", err)
+	}
+	if err := WriteHydrateWorkspaceRequest(conn, HydrateWorkspaceRequest{ManifestDigest: dres.ManifestDigest}); err != nil {
+		t.Fatalf("WriteHydrateWorkspaceRequest: %v", err)
+	}
+	hres, err := ReadHydrateWorkspaceResult(conn)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("ReadHydrateWorkspaceResult: %v", err)
+	}
+	if !hres.OK {
+		t.Fatalf("hydrate-workspace op not OK: %+v", hres)
+	}
+	if agent.untarPath != workspace.WorkspacePath {
+		t.Fatalf("hydrate did not untar into the guest workspace, got %q", agent.untarPath)
 	}
 }
 

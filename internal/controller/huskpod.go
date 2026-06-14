@@ -113,6 +113,14 @@ const (
 	// snapshot mount points at a subdir of the node forks dir instead). The stub
 	// writes <huskForksMountPath>/<fork-id>/{mem,vmstate} on a fork-snapshot op.
 	huskForksMountPath = "/var/lib/mitos/forks"
+
+	// huskCASMountPath is the in-pod path the node content-addressed store is
+	// mounted at READ-WRITE so the dehydrate-workspace op can persist a captured
+	// /workspace into it (and hydrate-workspace can restore from it). It is the
+	// same <dataDir>/cas the forkd build path writes, so a workspace revision the
+	// husk pod commits is visible to the controller's CAS-backed diff/git path and
+	// to a sibling pod that later hydrates the head.
+	huskCASMountPath = "/var/lib/mitos/cas"
 )
 
 // HuskSnapshotDir is the in-pod path the husk stub treats as ActivateRequest
@@ -456,6 +464,27 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 		// Tell the stub where to write fork snapshots so a fork-snapshot op writes
 		// inside the mounted node forks dir.
 		args = append(args, "--forks-dir", huskForksMountPath)
+
+		// The node CAS, mounted READ-WRITE so this pod's stub can persist a captured
+		// /workspace (dehydrate-workspace op) into the content-addressed store and
+		// restore a head from it (hydrate-workspace op). Co-located with the template
+		// dir on the SAME node filesystem (<dataDir>/cas) so a revision the husk pod
+		// commits is the SAME store the controller's CAS-backed diff/git path and a
+		// sibling pod read. A workspace revision is content only; secrets are excluded
+		// by the dehydrate op's exclude list.
+		volumes = append(volumes, corev1.Volume{
+			Name: "husk-cas",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: filepath.Join(dataDir, "cas"),
+					Type: &hostType,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "husk-cas", MountPath: huskCASMountPath})
+		// Tell the stub where the node CAS is so the workspace ops persist/restore
+		// there; empty would disable them (fail-closed).
+		args = append(args, "--cas-dir", huskCASMountPath)
 
 		// The snapshot SOURCE path. A warm pod activates from the template's
 		// snapshot subdir; a FORK CHILD activates from the node fork snapshot

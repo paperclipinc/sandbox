@@ -164,6 +164,26 @@ func serveControlConn(ctx context.Context, conn net.Conn, stub *Stub, authorize 
 		if werr := WriteForkSnapshotResult(conn, out); werr != nil {
 			fmt.Fprintf(os.Stderr, "husk control: write remove-fork-snapshot result: %v\n", werr)
 		}
+	case OpDehydrateWorkspace:
+		req, rerr := readDehydrateWorkspaceRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read dehydrate-workspace request: %v\n", rerr)
+			return
+		}
+		res, _ := stub.DehydrateWorkspace(ctx, req)
+		if werr := WriteDehydrateWorkspaceResult(conn, res); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write dehydrate-workspace result: %v\n", werr)
+		}
+	case OpHydrateWorkspace:
+		req, rerr := readHydrateWorkspaceRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read hydrate-workspace request: %v\n", rerr)
+			return
+		}
+		res, _ := stub.HydrateWorkspace(ctx, req)
+		if werr := WriteHydrateWorkspaceResult(conn, res); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write hydrate-workspace result: %v\n", werr)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "husk control: unknown control op %q\n", op)
 	}

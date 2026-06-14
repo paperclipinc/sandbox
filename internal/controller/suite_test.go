@@ -127,6 +127,15 @@ var (
 	huskTestActivatorMu sync.Mutex
 	huskTestActivator   func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
 
+	// huskWSDelegateMu guards the swappable husk-mode workspace transport delegates
+	// (the dial-the-husk-pod hydrate/dehydrate ops) the suite's husk claim
+	// reconciler routes its default hydrate/dehydrate through. Tests set them via
+	// setHuskWSDelegate to prove the husk reconciler delegates and the controller
+	// still commits the revision + advances the head, without a real husk pod.
+	huskWSDelegateMu sync.Mutex
+	huskWSHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
+	huskWSDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
+
 	// huskTestCheckpointerMu guards the swappable live-VM checkpointer the
 	// suite's husk reconciler routes a Checkpoint drain policy through.
 	huskTestCheckpointerMu sync.Mutex
@@ -294,6 +303,33 @@ func currentHuskTestActivator() func(ctx context.Context, addr string, tlsConf *
 		}
 	}
 	return huskTestActivator
+}
+
+// setHuskWSDelegate installs the husk-mode workspace transport delegates the
+// suite husk claim reconciler routes its default hydrate/dehydrate through. nil
+// for either leaves it unset; the delegate seam then defaults to the real
+// dial-the-husk-pod path (which has no pod in envtest), so a test that exercises
+// the workspace path must install both.
+func setHuskWSDelegate(
+	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
+	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
+) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	huskWSHydrate = hydrate
+	huskWSDehydrate = dehydrate
+}
+
+func currentHuskWSHydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	return huskWSHydrate
+}
+
+func currentHuskWSDehydrate() func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+	huskWSDelegateMu.Lock()
+	defer huskWSDelegateMu.Unlock()
+	return huskWSDehydrate
 }
 
 // setForkSnapshotter / currentForkSnapshotter swap the fork-snapshot seam the
@@ -538,6 +574,25 @@ func TestMain(m *testing.M) {
 		}
 		return false, nil
 	})
+	// Route the husk-mode workspace transport delegates through the per-test
+	// swappable fakes so the husk reconciler's default hydrate/dehydrate path
+	// (which delegates to the husk-stub control op in husk mode) is exercised
+	// without a real husk pod. A test that uses a workspaceRef installs both via
+	// setHuskWSDelegate.
+	huskClaim.SetWorkspaceDelegateForTest(
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error {
+			if fn := currentHuskWSHydrate(); fn != nil {
+				return fn(ctx, claim, manifest)
+			}
+			return fmt.Errorf("no husk workspace hydrate delegate installed")
+		},
+		func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error) {
+			if fn := currentHuskWSDehydrate(); fn != nil {
+				return fn(ctx, claim, excludePaths, capturePaths)
+			}
+			return "", fmt.Errorf("no husk workspace dehydrate delegate installed")
+		},
+	)
 	if err := huskClaim.SetupWithManager(mgr); err != nil {
 		panic(err)
 	}

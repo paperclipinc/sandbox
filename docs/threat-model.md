@@ -229,6 +229,42 @@ on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes G
 Residual: a compromised controller can drive a fork-snapshot of any husk pod it
 can reach, the same residual already stated for activate (Surface 2).
 
+### Husk workspace hydrate/dehydrate (W4 transport on the husk path)
+
+A bound claim's `/workspace` is persisted and restored over TWO new control ops on
+the SAME op-dispatched mTLS channel as activate and fork-snapshot, authorized to
+the controller identity ONLY (`internal/husk.ServeTLS` plus
+`AuthorizeControllerIdentity`). The controller is not on the node and cannot reach
+the guest vsock or the node CAS, so it DELEGATES the transfer to the husk-stub
+that owns both:
+
+- `dehydrate-workspace(excludePaths, capturePaths)`: the stub runs the guest vsock
+  `TarDir` over `/workspace`, stores the content-addressed chunks plus manifest
+  into the node CAS (a `<dataDir>/cas` hostPath mounted read-write into the pod),
+  and returns the manifest digest. It reuses `internal/workspace.Dehydrate` (the
+  KVM-proven tar round trip), not a reimplementation.
+- `hydrate-workspace(manifestDigest)`: the stub reads the manifest plus chunks
+  from the node CAS and `UntarDir`s them into the guest `/workspace`.
+
+The ops carry NO secrets: the request is path lists / a content-address manifest
+digest, and the result is a manifest digest plus latency. Secret/credential paths
+are stripped from the captured tree by the dehydrate exclude list
+(`WorkspaceSecretExcludePaths`), so a committed revision is content only. Workspace
+CONTENT bytes never appear in a log line or an error on either side. The ops FAIL
+CLOSED: the stub requires an active VM and a configured node CAS (an unset
+`--cas-dir` disables them), and the controller delegate refuses on an unreachable
+pod or a not-OK result rather than committing a revision the node never produced;
+the controller still owns the `WorkspaceRevision` commit + head advance. Surface
+delta vs the prior model: the node CAS is now mounted READ-WRITE into the husk
+pod (it was read-only manifests before) so the stub can persist a revision. The
+content-addressed store stays plaintext-content-addressed (or per-workspace
+encrypted at rest under `spec.store.encryptionKeyRef`, section 6). Residual: a
+compromised controller can drive a dehydrate/hydrate of any husk pod it can reach
+(the same activate/fork residual, Surface 2); a compromised husk pod already had
+write access to its node `<dataDir>` subtree (forks dir, rootfs CoW), and the CAS
+mount widens that to the content store on the same node, bounded to the node's own
+data dir.
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts

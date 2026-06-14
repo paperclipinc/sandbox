@@ -90,6 +90,35 @@ content-addressed store (`internal/cas`):
 - `Hydrate(ctx, agent, store, manifest)`: materializes the manifest, tars it, and
   `UntarDir`s it into `/workspace`.
 
+## Wiring the transport: husk delegation
+
+The controller is NOT on the node and cannot reach the guest vsock or the node
+CAS, so in husk mode it DELEGATES the hydrate/dehydrate to the node component that
+owns both: the husk-stub. The husk pod runs the VM, owns its vsock, and mounts the
+node CAS (`<dataDir>/cas`) read-write. The stub serves two control ops over the
+SAME mTLS control channel that already carries `activate` and the fork-snapshot
+ops:
+
+- `dehydrate-workspace(excludePaths, capturePaths)`: runs the guest vsock `TarDir`
+  over `/workspace`, stores the content-addressed chunks plus manifest into the
+  node CAS, and returns the manifest digest. It reuses
+  `internal/workspace.Dehydrate` (the KVM-proven tar round trip); it does not
+  reimplement tar or CAS. Secret/credential paths are excluded per the
+  no-secrets-in-revisions policy. Fail-closed: it requires an active VM and a
+  configured node CAS, and never returns content bytes or secrets in an error.
+- `hydrate-workspace(manifestDigest)`: reads the manifest plus chunks from the
+  node CAS and runs `internal/workspace.Hydrate` to `UntarDir` it into
+  `/workspace`.
+
+The controller dials the claim's husk pod control channel
+(`DehydrateWorkspaceOnHusk` / `HydrateWorkspaceOnHusk`, mirroring the fork
+`ForkSnapshotOnHusk` path) and STILL owns the `WorkspaceRevision` commit + head
+advance once the stub returns the manifest digest. The delegation is gated by
+`EnableHuskPods`; the default hydrate/dehydrate path self-wires to the husk
+control op, so the previous "transport is not wired" seam no longer fires in husk
+mode. The raw-forkd path has no in-controller transport and keeps the documented
+seam.
+
 ## Single-writer-per-workspace
 
 A `Workspace` is bound to at most one active claim at a time. A claim referencing
@@ -461,7 +490,19 @@ OPEN (later W4 slices):
   mid-execution, which is cluster-gated on a KVM node.
 - A streaming (non-buffered) tar for very large workspaces (this slice caps and
   buffers; see `vsock.MaxTarBytes`).
-- The production controller-to-guest transport wiring for the default
-  hydrate/dehydrate path: the lifecycle is proven behind a transfer seam in
-  envtest and the helpers are proven on KVM; binding the node-side transport into
-  the controller default is the integration follow-up.
+- The REAL vsock + node-CAS + VM round trip behind the husk control ops on a LIVE
+  cluster (the workspace e2e commit/fork/fork-sees-state stages,
+  `test/cluster-e2e/workspace-e2e.sh`) is the gated KVM tail. The husk-stub ops
+  (`dehydrate-workspace` / `hydrate-workspace`) and their tar -> CAS -> manifest
+  round trip are unit-proven with a fake vsock + temp node CAS
+  (`internal/husk/workspace_test.go`, `internal/husk/netcontrol_test.go`), and the
+  controller delegation + commit + head advance is envtest-proven
+  (`internal/controller/workspace_husk_delegate_test.go`).
+
+DONE in this slice:
+
+- The husk-mode controller-to-node transport wiring for the default
+  hydrate/dehydrate path: the controller delegates to the husk-stub control op
+  that owns the VM vsock and the node CAS, and still owns the revision commit +
+  head advance (see "Wiring the transport: husk delegation" above). The raw-forkd
+  path keeps the documented seam.
