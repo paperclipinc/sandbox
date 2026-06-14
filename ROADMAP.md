@@ -488,18 +488,22 @@ below it; a `fork-correctness` CI job gates PRs touching `internal/fork/`,
 Every component gets a defined answer to: crash, node death, slow etcd,
 out of capacity. Chaos suite in CI.
 
-- 🔨 forkd crash policy: running VMs reaped deterministically on restart
-  (forkd is the VM supervisor; orphan FC processes are killed and claims
-  failed with a typed condition). Done: forkd-local state via an on-disk
-  sandbox journal (`<dataDir>/sandboxes/<id>.json`) that NewEngine reconciles
-  before serving. A still-running pre-crash VM (PID-recycle-guarded against a
-  recycled, unrelated pid) is re-adopted so `ListSandboxes` reports it and the
-  GC reconciles it; a dead VM's leaked artifacts (jailer chroot, rootfs CoW
-  clone, fork network, jailer uid) are reaped and its record dropped. Open:
-  surfacing a typed claim condition when the GC terminates a re-adopted orphan;
-  real-VM reap is KVM-cluster/firecracker-test verified. Tracked in epic #12.
-- 🔨 Node loss: claims reach `NodeLost` within the GC interval (done); pools
-  rebuild replicas elsewhere is still open (tracked in #12).
+- ✅ forkd crash policy: running VMs reaped or re-adopted deterministically on
+  restart (production blocker #1, epic #12). forkd-local state lives in an
+  on-disk sandbox journal (`<dataDir>/sandboxes/<id>.json`) that NewEngine
+  reconciles before serving (`internal/fork/journal.go`,
+  `internal/fork/reconcile.go`). A still-running pre-crash VM is re-adopted
+  (PID-recycle-guarded via procfs against a recycled, unrelated pid; a TOCTOU
+  re-verify of the pid before any kill) so `ListSandboxes` reports it and the GC
+  reconciles it; a dead VM's leaked artifacts (jailer chroot, rootfs CoW clone,
+  fork network with the exact /30 block re-pinned, jailer uid) are reaped and its
+  record dropped. Real-VM reap is KVM/firecracker-test verified. Open:
+  surfacing a typed claim condition when the GC terminates a re-adopted orphan.
+- ✅ Node loss: claims reach `NodeLost` within the GC interval, node health is
+  tied to a forkd liveness probe, and a recoverable husk claim is not failed by
+  a GC node-loss pass (production blocker #4, epic #12). Pools recreate husk-pod
+  replicas elsewhere via the warm-pool deficit logic. The raw-forkd
+  pool-rebuild-elsewhere path is still tracked in #12.
 - ✅ Controller restart: the GC pass rebuilds the desired set from CRD state
   and sweeps any forkd VM not accounted for; zero orphans.
 - 🔨 Orphan sweeps: VM without a backing object is swept past OrphanGrace,
@@ -510,8 +514,15 @@ out of capacity. Chaos suite in CI.
   via the forkd `ListSandboxes` primitive.
 - 🔨 etcd hygiene: TTL of finished objects, including early-failed claims,
   is done. Rate-limiting and batching of status updates is still open.
-- ⬜ Saturation behavior: queue with deadline then a typed fail-fast
-  condition. Open (tracked in #12).
+- ✅ Saturation behavior: queue with backpressure then a typed fail-fast
+  condition (production blocker #4, epic #12). A claim with no fitting node pends
+  with a typed `NoCapacity` condition (accurate per re-pend cause) and bounded
+  backoff, fails cleanly after `--max-pending-duration`, and a raw-forkd claim
+  re-pends on `ResourceExhausted`/`Unavailable`; the `MaxSandboxes` count ceiling
+  is enforced at schedule time and at Fork with an atomic slot reservation that
+  closes the admission TOCTOU. Resource caps (per-sandbox stream caps, husk pod
+  memory limit with headroom, the host-DoS `MaxSandboxes` ceiling) are production
+  blocker #2.
 
 See docs/failure-gc.md for each guarantee, its proving test, and bounded
 time, plus the explicit open items.
@@ -621,11 +632,17 @@ or spoof.
   competitive with raw-forkd). See `BENCHMARKS.md` "Raw-forkd vs pod-native"
   section. The measured bare-metal <=10ms stays a TARGET (#16, needs the
   reference node).
-- ⬜ Bare-metal reference numbers on the Hetzner + Talos reference node;
-  includes the <=10ms warm-pool claim-to-first-exec TARGET (#18/#16, not a
-  shared-CI claim); CI runs on pinned bare-metal hardware per release →
-  `BENCHMARKS.md` results section (current CI numbers are shared-runner-class,
-  not representative)
+- 🔨 Bare-metal reference numbers on the Hetzner + Talos reference node: a FIRST
+  reference run is published (warm-claim activate P50 ~27 ms (N=11), snapshot
+  restore ~6-16 ms, ~3 MiB marginal memory per forked sandbox), reproducible from
+  `bench/husk-activate-latency.sh` with the full method and sample set in
+  `bench/results/2026-06-13-bare-metal-husk.md` and `BENCHMARKS.md`. Still open:
+  the bare-metal engine fork->first-exec via `cmd/bench` (not run on the box this
+  session), a PINNED reference-node CI runner so the numbers regenerate per
+  release, and the <=10ms warm-pool claim-to-first-exec TARGET (#18/#16): the
+  activate restore step is sub-10 ms on the node, but the full activate (restore +
+  handshake + guest-ready) measures ~27 ms P50, so the end-to-end target is not
+  yet met.
 - ⬜ Comparison table regenerated from in-repo scripts against E2B
   self-hosted, Daytona OSS, Agent Sandbox + Kata warm pools on the same
   hardware; reproducible by anyone
@@ -645,7 +662,7 @@ or spoof.
   checks; operator deploy + PKI bootstrap; smoke test; capacity planning
   pointers). CI-VERIFIED vs HARDWARE-REQUIRED split clearly marked in the
   runbook.
-- ⬜ Self-hosted bare-metal CI runner (#16): an EPHEMERAL GitHub Actions runner
+- 🔨 Self-hosted bare-metal CI runner (#16): an EPHEMERAL GitHub Actions runner
   runs IN the single-node Talos KVM cluster (deploy/ci-runner/, namespace
   mitos-ci) and drives the real-cluster husk e2e on every trusted change
   (claim -> activate -> exec -> fork -> run_code -> PTY -> crash-reap;
@@ -686,6 +703,15 @@ pending/backpressure behavior are documented in docs/scheduling.md.
   bounded --max-pending-duration instead of OOMing a node. The pending-claims
   metric (mitos_claim_pending_total) is the autoscaler/back-pressure
   signal; envtest-proven in internal/controller.
+- ✅ Demand-driven warm-pool autoscaling: a `SandboxPool.spec.autoscale`
+  (`minWarm`/`maxWarm`/`targetSpare`/`scaleDownCooldownSeconds`) turns the fixed
+  `replicas` pre-fill into a demand-driven autoscaler of DORMANT husk pods. The
+  desired dormant count is `clamp(inUse + targetSpare, minWarm, maxWarm)`, fed
+  from a per-pool claim-arrival demand tracker; scale-up is immediate, scale-down
+  obeys an anti-thrash cooldown, and an active claim's pod is never scaled away.
+  Autoscale metrics (size, in-use, desired, scale events, claim-wait latency) are
+  exported. Proven in envtest (scale up then down to floor; a claimed pod
+  survives scale-down). The legacy fixed pool is `minWarm == replicas`.
 - ⬜ NUMA pinning + hugepage-backed guest memory; KSM same-page-merging
   tuning; per-node max density config (needs hardware)
 - ⬜ Multi-resource bin-packing (disk, CPU, and the cold-start
@@ -715,10 +741,30 @@ verified. In rough order of leverage:
   on the mock engine; real in-VM exec is proven by the KVM CI of the API. See
   docs/cli.md. OPEN: workspace verbs (`mitos ws ...`) deferred to Workspace
   (#21).
-- ⬜ Streaming exec (stdout/stderr), stdin, **PTY mode**, file transfer,
-  port forwarding, the daily-driver agent-harness needs
-- ⬜ Code-interpreter-compatible API shim (drop-in for LangChain/LlamaIndex
-  sandbox integrations)
+- ✅ Streaming exec and background processes: forkd serves an incremental
+  stdout/stderr stream over the sandbox API (vsock-bridged to the guest agent),
+  backgrounded processes detach from the request, and both SDKs expose a
+  streaming-callback exec. Per-sandbox concurrent-stream caps bound the surface
+  (resource caps, epic #12). Unit-tested in `internal/vsock` and
+  `internal/daemon`; real in-VM exec proven by the KVM CI of the API. Interactive
+  stdin is delivered through the PTY path below. The normative Connect runtime
+  protocol (streaming/PTY/files/watch/port-forward as one wire contract) is the
+  API v2 target (#24).
+- ✅ **PTY mode**: a token-gated bidirectional WebSocket `/v1/pty` endpoint on
+  forkd and the standalone sandbox-server; the guest agent allocates a PTY shell
+  and pumps I/O over vsock. Both SDKs ship an interactive terminal handle
+  (`sandbox.pty`, sync and async in Python). Cross-sandbox token rejection is
+  unit-tested; the PTY surface is recorded in `docs/threat-model.md`. Part of the
+  API v2 runtime protocol (#24).
+- ✅ **Code interpreter (`run_code`)**: a stateful kernel with rich multi-MIME
+  results and structured errors, served over the sandbox API and exposed in both
+  SDKs and the MCP server. It is fail-closed with a clear `KernelUnavailable`
+  error until the kernel ships in the husk cluster base image (the open
+  follow-up below). Unit-tested in `internal/vsock` and `internal/daemon`. This
+  is the drop-in code-interpreter surface for agent harnesses.
+- ⬜ File transfer ergonomics and operator port-forwarding beyond the runtime
+  protocol above; the code-interpreter kernel baked into the husk cluster base
+  image so `run_code` is live (not `KernelUnavailable`) by default.
 - ✅ `kubectl sandbox` plugin: ls (SandboxClaims), ps (SandboxForks), tree (the
   fork/lineage DAG), top (per-sandbox CoW-aware metering from forkd
   `/v1/metering`, honestly labeled, a dash on a missing datum), logs (the husk
@@ -757,7 +803,18 @@ verified. In rough order of leverage:
 - ✅ One-command local story: `mitos dev up` (kind + mock control plane from
   deploy/dev/), proven in the kind CI smoke. OPEN: document the KVM-passthrough
   path for real local exec.
-- ⬜ Helm chart (README previously implied one exists; it does not yet)
+- ✅ **SDK first-impression ergonomics + LLM-legible errors (#28)** (carried
+  forward from the dedicated foundation row above): the one-liner
+  `AgentRun().sandbox("python")` with a lazy default pool, `from_name()`
+  reconnect, `wait_until_ready()`, streaming-exec callbacks, an `AsyncAgentRun`,
+  and the structured `{error:{code, message, cause, remediation}}` envelope
+  parsed into `AgentRunError`, in both the Python and TypeScript SDKs. The
+  server-side error envelope (`internal/apierr`) is CI-asserted to carry a code
+  and remediation on every path and to never leak a secret value. The normative
+  error schema, catalogue, and CI lint stay tracked in #28.
+- ⬜ Helm chart (README does not claim one exists; release machinery and the
+  Helm chart are tracked in #37). The current install path is the
+  `kubectl apply -k deploy/` kustomize base.
 
 ## 8. Observability
 
