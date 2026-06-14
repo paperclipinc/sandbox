@@ -79,3 +79,37 @@ func TestForkSnapshotFailClosedOnSnapshotError(t *testing.T) {
 		t.Fatalf("snapshot error must fail closed: err=%v res=%+v", err, res)
 	}
 }
+
+func TestForkSnapshotConfinedToForksDir(t *testing.T) {
+	forks := t.TempDir()
+	f := &fakeVMM{}
+	s := &Stub{state: StateActive, vm: f, forksDir: forks}
+
+	// A dir WITHIN the configured forks dir is accepted.
+	inside := filepath.Join(forks, "fork-1")
+	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: inside})
+	if err != nil || !res.OK {
+		t.Fatalf("fork snapshot inside forks dir must succeed: err=%v res=%+v", err, res)
+	}
+
+	// A dir OUTSIDE the forks dir (here a traversal escape) is refused fail-closed
+	// and the VM is never paused.
+	f2 := &fakeVMM{}
+	s2 := &Stub{state: StateActive, vm: f2, forksDir: forks}
+	escape := filepath.Join(forks, "..", "escape")
+	res2, err2 := s2.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "x", SnapshotDir: escape})
+	if err2 == nil || res2.OK {
+		t.Fatalf("fork snapshot outside forks dir must fail closed: err=%v res=%+v", err2, res2)
+	}
+	if f2.paused {
+		t.Fatalf("an out-of-bounds fork snapshot must not pause the VM")
+	}
+}
+
+func TestRemoveForkSnapshotConfinedToForksDir(t *testing.T) {
+	forks := t.TempDir()
+	s := &Stub{state: StateActive, vm: &fakeVMM{}, forksDir: forks}
+	if err := s.RemoveForkSnapshot(ForkSnapshotRequest{SnapshotDir: filepath.Join(forks, "..", "escape")}); err == nil {
+		t.Fatalf("remove fork snapshot outside forks dir must be refused")
+	}
+}

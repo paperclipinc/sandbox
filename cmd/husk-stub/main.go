@@ -173,6 +173,7 @@ func run() error {
 		rootfsCoWDir    = flag.String("rootfs-cow-dir", "", "directory on the SAME node filesystem as the template rootfs where this activation's copy-on-write rootfs clone is written (reflink where supported, full copy otherwise). Empty keeps the prior behavior of writing the shared template rootfs in place. A content address, not a secret")
 		templateRootfs  = flag.String("template-rootfs", "", "host path of the template rootfs.ext4 to clone per activation. Empty (with --rootfs-cow-dir) disables the per-activation clone")
 		vmID            = flag.String("vm-id", huskSandboxID, "the per-pod VM id. It scopes this pod's per-activation rootfs CoW clone path (<rootfs-cow-dir>/<vm-id>/rootfs.ext4), so two husk pods sharing the node CoW hostPath never collide on, overwrite, or delete each other's clone. The controller passes the pod name (downward API metadata.name); empty falls back to the legacy fixed id. A node-local identifier, not a secret")
+		forksDir        = flag.String("forks-dir", "", "directory the node forks dir is mounted at, where a fork-snapshot op writes <forks-dir>/<fork-id>/{mem,vmstate}. When set, the serving stub confines fork-snapshot and remove-fork-snapshot writes to within it (fail-closed: a request naming a path outside it is refused). Empty leaves the prior behavior (the request's snapshot dir is used as-is). A node-local path, not a secret")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -367,6 +368,9 @@ func run() error {
 		// shared-rootfs behavior.
 		RootfsTemplatePath: *templateRootfs,
 		RootfsCoWDir:       *rootfsCoWDir,
+		// The node forks dir this pod mounts: the serving stub confines
+		// fork-snapshot / remove-fork-snapshot writes to within it (fail-closed).
+		ForksDir: *forksDir,
 	})
 
 	fmt.Fprintln(os.Stderr, "husk-stub: preparing dormant VMM")

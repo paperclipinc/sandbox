@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -264,6 +265,14 @@ type Options struct {
 	// seam (volume.Backend.ReflinkCopy, which is FICLONE with a full-copy
 	// fallback). Tests inject a fake.
 	Reflink reflinker
+	// ForksDir is the node forks directory mounted into this pod. When set, the
+	// fork-snapshot and remove-fork-snapshot control ops confine their writes to
+	// within it (fail-closed: a request naming a SnapshotDir outside it is
+	// refused), so the control channel can never be steered to write or delete a
+	// path outside the mounted forks dir. Empty disables the check (the request's
+	// SnapshotDir is used as-is, the prior behavior). A node-local path, not a
+	// secret.
+	ForksDir string
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -297,6 +306,10 @@ type Stub struct {
 	reflink            reflinker
 	rootfsClonePath    string
 
+	// forksDir confines fork-snapshot / remove-fork-snapshot writes to within it
+	// when set; empty disables the check.
+	forksDir string
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -323,6 +336,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		rootfsTemplatePath: opts.RootfsTemplatePath,
 		rootfsCoWDir:       opts.RootfsCoWDir,
 		reflink:            opts.Reflink,
+		forksDir:           opts.ForksDir,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -592,6 +606,9 @@ func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkS
 		return ForkSnapshotResult{OK: false, Error: "fork-snapshot: empty snapshot dir"},
 			fmt.Errorf("husk: fork-snapshot: empty snapshot dir")
 	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
 
 	memFile := filepath.Join(req.SnapshotDir, "mem")
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
@@ -641,8 +658,29 @@ func (s *Stub) RemoveForkSnapshot(req ForkSnapshotRequest) error {
 	if req.SnapshotDir == "" {
 		return fmt.Errorf("husk: remove fork snapshot: empty snapshot dir")
 	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(req.SnapshotDir); err != nil {
 		return fmt.Errorf("husk: remove fork snapshot %s: %w", req.SnapshotDir, err)
+	}
+	return nil
+}
+
+// confineToForksDir refuses a fork-snapshot / remove-fork-snapshot SnapshotDir
+// that resolves outside the configured forks dir, so the control channel can
+// never be steered to write or delete a path outside the mounted node forks dir.
+// It is a fail-closed defense-in-depth gate; when no forks dir is configured
+// (the empty default) it permits any dir, preserving the prior behavior. The dir
+// carries no secret, so it is safe to name in the error.
+func (s *Stub) confineToForksDir(dir string) error {
+	if s.forksDir == "" {
+		return nil
+	}
+	base := filepath.Clean(s.forksDir)
+	target := filepath.Clean(dir)
+	if target != base && !strings.HasPrefix(target, base+string(filepath.Separator)) {
+		return fmt.Errorf("husk: fork snapshot dir %q is outside the configured forks dir %q", dir, s.forksDir)
 	}
 	return nil
 }
