@@ -645,6 +645,20 @@ or spoof.
   checks; operator deploy + PKI bootstrap; smoke test; capacity planning
   pointers). CI-VERIFIED vs HARDWARE-REQUIRED split clearly marked in the
   runbook.
+- ⬜ Self-hosted bare-metal CI runner (#16): an EPHEMERAL GitHub Actions runner
+  runs IN the single-node Talos KVM cluster (deploy/ci-runner/, namespace
+  mitos-ci) and drives the real-cluster husk e2e on every trusted change
+  (claim -> activate -> exec -> fork -> run_code -> PTY -> crash-reap;
+  test/cluster-e2e/husk-e2e.sh against namespace mitos-e2e), turning the
+  maintainer's manual cluster check into standing CI
+  (.github/workflows/cluster-e2e.yaml). SECURITY: the repo is PUBLIC, so the job
+  is gated to TRUSTED triggers only (push to main + workflow_dispatch by
+  default; an opt-in labeled same-repo-PR path, never forks) and the runner SA
+  is least-privilege (two namespaces, read-only nodes; never cluster-admin).
+  Built and CI-validated (YAML, kustomize, shellcheck); deploy + the maintainer
+  setup steps are in docs/ci-runner.md. Open: the maintainer creates the
+  registration Secret and applies the manifests; the dedicated-test-controller
+  option to drop the production controller-patch grant.
 - ⬜ Evaluate dm-thin / xfs-reflink as alternatives to the btrfs dependency
 - ⬜ Hetzner AX reference BOM: MEASURED density and cost/sandbox-hour on the
   pinned reference node. Needs the hardware; do NOT fabricate numbers.

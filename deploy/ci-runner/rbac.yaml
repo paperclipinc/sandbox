@@ -1,0 +1,239 @@
+# Least-privilege RBAC for the cluster e2e runner.
+#
+# The runner drives the real-cluster husk e2e: it creates a SandboxPool, claims
+# from it, forks, execs, and reaps, all inside the dedicated mitos-e2e
+# namespace; and it deploys the just-built images by patching the controller in
+# the mitos namespace. Every rule below is justified by a step the e2e actually
+# performs. There is deliberately NO ClusterRole and NO cluster-admin: the two
+# Roles below bound the runner to exactly two namespaces (mitos-e2e and mitos),
+# so a compromised runner cannot reach tenant workloads in other namespaces.
+#
+# SECURITY: this identity is reachable from a self-hosted GitHub Actions runner
+# on a PUBLIC repo. The CI workflow (.github/workflows/cluster-e2e.yaml) gates
+# the job so fork-PR code never runs on it; this RBAC is the second layer: even
+# if untrusted code somehow ran, it could only manipulate the e2e namespace and
+# patch the controller image, not own the cluster.
+---
+# In mitos-e2e: the runner owns the full e2e lifecycle.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mitos-ci-runner-e2e
+  namespace: mitos-e2e
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+rules:
+  # Create the e2e template + pool, claim, and fork; delete them on teardown.
+  # SandboxTemplate is created by the e2e (the pool references it) and read
+  # back, so it carries create/delete here too rather than read-only.
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxtemplates
+      - sandboxpools
+      - sandboxclaims
+      - sandboxforks
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Read the status the controller writes (phase, conditions, endpoint, forks).
+  - apiGroups:
+      - mitos.run
+    resources:
+      - sandboxtemplates/status
+      - sandboxpools/status
+      - sandboxclaims/status
+      - sandboxforks/status
+    verbs:
+      - get
+      - list
+      - watch
+  # Pods: list/get/watch the warm dormant husk pods and the claimed pod; the
+  # self-heal assertion deletes a claimed husk pod to prove the claim re-pends.
+  # The runner does NOT create pods (the controller does); delete is scoped to
+  # the eviction/self-heal probe only.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - delete
+  # Pod logs for diagnostics on a failed assertion.
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  # exec into a pod IS used by the bench-style fallback path; the primary exec
+  # path is the SDK over the sandbox HTTP API to the pod IP, but kubectl exec is
+  # the diagnostic fallback. Scoped to mitos-e2e pods only.
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - create
+  # The Python SDK reads the per-sandbox bearer-token Secret
+  # (<sandbox>-sandbox-token) to authenticate exec/run_code/pty against the
+  # sandbox HTTP API. get/list only; the runner never writes Secrets. Token
+  # VALUES are never logged by the e2e (CLAUDE.md secrets rule).
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+  # The controller replicates the husk PKI Secrets into the pool namespace; the
+  # runner reads services/endpoints only for diagnostics (endpoint resolution
+  # of the sandbox API is via the claim Status.Endpoint pod IP, not a Service).
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mitos-ci-runner-e2e
+  namespace: mitos-e2e
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mitos-ci-runner-e2e
+subjects:
+  - kind: ServiceAccount
+    name: mitos-ci-runner
+    namespace: mitos-ci
+---
+# In mitos: deploy-under-test. The runner reads the controller Deployment and
+# its logs and patches its image/args to the just-built tag, then waits for the
+# rollout. It does NOT get blanket write on the mitos namespace: it can only
+# get/list/watch/patch/update Deployments (to set the image and wait for the
+# rollout), read ReplicaSets/Pods/Pod logs (rollout status + diagnostics), and
+# read the PKI Secrets' existence (get/list, no values logged). It cannot
+# create or delete Deployments, cannot touch Secrets writes, and cannot reach
+# the controller's RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mitos-ci-runner-deploy
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - update
+  # Rollout status reads the managed ReplicaSets; diagnostics read pods + logs.
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  # Confirm the PKI Secrets exist before driving claims (presence + keys only;
+  # values are never read into logs). get/list, no write.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mitos-ci-runner-deploy
+  namespace: mitos
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mitos-ci-runner-deploy
+subjects:
+  - kind: ServiceAccount
+    name: mitos-ci-runner
+    namespace: mitos-ci
+---
+# Cluster-scoped READ ONLY: the controller places husk pods on nodes labeled
+# mitos.run/kvm=true and the e2e asserts the node is KVM-capable, so the runner
+# needs to read nodes (get/list). Nodes are cluster-scoped, so this is the one
+# unavoidable ClusterRole; it grants READ on nodes ONLY and binds the same SA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mitos-ci-runner-nodes-read
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mitos-ci-runner-nodes-read
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mitos-ci-runner-nodes-read
+subjects:
+  - kind: ServiceAccount
+    name: mitos-ci-runner
+    namespace: mitos-ci

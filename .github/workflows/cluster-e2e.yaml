@@ -1,0 +1,195 @@
+name: Cluster e2e (self-hosted)
+
+# =============================================================================
+# SECURITY: this workflow runs on a SELF-HOSTED runner that lives INSIDE the
+# maintainer's single-node Talos KVM cluster. That runner can drive the cluster
+# (it has KVM via the husk pods and a scoped ServiceAccount). The repo
+# paperclipinc/mitos is PUBLIC. Therefore this job MUST NEVER execute code from
+# an untrusted fork pull request: a malicious fork PR could otherwise own the
+# cluster.
+#
+# Gating (non-negotiable):
+#   * push to main            post-merge verification of already-reviewed code.
+#   * workflow_dispatch       manual maintainer trigger.
+#   * pull_request            OPT-IN ONLY, and gated by the job-level `if:` to:
+#                               (a) same-repo PRs (head.repo == base repo, i.e.
+#                                   NOT a fork), AND
+#                               (b) a maintainer-applied label `ci-cluster`.
+#                             Combined with the `cluster` GitHub Environment
+#                             (which should require a maintainer approval), this
+#                             means fork-PR code can never reach the runner.
+#
+# A fork PR (head.repo.full_name != github.repository) fails BOTH the same-repo
+# check and the label check, so the job is skipped. Do NOT relax the `if:`.
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      e2e_namespace:
+        description: "Namespace to run the e2e in"
+        required: false
+        default: mitos-e2e
+  # OPT-IN labeled-same-repo-PR path. The `pull_request` event fires for forks
+  # too, but the job-level `if:` below excludes forks AND requires the label, so
+  # a labeled fork PR still cannot run here.
+  pull_request:
+    branches: [main]
+    types: [labeled, synchronize, reopened]
+
+# Least-privilege token: this job only needs to read the repo to check out.
+permissions:
+  contents: read
+
+concurrency:
+  # One cluster e2e at a time; a newer run cancels an in-flight one so the
+  # single-node cluster is never driven by two jobs at once.
+  group: cluster-e2e
+  cancel-in-progress: true
+
+jobs:
+  cluster-husk-e2e:
+    # The self-hosted runner in the cluster. Labels match the runner Deployment
+    # (deploy/ci-runner/deployment.yaml LABELS).
+    runs-on: [self-hosted, mitos-cluster]
+
+    # SECURITY GATE. Run only on trusted triggers:
+    #   * push / workflow_dispatch are inherently maintainer-trusted, OR
+    #   * a pull_request that is BOTH from the same repo (NOT a fork) AND carries
+    #     the maintainer-applied `ci-cluster` label.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+      )
+
+    # The `cluster` Environment should be configured in repo Settings to require
+    # a maintainer approval (a second human gate) and to scope any cluster
+    # secrets. See docs/ci-runner.md.
+    environment: cluster
+
+    # Tight overall budget: a hung husk activation must not pin the cluster.
+    timeout-minutes: 25
+
+    env:
+      # The dedicated e2e namespace (the runner's RBAC blast radius). Override
+      # via the workflow_dispatch input.
+      E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
+      # The control-plane namespace where the controller runs.
+      MITOS_NAMESPACE: mitos
+      # The image tag to deploy under test. On main and dispatch we use the
+      # commit-sha tag the publish/build pipeline pushes to GHCR (type=sha =>
+      # sha-<short>). The full ref is github.sha; GHCR's sha tag is the short
+      # form, computed in the deploy step.
+      IMAGE_REGISTRY: ghcr.io/paperclipinc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show context (no secrets)
+        run: |
+          set -euo pipefail
+          echo "event: ${{ github.event_name }}"
+          echo "ref: ${{ github.ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "e2e namespace: ${E2E_NAMESPACE}"
+          kubectl version --client
+          kubectl get nodes -l 'mitos.run/kvm=true' -o wide
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          set -euo pipefail
+          # The build/publish pipeline tags images type=sha => sha-<7 char>.
+          short="$(echo "${{ github.sha }}" | cut -c1-7)"
+          echo "sha_tag=sha-${short}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image tag: sha-${short}"
+
+      - name: Deploy images under test
+        id: deploy
+        run: |
+          set -euo pipefail
+          CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${{ steps.tag.outputs.sha_tag }}"
+          HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${{ steps.tag.outputs.sha_tag }}"
+          echo "Deploying controller=${CONTROLLER_IMG}"
+          echo "Deploying husk-stub=${HUSK_IMG}"
+
+          # Record the current controller image so teardown can restore it even
+          # if a later step fails.
+          PREV_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_controller_image=${PREV_IMG}" >> "$GITHUB_OUTPUT"
+          echo "Previous controller image: ${PREV_IMG}"
+
+          # Point the controller at the just-built controller image.
+          kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
+            controller="${CONTROLLER_IMG}"
+
+          # Point the controller's --husk-stub-image arg at the just-built husk
+          # image so newly warmed husk pods run the code under test. Append the
+          # arg; argv-last-wins means this overrides the baked default.
+          kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+            -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--husk-stub-image=${HUSK_IMG}\"}]"
+
+          kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=300s
+
+      - name: Run the cluster husk e2e
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/husk-e2e.sh
+          READY_TIMEOUT=240 test/cluster-e2e/husk-e2e.sh "${E2E_NAMESPACE}"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "=== controller deployment ==="
+          kubectl -n "${MITOS_NAMESPACE}" describe deployment/mitos-controller
+          echo "=== controller logs ==="
+          kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-controller --tail=200 --all-containers
+          echo "=== e2e namespace objects ==="
+          kubectl -n "${E2E_NAMESPACE}" get sandboxpools,sandboxclaims,sandboxforks,pods -o wide
+          echo "=== e2e husk pod logs ==="
+          for p in $(kubectl -n "${E2E_NAMESPACE}" get pods -l 'mitos.run/husk=true' -o name | head -5); do
+            echo "--- ${p} ---"
+            kubectl -n "${E2E_NAMESPACE}" logs "${p}" --tail=80
+          done
+          exit 0
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          echo "=== teardown: remove e2e objects ==="
+          # The e2e script cleans its own objects on exit; this is the belt-and-
+          # suspenders sweep in case the runner step was cancelled mid-run.
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxforks --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxclaims --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxpools --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxtemplates --all --wait=false
+
+          echo "=== teardown: restore the controller image ==="
+          PREV="${{ steps.deploy.outputs.prev_controller_image }}"
+          if [ -n "${PREV}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
+              controller="${PREV}"
+            # Drop the --husk-stub-image arg we appended (remove the LAST arg).
+            LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+              -o jsonpath='{.spec.template.spec.containers[0].args}' \
+              | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
+            if [ -n "${LAST_IDX}" ]; then
+              kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+                -p="[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/${LAST_IDX}\"}]" \
+                || true
+            fi
+            kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=180s
+          else
+            echo "no previous controller image recorded; leaving controller as-is"
+          fi
+          echo "teardown done"
+          exit 0
