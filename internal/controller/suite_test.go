@@ -145,7 +145,7 @@ var (
 	wsHydrate    func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error
 	wsDehydrate  func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error)
 	wsDiff       func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error)
-	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+	wsRendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error
 	wsRepoFiles  func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error)
 
 	// memSnapshotMu guards the swappable memory-snapshot pairing fakes (W4 Task
@@ -216,7 +216,7 @@ func setWSDiff(diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, pare
 
 // setWSRendezvous installs the git rendezvous fake; nil falls back to the
 // production default (workspace.Rendezvous via the git CLI).
-func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string) error) {
+func setWSRendezvous(rv func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error) {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	wsRendezvous = rv
@@ -254,7 +254,7 @@ func currentWSDiff() func(ctx context.Context, claim *v1alpha1.SandboxClaim, par
 	return wsDiff
 }
 
-func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+func currentWSRendezvous() func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error {
 	wsTransferMu.Lock()
 	defer wsTransferMu.Unlock()
 	return wsRendezvous
@@ -501,9 +501,9 @@ func TestMain(m *testing.M) {
 			}
 			return workspace.Diff{}, nil
 		},
-		func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
+		func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error {
 			if fn := currentWSRendezvous(); fn != nil {
-				return fn(ctx, repoFiles, remote, branch)
+				return fn(ctx, repoFiles, remote, branch, creds)
 			}
 			return nil
 		},

@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,7 +47,10 @@ type diffFunc func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, ch
 // paths to a git rendezvous remote through. The production value calls
 // workspace.Rendezvous (the git CLI); envtest and unit tests inject a fake.
 // repoFiles is the resolved name -> content map of the workspace spec.git.paths.
-type rendezvousFunc func(ctx context.Context, repoFiles map[string]string, remote, branch string) error
+// creds, when non-nil, authenticates the push to an external remote; the token
+// it carries is a secret VALUE and is never logged, never on the git argv, and
+// never recorded in a condition or revision.
+type rendezvousFunc func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error
 
 // memSnapshotResult is what the memory-snapshot checkpointer returns: the
 // snapshot ref (a CAS digest / snapshot id, a content pointer, never the memory
@@ -168,8 +172,8 @@ func (r *SandboxClaimReconciler) rendezvous() rendezvousFunc {
 	if r.RendezvousGit != nil {
 		return r.RendezvousGit
 	}
-	return func(ctx context.Context, repoFiles map[string]string, remote, branch string) error {
-		return workspace.Rendezvous(ctx, repoFiles, remote, branch)
+	return func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error {
+		return workspace.Rendezvous(ctx, repoFiles, remote, branch, creds)
 	}
 }
 
@@ -720,19 +724,54 @@ func (r *SandboxClaimReconciler) rendezvousOnTerminate(ctx context.Context, clai
 		return nil, nil
 	}
 
+	// Resolve the referenced credentials Secret once for the workspace, before any
+	// push. A resolution failure is returned without the credential value: only
+	// the Secret name and key (non-secret identifiers) ever appear in the error.
+	creds, err := r.resolveGitCredentials(ctx, claim.Namespace, ws.Spec.Git)
+	if err != nil {
+		return nil, err
+	}
+
 	var pushes []v1alpha1.GitPushRecord
 	for _, g := range gitOutputs {
 		branch, berr := workspace.RenderBranch(g.Branch, claim.Name)
 		if berr != nil {
 			return pushes, fmt.Errorf("render git rendezvous branch for claim %s: %w", claim.Name, berr)
 		}
-		if perr := r.rendezvous()(ctx, repoFiles, g.Remote, branch); perr != nil {
+		if perr := r.rendezvous()(ctx, repoFiles, g.Remote, branch, creds); perr != nil {
+			// workspace.Rendezvous scrubs the token from its error; we never add it.
 			return pushes, fmt.Errorf("git rendezvous push for claim %s to %s on %s: %w", claim.Name, g.Remote, branch, perr)
 		}
 		logger.Info("git rendezvous pushed workspace repo paths", "claim", claim.Name, "remote", g.Remote, "branch", branch)
 		pushes = append(pushes, v1alpha1.GitPushRecord{Remote: g.Remote, Branch: branch})
 	}
 	return pushes, nil
+}
+
+// resolveGitCredentials reads the workspace's git credentials Secret (if any)
+// into a workspace.Credentials. The token is a secret VALUE: this function never
+// logs it, and any error it returns names only the Secret and key (non-secret
+// identifiers), never the value. A nil result means an unauthenticated push.
+func (r *SandboxClaimReconciler) resolveGitCredentials(ctx context.Context, namespace string, git v1alpha1.WorkspaceGit) (*workspace.Credentials, error) {
+	if git.CredentialsSecretRef == nil {
+		return nil, nil
+	}
+	ref := git.CredentialsSecretRef
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, &secret); err != nil {
+		return nil, fmt.Errorf("resolve git credentials secret %q: %w", ref.Name, err)
+	}
+	value, ok := secret.Data[ref.Key]
+	if !ok || len(value) == 0 {
+		// LLM-legible: name the missing key and the remediation, never the value.
+		return nil, fmt.Errorf("git credentials secret %q has no non-empty key %q; create the key holding the push token", ref.Name, ref.Key)
+	}
+	username := git.CredentialsUsername
+	if strings.TrimSpace(username) == "" {
+		// Token-only forges accept this conventional username.
+		username = "x-access-token"
+	}
+	return &workspace.Credentials{Username: username, Token: string(value)}, nil
 }
 
 // gitOutputsOf returns the {git} outputs from a claim's spec.outputs.

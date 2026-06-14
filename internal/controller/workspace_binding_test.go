@@ -14,6 +14,7 @@ package controller_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/paperclipinc/mitos/internal/cas"
 	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/workspace"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -393,7 +395,7 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 		gotFiles   map[string]string
 		pushCalled int
 	)
-	setWSRendezvous(func(_ context.Context, repoFiles map[string]string, remote, branch string) error {
+	setWSRendezvous(func(_ context.Context, repoFiles map[string]string, remote, branch string, _ *workspace.Credentials) error {
 		gitMu.Lock()
 		defer gitMu.Unlock()
 		pushCalled++
@@ -468,6 +470,125 @@ func TestClaimWorkspaceGitOutputPushes(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	t.Fatal("revision did not record the git push within 10s")
+}
+
+// TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak asserts that a workspace
+// with spec.git.credentialsSecretRef has its token resolved from the Secret and
+// passed to the rendezvous seam, and that the token VALUE never appears in any
+// claim or revision condition (the secrets rule). The token only reaches the
+// seam's creds argument; it is never on argv, in a log, or in a condition.
+func TestClaimWorkspaceGitCredentialsResolvedAndNeverLeak(t *testing.T) {
+	rec := &wsRecorder{}
+	rec.install(t, cas.Digest(testManifest(0x45)))
+
+	setWSRepoFiles(func(_ context.Context, _ *v1alpha1.SandboxClaim, _ cas.Digest, _ []string) (map[string]string, error) {
+		return map[string]string{"repo/main.go": "package main\n"}, nil
+	})
+	t.Cleanup(func() { setWSRepoFiles(nil) })
+
+	const token = "ghp_envtest_TOKEN_DEADBEEF" //nolint:gosec // test sentinel
+	var (
+		gitMu     sync.Mutex
+		gotCreds  *workspace.Credentials
+		pushCalls int
+	)
+	setWSRendezvous(func(_ context.Context, _ map[string]string, _, _ string, creds *workspace.Credentials) error {
+		gitMu.Lock()
+		defer gitMu.Unlock()
+		pushCalls++
+		gotCreds = creds
+		return nil
+	})
+	t.Cleanup(func() { setWSRendezvous(nil) })
+
+	// The credentials Secret holding the push token.
+	if err := k8sClient.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte(token)},
+	}); err != nil {
+		t.Fatalf("create credentials secret: %v", err)
+	}
+
+	stop, err := controller.StartFakeForkdNode(testRegistry, "ws-cred-node", "wsc-tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	ws := makeWorkspace(t, "ws-cred", v1alpha1.WorkspaceRetention{})
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: ws.Name, Namespace: ws.Namespace}, ws); err != nil {
+			return err
+		}
+		ws.Spec.Git = v1alpha1.WorkspaceGit{
+			Paths:                []string{"/workspace/repo"},
+			CredentialsUsername:  "bot",
+			CredentialsSecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "git-creds"}, Key: "token"},
+		}
+		return k8sClient.Update(ctx, ws)
+	}); err != nil {
+		t.Fatalf("set workspace git creds: %v", err)
+	}
+
+	makeBoundClaim(t, "wsc", "ws-cred", v1alpha1.SandboxClaimSpec{
+		NodeName: "ws-cred-node",
+		Timeout:  &metav1.Duration{Duration: 2 * time.Second},
+		Outputs:  []v1alpha1.OutputSpec{{Git: &v1alpha1.GitOutput{Remote: "https://example.test/rendezvous.git", Branch: "attempt/{{.name}}"}}},
+	})
+	waitBoundPhase(t, "wsc-claim", v1alpha1.SandboxReady)
+	waitBoundPhase(t, "wsc-claim", v1alpha1.SandboxTerminated)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		gitMu.Lock()
+		called, creds := pushCalls, gotCreds
+		gitMu.Unlock()
+		if called >= 1 {
+			if creds == nil {
+				t.Fatal("rendezvous seam received nil credentials; the Secret was not resolved")
+			}
+			if creds.Username != "bot" {
+				t.Fatalf("credentials username = %q, want bot", creds.Username)
+			}
+			if creds.Token != token {
+				t.Fatalf("credentials token mismatch; the resolved token did not reach the seam")
+			}
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if pushCalls == 0 {
+		t.Fatal("git rendezvous seam was not invoked within 10s")
+	}
+
+	// The token VALUE must never appear in any claim condition.
+	var claim v1alpha1.SandboxClaim
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "wsc-claim"}, &claim); err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	for _, c := range claim.Status.Conditions {
+		if strings.Contains(c.Message, token) || strings.Contains(c.Reason, token) {
+			t.Fatalf("token leaked into claim condition %s: %q", c.Type, c.Message)
+		}
+	}
+	// And never in any revision condition or field.
+	var revs v1alpha1.WorkspaceRevisionList
+	if err := k8sClient.List(ctx, &revs, client.InNamespace("default")); err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	for i := range revs.Items {
+		r := &revs.Items[i]
+		for _, c := range r.Status.Conditions {
+			if strings.Contains(c.Message, token) || strings.Contains(c.Reason, token) {
+				t.Fatalf("token leaked into revision %s condition: %q", r.Name, c.Message)
+			}
+		}
+		for _, p := range r.Status.GitPushes {
+			if strings.Contains(p.Remote, token) || strings.Contains(p.Branch, token) {
+				t.Fatalf("token leaked into revision %s git push record", r.Name)
+			}
+		}
+	}
 }
 
 func containsExclude(list []string, want string) bool {

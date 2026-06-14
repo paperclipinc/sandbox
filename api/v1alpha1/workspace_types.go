@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -62,6 +63,24 @@ type WorkspaceGit struct {
 	// Paths are the repo paths inside the workspace that get version history and
 	// the rendezvous remote.
 	Paths []string `json:"paths,omitempty"`
+
+	// CredentialsSecretRef names a Secret key holding the credential token used to
+	// authenticate the {git} rendezvous push to an external remote. The token is a
+	// secret VALUE: it is resolved at push time, delivered to git only through an
+	// ephemeral credentials file in an isolated HOME, and never logged, never put
+	// on the git argv, and never recorded in a condition or revision. The username
+	// is taken from CredentialsUsername (or defaults to "x-access-token", the
+	// token-only forge convention). Unset means an unauthenticated push (a local
+	// bare repo or an already-credentialed remote helper on the host).
+	// +optional
+	CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
+
+	// CredentialsUsername is the basic-auth username paired with the token from
+	// CredentialsSecretRef. It is not a secret. Defaults to "x-access-token" when
+	// unset, which most token-based forges accept. Ignored when CredentialsSecretRef
+	// is unset.
+	// +optional
+	CredentialsUsername string `json:"credentialsUsername,omitempty"`
 }
 
 type WorkspaceRetention struct {

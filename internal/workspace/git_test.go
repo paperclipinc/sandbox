@@ -97,7 +97,7 @@ func TestRendezvousPushesToLocalBareRepo(t *testing.T) {
 		"repo/README.md": "# attempt\n",
 	}
 	branch := "attempt/agent-7f3a"
-	if err := Rendezvous(ctx, repoFiles, bare, branch); err != nil {
+	if err := Rendezvous(ctx, repoFiles, bare, branch, nil); err != nil {
 		t.Fatalf("Rendezvous: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestRendezvousRemoteArgInjectionIsContained(t *testing.T) {
 	remote := "--receive-pack=touch " + sentinel
 
 	repoFiles := map[string]string{"repo/main.go": "package main\n"}
-	err := Rendezvous(context.Background(), repoFiles, remote, "attempt/agent-7f3a")
+	err := Rendezvous(context.Background(), repoFiles, remote, "attempt/agent-7f3a", nil)
 	if err == nil {
 		t.Fatal("Rendezvous with a flag-shaped remote must return an error, not succeed")
 	}
@@ -161,7 +161,95 @@ func TestRendezvousRemoteArgInjectionIsContained(t *testing.T) {
 func TestRendezvousNoFilesIsNoOp(t *testing.T) {
 	requireGit(t)
 	// No repo files: a {git} output with nothing to push is a no-op, not an error.
-	if err := Rendezvous(context.Background(), nil, "unused-remote", "attempt/x"); err != nil {
+	if err := Rendezvous(context.Background(), nil, "unused-remote", "attempt/x", nil); err != nil {
 		t.Fatalf("empty Rendezvous should be a no-op, got %v", err)
+	}
+}
+
+// TestRendezvousCredentialsNeverLeakOnPushFailure proves the secrets rule for
+// the credentialed push: a forced push failure must NOT carry the token in the
+// returned error, and no credentials file may survive the call. The credential
+// is delivered to git through an ephemeral, isolated HOME .git-credentials file
+// (credential.helper=store), never on the git argv, so it cannot appear in a
+// process table, a log line, or the returned error.
+func TestRendezvousCredentialsNeverLeakOnPushFailure(t *testing.T) {
+	requireGit(t)
+
+	const token = "s3cr3t-token-DEADBEEF" //nolint:gosec // test sentinel, not a real credential
+	creds := &Credentials{Username: "bot", Token: token}
+
+	// A remote that does not exist forces the push step to fail so we can assert
+	// the failure path redacts the token.
+	remote := "https://127.0.0.1:1/does-not-exist.git"
+	repoFiles := map[string]string{"repo/main.go": "package main\n"}
+
+	err := Rendezvous(context.Background(), repoFiles, remote, "attempt/agent-7f3a", creds)
+	if err == nil {
+		t.Fatal("Rendezvous to an unreachable remote must return an error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("credential token leaked into the error: %v", err)
+	}
+	// The username on its own is not a secret, but the token MUST be absent.
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token present in error: %v", err)
+	}
+}
+
+// TestRendezvousCredentialsDoNotTouchCallerHome proves the credential file lives
+// only inside the ephemeral rendezvous HOME and never touches the caller's real
+// HOME or git config. A token-credential push needs an http(s) remote (file://
+// cannot carry basic-auth); the actual landing on a real authenticated remote is
+// proven by the rendezvous-server test. Here the push to an unreachable https
+// remote fails, but the HOME-isolation and redaction invariants must hold.
+func TestRendezvousCredentialsDoNotTouchCallerHome(t *testing.T) {
+	requireGit(t)
+
+	const token = "another-secret-CAFEBABE" //nolint:gosec // test sentinel
+	creds := &Credentials{Username: "bot", Token: token}
+	repoFiles := map[string]string{"repo/a.txt": "hello\n"}
+	remote := "https://127.0.0.1:1/unreachable.git"
+
+	homeBefore, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no user home dir")
+	}
+	credPath := filepath.Join(homeBefore, ".git-credentials")
+	beforeContent, _ := os.ReadFile(credPath) //nolint:errcheck // may not exist
+
+	// The push fails (unreachable), which is fine: we assert isolation + redaction.
+	pushErr := Rendezvous(context.Background(), repoFiles, remote, "attempt/agent-7f3a", creds)
+	if pushErr == nil {
+		t.Fatal("push to an unreachable https remote must fail")
+	}
+	if strings.Contains(pushErr.Error(), token) {
+		t.Fatalf("token leaked into the error: %v", pushErr)
+	}
+
+	// The caller's real ~/.git-credentials must be untouched (the credential
+	// lived only in the ephemeral HOME, which is removed on return).
+	afterContent, _ := os.ReadFile(credPath) //nolint:errcheck
+	if string(beforeContent) != string(afterContent) {
+		t.Fatalf("Rendezvous mutated the caller's ~/.git-credentials")
+	}
+	if strings.Contains(string(afterContent), token) {
+		t.Fatalf("token leaked into the caller's ~/.git-credentials")
+	}
+}
+
+// TestRendezvousRejectsCredentialsForFileRemote proves a token-credential push
+// to a non-http(s) remote (which cannot carry basic-auth) is rejected with an
+// error that does NOT contain the token.
+func TestRendezvousRejectsCredentialsForFileRemote(t *testing.T) {
+	requireGit(t)
+	const token = "file-remote-secret-99" //nolint:gosec // test sentinel
+	creds := &Credentials{Username: "bot", Token: token}
+	repoFiles := map[string]string{"repo/a.txt": "hello\n"}
+	err := Rendezvous(context.Background(), repoFiles, "/srv/git/repo.git", "attempt/x", creds)
+	if err == nil {
+		t.Fatal("credentials on a non-http remote must be rejected")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked into the rejection error: %v", err)
 	}
 }

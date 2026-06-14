@@ -56,6 +56,45 @@ spec:
                   rendezvous remote. Git is the merge layer; the engine never does
                   filesystem merge. The rendezvous itself is a later W4 slice.
                 properties:
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef names a Secret key holding the credential token used to
+                      authenticate the {git} rendezvous push to an external remote. The token is a
+                      secret VALUE: it is resolved at push time, delivered to git only through an
+                      ephemeral credentials file in an isolated HOME, and never logged, never put
+                      on the git argv, and never recorded in a condition or revision. The username
+                      is taken from CredentialsUsername (or defaults to "x-access-token", the
+                      token-only forge convention). Unset means an unauthenticated push (a local
+                      bare repo or an already-credentialed remote helper on the host).
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  credentialsUsername:
+                    description: |-
+                      CredentialsUsername is the basic-auth username paired with the token from
+                      CredentialsSecretRef. It is not a secret. Defaults to "x-access-token" when
+                      unset, which most token-based forges accept. Ignored when CredentialsSecretRef
+                      is unset.
+                    type: string
                   paths:
                     description: |-
                       Paths are the repo paths inside the workspace that get version history and

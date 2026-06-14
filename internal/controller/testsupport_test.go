@@ -149,7 +149,7 @@ func (r *SandboxClaimReconciler) SetWorkspaceTransferForTest(
 	hydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, manifest cas.Digest) error,
 	dehydrate func(ctx context.Context, claim *v1alpha1.SandboxClaim, excludePaths, capturePaths []string) (cas.Digest, error),
 	diff func(ctx context.Context, claim *v1alpha1.SandboxClaim, parent, child cas.Digest) (workspace.Diff, error),
-	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string) error,
+	rendezvous func(ctx context.Context, repoFiles map[string]string, remote, branch string, creds *workspace.Credentials) error,
 	repoFiles func(ctx context.Context, claim *v1alpha1.SandboxClaim, digest cas.Digest, gitPaths []string) (map[string]string, error),
 ) {
 	r.HydrateWorkspace = hydrate
