@@ -73,6 +73,15 @@ type vmm interface {
 	// The husk activate path calls it AFTER the rootfs drive rebind so the guest
 	// resumes already bound to its own per-activation rootfs clone.
 	Resume() error
+	// Pause transitions the loaded/running VM to Paused (PATCH /vm Paused). The
+	// fork-snapshot op pauses the source VM before CreateSnapshot, which requires
+	// a paused VM, then resumes it (unless the fork asked to keep it paused).
+	Pause() error
+	// CreateSnapshot writes a Full Firecracker snapshot of the PAUSED VM: the
+	// guest memory to memPath and the device/vm state to snapshotPath. The
+	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
+	// restore independent copies of it.
+	CreateSnapshot(memPath, snapshotPath string) error
 	// Close tears the VMM down.
 	Close() error
 }

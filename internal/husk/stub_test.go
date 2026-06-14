@@ -38,11 +38,24 @@ type fakeVMM struct {
 
 	resumeCalls int
 	resumeErr   error
+	resumed     bool
+
+	// paused / pauseErr / snapMem / snapState / snapErr support the fork-snapshot
+	// op: ForkSnapshot pauses the source VM, writes a Full snapshot, then resumes.
+	paused    bool
+	pauseErr  error
+	snapMem   string
+	snapState string
+	snapErr   error
 
 	// callOrder records the activate-time VMM call sequence ("load", "patch",
 	// "resume") so a test can assert load(resume=false) -> PatchDrive -> Resume.
 	callOrder []string
 }
+
+// errSnap is a scripted CreateSnapshot failure used by the fork-snapshot
+// fail-closed tests.
+var errSnap = errors.New("snap boom")
 
 func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error {
 	f.mu.Lock()
@@ -75,6 +88,7 @@ func (f *fakeVMM) Resume() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resumeCalls++
+	f.resumed = true
 	f.callOrder = append(f.callOrder, "resume")
 	return f.resumeErr
 }
@@ -84,6 +98,29 @@ func (f *fakeVMM) Close() error {
 	defer f.mu.Unlock()
 	f.closed = true
 	return nil
+}
+
+func (f *fakeVMM) Pause() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.paused = true
+	f.callOrder = append(f.callOrder, "pause")
+	return f.pauseErr
+}
+
+func (f *fakeVMM) CreateSnapshot(memPath, snapshotPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapMem = memPath
+	f.snapState = snapshotPath
+	f.callOrder = append(f.callOrder, "snapshot")
+	return f.snapErr
+}
+
+func TestVMMInterfaceHasForkSnapshotMethods(t *testing.T) {
+	// Compile-time proof the fake vmm satisfies the extended interface (Pause +
+	// CreateSnapshot), so the fork-snapshot op can drive it in a unit test.
+	var _ vmm = (*fakeVMM)(nil)
 }
 
 // fakeNotifier records the fork-correctness handshake arguments and returns a
