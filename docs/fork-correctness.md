@@ -11,8 +11,8 @@ test missing or incomplete. `done` = implemented + test runs in the
 
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
-| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked) | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`; KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial** (guest reseed + forkd notify done; virtio-rng device attachment NOT wired; KVM proof is guest-only, see CI job) |
-| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial** (guest clock step done, 500ms tolerance; KVM proof is guest-only, see CI job) |
+| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED when the guest does not reseed | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`; KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial; NOT fail-closed off husk (review finding)** (guest reseed + forkd notify done; virtio-rng device attachment NOT wired; KVM proof is guest-only. Fail-closed ONLY on the husk path: `internal/husk` `productionNotifier` checks `resp.ReseededRNG` and leaves the VM unserved on false. On the RAW-FORKD path `internal/daemon/sandbox_api.go` `NotifyForked` DISCARDS the response and never checks `ReseededRNG`, so a guest that signals `ReseededRNG:false` with `OK:true` is served anyway and serves duplicate CRNG output; only a transport `OK:false` fails the fork. The SANDBOX-SERVER real-mode fork does NO reseed handshake at all (`cmd/sandbox-server/main.go` `handleFork`). The go test `internal/daemon/delivery_test.go` only exercises `OK:false`, not `ReseededRNG:false`, so the gap is untested.) |
+| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial** (guest clock step done, 500ms tolerance; KVM proof is guest-only. Review finding: `stepClock` steps only `CLOCK_REALTIME`, NOT `CLOCK_MONOTONIC` (`guest/agent/notifyforked.go`), so timers and deadlines anchored to the monotonic clock across a restore can mis-fire.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
@@ -23,7 +23,11 @@ The husk-pods activate path (issue #18, `internal/husk`, `cmd/husk-stub`) runs
 the SAME RNG-reseed + clock-step `NotifyForked` handshake as the engine fork
 path (rows 1 and 2), plus env/secret delivery via `Configure` (row 3), on every
 `Activate`. It fails closed: a VM whose guest does not report `ReseededRNG` is
-left unserved. The KVM husk activate-correctness phase proves it by activating
+left unserved. NOTE (review finding): this fail-closed reseed check is enforced
+ONLY on the husk path (`internal/husk` `productionNotifier`). It is NOT enforced
+on the raw-forkd path (`internal/daemon` discards the `NotifyForked` response)
+nor on sandbox-server real-mode (no reseed handshake). The "always strict" claim
+holds for husk only; see row 1. The KVM husk activate-correctness phase proves it by activating
 two VMs from one bench snapshot and asserting distinct `/dev/urandom`, each wall
 clock within 2s of the runner, and a delivered env var plus secret readable in
 each guest with the secret value absent from the host-side logs. See
@@ -95,6 +99,15 @@ maintains above. The memory image is principal-bound and is never served across
 principals (`docs/threat-model.md`); that is a security property, not a
 correctness one, but it is enforced fail-closed BEFORE any restore runs.
 
+NOT WIRED (review finding). The above describes the resume reseed handshake on a
+path whose PRODUCTION hook is nil today. The controller `resumeMemory` seam
+(`internal/controller/workspace_binding.go`) defaults to a fail-closed error when
+`ResumeMemory` is unset, and real memory restore is gated behind the
+`--workspace-memory-snapshots` flag (off by default). So the resume-then-reseed
+flow is object-level proven in envtest but the real VM-memory restore (and thus
+the actual in-VM reseed on resume) is not wired into the shipped controller; the
+correctness claim for resume holds only once that hook is bound on a KVM kubelet.
+
 ## 1. RNG and entropy after restore
 
 Every VM restored from the same snapshot wakes up with byte-identical kernel
@@ -114,6 +127,20 @@ host-entropy-over-vsock hook is our equivalent.
 **Follow-up (not wired):** a virtio-rng device attached to every restored VM
 backed by host entropy is NOT implemented; the current path injects entropy
 only at fork time via NotifyForked, not continuously. Tracked as a follow-up.
+
+**Fail-closed scope (review finding).** The reseed is fail-closed ONLY on the
+husk path. On the raw-forkd path forkd discards the `NotifyForked` response and
+never inspects `ReseededRNG`, and sandbox-server real-mode does no reseed at all,
+so an un-reseeded fork is served on those paths (duplicate CRNG output). See
+row 1.
+
+**Write-fallback over-reports (review finding).** When `RNDADDENTROPY` fails,
+`reseedCRNG` falls back to writing the bytes to `/dev/urandom`
+(`guest/agent/notifyforked.go`). That write MIXES the bytes into the pool but
+does NOT credit entropy, yet the function still returns `reseeded=true`. So the
+reseed signal can report success on a path that did not actually credit fresh
+entropy (low severity: the pool is still perturbed, but the success signal is
+optimistic).
 
 Tests. go (`internal/daemon`): `TestForkNotifiesAgentWithFreshEntropy` asserts
 forkd sends entropy, `TestForkGenerationIncrementsAcrossForks` asserts distinct
@@ -152,6 +179,13 @@ and calls `clock_settime(CLOCK_REALTIME)` when drift exceeds a 500ms tolerance,
 then signals userspace as in section 1 (`guest/agent/notifyforked.go`). kvm-clock
 remaining the active clocksource and Firecracker's restore path updating it is
 relied on but not separately asserted here.
+
+**CLOCK_MONOTONIC not stepped (review finding).** `stepClock` steps only
+`CLOCK_REALTIME`. `CLOCK_MONOTONIC` is left as the snapshot restored it, so any
+timer or deadline anchored to the monotonic clock (most Go and runtime timers,
+many language deadlines) can mis-fire across a restore (fire early, fire late,
+or appear to jump). This is a correctness hazard for in-flight timers in a forked
+or resumed guest, not just a wall-clock concern. Tracked as a follow-up.
 
 Tests. go: `TestForkNotifiesAgentWithFreshEntropy` covers that forkd sends the
 notification carrying the host wall clock.
