@@ -48,6 +48,15 @@ type VsockTransport interface {
 // tree dehydrates to the same digest (PutSnapshot is content-addressed and
 // deterministic in the file set).
 func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excludePaths, capturePaths []string) (cas.Digest, error) {
+	return DehydrateTo(ctx, agent, plainStore{store}, excludePaths, capturePaths)
+}
+
+// DehydrateTo is Dehydrate against any ChunkStore, so the same hydrate/dehydrate
+// logic runs over the plaintext node CAS, the per-workspace EncryptedStore, or
+// the S3 object-store backend. The store choice never changes the returned
+// digest for a given tree (every ChunkStore is plaintext content-addressed), so
+// content-addressed dedup is preserved across all three.
+func DehydrateTo(ctx context.Context, agent VsockTransport, store ChunkStore, excludePaths, capturePaths []string) (cas.Digest, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -81,6 +90,14 @@ func Dehydrate(ctx context.Context, agent VsockTransport, store *cas.Store, excl
 // writing. The manifest's flat logical file names are the workspace-relative
 // paths Dehydrate captured, so the round trip is byte-identical.
 func Hydrate(ctx context.Context, agent VsockTransport, store *cas.Store, manifest cas.Digest) error {
+	return HydrateFrom(ctx, agent, plainStore{store}, manifest)
+}
+
+// HydrateFrom is Hydrate against any ChunkStore (plaintext CAS, EncryptedStore,
+// or S3). The manifest's flat logical file names are the workspace-relative
+// paths Dehydrate captured, so the round trip is byte-identical regardless of
+// backend.
+func HydrateFrom(ctx context.Context, agent VsockTransport, store ChunkStore, manifest cas.Digest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
