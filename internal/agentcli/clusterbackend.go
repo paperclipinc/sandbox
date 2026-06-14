@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	v1alpha1 "github.com/paperclipinc/mitos/api/v1alpha1"
+	"github.com/paperclipinc/mitos/internal/controller"
 	"github.com/paperclipinc/mitos/internal/mcp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -284,4 +286,155 @@ func (b *ClusterBackend) List(ctx context.Context, namespace string) ([]SandboxI
 		})
 	}
 	return infos, nil
+}
+
+// Workspace returns a ClusterWorkspaceBackend bound to the same client and
+// namespace.
+func (b *ClusterBackend) Workspace() WorkspaceBackend {
+	return &ClusterWorkspaceBackend{client: b.client, namespace: b.namespace, now: b.now}
+}
+
+// ClusterWorkspaceBackend drives the workspace verbs over the cluster: it
+// creates Workspace and WorkspaceRevision objects and reads their status. It
+// reuses WorkspaceVerbs (the controller-side fork/revert helpers) so the lineage
+// and rejection rules are shared with the controller.
+type ClusterWorkspaceBackend struct {
+	client    client.Client
+	namespace string
+	now       func() time.Time
+}
+
+func (w *ClusterWorkspaceBackend) verbs() *controller.WorkspaceVerbs {
+	return &controller.WorkspaceVerbs{Client: w.client}
+}
+
+// CreateWorkspace creates an empty Workspace object.
+func (w *ClusterWorkspaceBackend) CreateWorkspace(ctx context.Context, name string) error {
+	ws := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
+	if err := w.client.Create(ctx, ws); err != nil {
+		return fmt.Errorf("create workspace %s: %w", name, err)
+	}
+	return nil
+}
+
+// ListWorkspaces lists the workspaces in namespace (or the backend default when
+// namespace is empty), mapping them to WorkspaceInfo rows.
+func (w *ClusterWorkspaceBackend) ListWorkspaces(ctx context.Context, namespace string) ([]WorkspaceInfo, error) {
+	var opts []client.ListOption
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	} else {
+		opts = append(opts, client.InNamespace(w.namespace))
+	}
+	var list v1alpha1.WorkspaceList
+	if err := w.client.List(ctx, &list, opts...); err != nil {
+		return nil, fmt.Errorf("list workspaces: %w", err)
+	}
+	now := w.now()
+	out := make([]WorkspaceInfo, 0, len(list.Items))
+	for i := range list.Items {
+		ws := &list.Items[i]
+		out = append(out, WorkspaceInfo{
+			Name: ws.Name, Head: ws.Status.Head, Revisions: int(ws.Status.Revisions),
+			Resumable: ws.Status.Resumable, Age: now.Sub(ws.CreationTimestamp.Time),
+		})
+	}
+	return out, nil
+}
+
+// Log lists the revisions belonging to workspace, newest first.
+func (w *ClusterWorkspaceBackend) Log(ctx context.Context, workspace string) ([]RevisionInfo, error) {
+	var list v1alpha1.WorkspaceRevisionList
+	if err := w.client.List(ctx, &list, client.InNamespace(w.namespace)); err != nil {
+		return nil, fmt.Errorf("list revisions: %w", err)
+	}
+	now := w.now()
+	out := make([]RevisionInfo, 0)
+	for i := range list.Items {
+		r := &list.Items[i]
+		if r.Spec.WorkspaceRef.Name != workspace {
+			continue
+		}
+		out = append(out, RevisionInfo{
+			Name: r.Name, Phase: string(r.Status.Phase), Lineage: revisionLineageStr(r),
+			Resumable: r.Spec.MemorySnapshotRef != nil, Age: now.Sub(r.CreationTimestamp.Time),
+		})
+	}
+	// Newest first.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Age < out[j].Age })
+	return out, nil
+}
+
+// Diff returns the recorded content-hash diff of a revision against its parent
+// head, if the revision captured one (via a terminate {diff: true} output).
+func (w *ClusterWorkspaceBackend) Diff(ctx context.Context, workspace, revision string) (DiffInfo, error) {
+	var rev v1alpha1.WorkspaceRevision
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: revision}, &rev); err != nil {
+		return DiffInfo{}, fmt.Errorf("get revision %s: %w", revision, err)
+	}
+	if rev.Status.DiffSummary == nil {
+		return DiffInfo{}, fmt.Errorf("revision %s has no recorded diff; capture it with a terminate {diff:true} output", revision)
+	}
+	d := rev.Status.DiffSummary
+	return DiffInfo{Parent: d.ParentRevision, Added: d.Added, Removed: d.Removed, Modified: d.Modified}, nil
+}
+
+// Fork branches a committed revision of src into dst, returning the new revision
+// name. It delegates to the shared controller-side verb so the lineage and
+// rejection rules match the controller.
+func (w *ClusterWorkspaceBackend) Fork(ctx context.Context, src, rev, dst string) (string, error) {
+	r, err := w.verbs().Fork(ctx, w.namespace, src, rev, dst)
+	if err != nil {
+		return "", err
+	}
+	return r.Name, nil
+}
+
+// Revert sets a workspace head to a past revision by creating a new tip that
+// shares its content; returns the new revision name.
+func (w *ClusterWorkspaceBackend) Revert(ctx context.Context, workspace, rev string) (string, error) {
+	r, err := w.verbs().Revert(ctx, w.namespace, workspace, rev)
+	if err != nil {
+		return "", err
+	}
+	return r.Name, nil
+}
+
+// RemoveWorkspace deletes a workspace; its revisions are garbage-collected by
+// owner reference.
+func (w *ClusterWorkspaceBackend) RemoveWorkspace(ctx context.Context, name string) error {
+	ws := &v1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.namespace}}
+	if err := w.client.Delete(ctx, ws); err != nil {
+		return fmt.Errorf("delete workspace %s: %w", name, err)
+	}
+	return nil
+}
+
+// Bind binds a running sandbox claim to a workspace. A sandbox binds one
+// workspace for its lifetime: re-binding to a different workspace is refused.
+func (w *ClusterWorkspaceBackend) Bind(ctx context.Context, sandboxID, workspace string) error {
+	var claim v1alpha1.SandboxClaim
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: sandboxID}, &claim); err != nil {
+		return fmt.Errorf("get sandbox %s: %w", sandboxID, err)
+	}
+	if claim.Spec.WorkspaceRef != nil && claim.Spec.WorkspaceRef.Name != workspace {
+		return fmt.Errorf("sandbox %s is already bound to workspace %s; a sandbox binds one workspace for its lifetime", sandboxID, claim.Spec.WorkspaceRef.Name)
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	claim.Spec.WorkspaceRef = &v1alpha1.LocalObjectReference{Name: workspace}
+	if err := w.client.Patch(ctx, &claim, patch); err != nil {
+		return fmt.Errorf("bind sandbox %s to workspace %s: %w", sandboxID, workspace, err)
+	}
+	return nil
+}
+
+// revisionLineageStr renders the human-legible lineage of a revision.
+func revisionLineageStr(r *v1alpha1.WorkspaceRevision) string {
+	if r.Spec.Source.FromClaim != "" {
+		return "fromClaim:" + r.Spec.Source.FromClaim
+	}
+	if r.Spec.Source.FromWorkspaceRevision != nil {
+		return "fromWorkspaceRevision:" + r.Spec.Source.FromWorkspaceRevision.Revision
+	}
+	return "root"
 }
