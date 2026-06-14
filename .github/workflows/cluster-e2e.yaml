@@ -32,6 +32,15 @@ on:
         description: "Namespace to run the e2e in"
         required: false
         default: mitos-e2e
+      suite:
+        description: "Which cluster e2e suite to run: husk, workspace, or all"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - husk
+          - workspace
   # OPT-IN labeled-same-repo-PR path. The `pull_request` event fires for forks
   # too, but the job-level `if:` below excludes forks AND requires the label, so
   # a labeled fork PR still cannot run here.
@@ -124,13 +133,21 @@ jobs:
     #   * push / workflow_dispatch are inherently maintainer-trusted, OR
     #   * a pull_request that is BOTH from the same repo (NOT a fork) AND carries
     #     the maintainer-applied `ci-cluster` label.
+    # The suite filter (workflow_dispatch only) lets a maintainer run just the
+    # husk or just the workspace suite; it NEVER widens the trusted-trigger gate.
     if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
       (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+        )
+      ) &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.suite == 'all' || inputs.suite == 'husk'
       )
 
     # The `cluster` Environment should be configured in repo Settings to require
@@ -257,6 +274,143 @@ jobs:
             kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
               controller="${PREV}"
             # Drop the --husk-stub-image arg we appended (remove the LAST arg).
+            LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+              -o jsonpath='{.spec.template.spec.containers[0].args}' \
+              | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
+            if [ -n "${LAST_IDX}" ]; then
+              kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+                -p="[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/${LAST_IDX}\"}]" \
+                || true
+            fi
+            kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=180s
+          else
+            echo "no previous controller image recorded; leaving controller as-is"
+          fi
+
+          echo "=== teardown: restore the forkd DaemonSet image ==="
+          PREV_FORKD="${{ steps.deploy.outputs.prev_forkd_image }}"
+          if [ -n "${PREV_FORKD}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd \
+              forkd="${PREV_FORKD}"
+            kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
+          else
+            echo "no previous forkd image recorded; leaving forkd as-is"
+          fi
+          echo "teardown done"
+          exit 0
+
+  # ---------------------------------------------------------------------------
+  # The real-cluster WORKSPACE e2e (EPIC W4, issue #21). Gated IDENTICALLY to
+  # cluster-husk-e2e: same self-hosted-in-cluster runner, same KVM node, the
+  # SAME trusted-trigger `if:` (push / workflow_dispatch / labeled-same-repo-PR;
+  # forks excluded), and the same `cluster` Environment second human gate. The
+  # suite filter only restricts which suite a maintainer dispatch runs; it never
+  # widens the fork-PR gate. The two jobs share the single self-hosted runner,
+  # which processes one job at a time, so they never drive the cluster at once.
+  # ---------------------------------------------------------------------------
+  cluster-workspace-e2e:
+    needs: build-images
+    runs-on: [self-hosted, mitos-cluster]
+
+    if: >-
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          contains(github.event.pull_request.labels.*.name, 'ci-cluster')
+        )
+      ) &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.suite == 'all' || inputs.suite == 'workspace'
+      )
+
+    environment: cluster
+    timeout-minutes: 25
+
+    env:
+      E2E_NAMESPACE: ${{ github.event.inputs.e2e_namespace || 'mitos-e2e' }}
+      MITOS_NAMESPACE: mitos
+      IMAGE_REGISTRY: ghcr.io/paperclipinc
+      IMAGE_TAG: e2e-${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show context (no secrets)
+        run: |
+          set -euo pipefail
+          echo "event: ${{ github.event_name }}"
+          echo "ref: ${{ github.ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "e2e namespace: ${E2E_NAMESPACE}"
+          kubectl version --client
+          kubectl get nodes -l 'mitos.run/kvm=true' -o wide
+
+      - name: Deploy images under test
+        id: deploy
+        run: |
+          set -euo pipefail
+          CONTROLLER_IMG="${IMAGE_REGISTRY}/mitos-controller:${IMAGE_TAG}"
+          HUSK_IMG="${IMAGE_REGISTRY}/mitos-husk-stub:${IMAGE_TAG}"
+          FORKD_IMG="${IMAGE_REGISTRY}/mitos-forkd:${IMAGE_TAG}"
+          echo "Deploying controller=${CONTROLLER_IMG}"
+          echo "Deploying husk-stub=${HUSK_IMG}"
+          echo "Deploying forkd=${FORKD_IMG}"
+
+          # forkd is the BUILDER (see the husk job): update it first so the fresh
+          # template the e2e creates is built with the guest agent under test.
+          PREV_FORKD_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get daemonset/mitos-forkd \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_forkd_image=${PREV_FORKD_IMG}" >> "$GITHUB_OUTPUT"
+          kubectl -n "${MITOS_NAMESPACE}" set image daemonset/mitos-forkd \
+            forkd="${FORKD_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status daemonset/mitos-forkd --timeout=180s
+
+          PREV_IMG="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          echo "prev_controller_image=${PREV_IMG}" >> "$GITHUB_OUTPUT"
+          kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
+            controller="${CONTROLLER_IMG}"
+          kubectl -n "${MITOS_NAMESPACE}" patch deployment/mitos-controller --type=json \
+            -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--husk-stub-image=${HUSK_IMG}\"}]"
+          kubectl -n "${MITOS_NAMESPACE}" rollout status deployment/mitos-controller --timeout=300s
+
+      - name: Run the cluster workspace e2e
+        run: |
+          set -euo pipefail
+          chmod +x test/cluster-e2e/workspace-e2e.sh
+          READY_TIMEOUT=240 test/cluster-e2e/workspace-e2e.sh "${E2E_NAMESPACE}"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "=== controller deployment ==="
+          kubectl -n "${MITOS_NAMESPACE}" describe deployment/mitos-controller
+          echo "=== controller logs ==="
+          kubectl -n "${MITOS_NAMESPACE}" logs deployment/mitos-controller --tail=200 --all-containers
+          echo "=== e2e namespace objects ==="
+          kubectl -n "${E2E_NAMESPACE}" get workspaces,workspacerevisions,sandboxpools,sandboxclaims,pods -o wide
+          exit 0
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          echo "=== teardown: remove e2e objects ==="
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxclaims --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete workspaces --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxpools --all --wait=false
+          kubectl -n "${E2E_NAMESPACE}" delete sandboxtemplates --all --wait=false
+
+          echo "=== teardown: restore the controller image ==="
+          PREV="${{ steps.deploy.outputs.prev_controller_image }}"
+          if [ -n "${PREV}" ]; then
+            kubectl -n "${MITOS_NAMESPACE}" set image deployment/mitos-controller \
+              controller="${PREV}"
             LAST_IDX="$(kubectl -n "${MITOS_NAMESPACE}" get deployment/mitos-controller \
               -o jsonpath='{.spec.template.spec.containers[0].args}' \
               | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a)-1)' 2>/dev/null)"
