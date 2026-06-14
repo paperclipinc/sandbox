@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Self-hosted GitHub Actions runner for the real-cluster husk e2e (issue #16).
+#
+# Apply with: kubectl apply -k deploy/ci-runner/
+#
+# This lays down the mitos-ci namespace (the runner), the mitos-e2e namespace
+# (the e2e blast radius), the runner ServiceAccount, the least-privilege RBAC,
+# and the ephemeral runner Deployment.
+#
+# It deliberately does NOT include the runner registration Secret
+# (mitos-ci-runner-token): no token value lives in the repo. The maintainer
+# creates that Secret out of band before applying; see docs/ci-runner.md.
+#
+# This base is separate from deploy/kustomization.yaml (the control plane) and
+# from deploy/dev/ (the mock dev overlay); it consumes neither.
+resources:
+  - namespace.yaml
+  - e2e-namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - deployment.yaml

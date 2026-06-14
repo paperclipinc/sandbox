@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mitos-e2e
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-e2e
+    # The husk pods that land here run a dormant Firecracker VMM and request
+    # the mitos.run/kvm device-plugin resource (NOT privileged: true), matching
+    # the production pod-native path. They are scheduled by the controller, not
+    # by the runner. This namespace is the blast-radius boundary for the e2e:
+    # the runner's RBAC can only touch claims/pods/exec HERE.

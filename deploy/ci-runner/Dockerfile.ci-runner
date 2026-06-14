@@ -1,0 +1,51 @@
+# Thin self-hosted GitHub Actions runner for the mitos cluster e2e.
+#
+# The base is the OFFICIAL actions-runner image, pinned by version AND digest.
+# We add only what the e2e DRIVES the cluster with: kubectl, git, bash, jq,
+# python3, and the mitos Python SDK. The runner does NOT need docker or KVM:
+# the husk pods do the KVM, the runner only kubectls and speaks the sandbox
+# HTTP API over the in-cluster pod network.
+#
+# SECURITY: keep this image minimal. It runs with a registration token that can
+# add runners to a PUBLIC repo, so every extra tool is extra attack surface.
+#
+# Build + push (maintainer, on a trusted machine):
+#   docker build -f deploy/ci-runner/Dockerfile.ci-runner \
+#     -t ghcr.io/paperclipinc/mitos-ci-runner:<tag> .
+#   docker push ghcr.io/paperclipinc/mitos-ci-runner:<tag>
+# Then pin the deployment.yaml image to the pushed digest.
+
+# Pin the base by digest. Resolve the current digest with:
+#   docker buildx imagetools inspect ghcr.io/actions/actions-runner:2.321.0
+# and replace the placeholder below before building.
+FROM ghcr.io/actions/actions-runner:2.328.0@sha256:db0dcae6d28559e54277755a33aba7d0665f255b3bd2a66cdc5e132712f155e0
+
+USER root
+
+# kubectl: pinned to a version compatible with the cluster (k8s v1.36.x). git,
+# bash, jq, ca-certificates, curl, python3 + venv for the SDK.
+ARG KUBECTL_VERSION=v1.36.1
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        bash \
+        jq \
+        python3 \
+        python3-venv \
+        python3-pip \
+    && curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the mitos Python SDK into a venv on PATH so the e2e can import it.
+# Copy only the SDK so the build does not depend on the whole repo context.
+COPY sdk/python /opt/mitos-sdk
+RUN python3 -m venv /opt/mitos-venv \
+    && /opt/mitos-venv/bin/pip install --no-cache-dir /opt/mitos-sdk
+ENV PATH="/opt/mitos-venv/bin:${PATH}"
+
+USER runner

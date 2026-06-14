@@ -1,0 +1,10 @@
+# actionlint configuration.
+#
+# Declares the custom self-hosted runner labels so actionlint does not flag them
+# as unknown. These labels are carried by the in-cluster self-hosted GitHub
+# Actions runner (deploy/ci-runner/, issue #16); see docs/ci-runner.md. The
+# cluster-e2e workflow targets them with runs-on: [self-hosted, mitos-cluster].
+self-hosted-runner:
+  labels:
+    - mitos-cluster
+    - kvm

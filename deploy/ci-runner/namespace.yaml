@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mitos-ci
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+    # The runner pod is unprivileged (it only kubectls; the husk pods do the
+    # KVM), so it satisfies the restricted Pod Security Standard. We enforce it
+    # here so a future change cannot quietly grant the runner more than it needs.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

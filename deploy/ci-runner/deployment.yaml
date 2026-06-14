@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-ci-runner
+  namespace: mitos-ci
+  labels:
+    app.kubernetes.io/name: mitos
+    app.kubernetes.io/component: ci-runner
+spec:
+  # Exactly one runner. It is EPHEMERAL (--ephemeral): the GitHub runner exits
+  # after a single job, the pod terminates, and the Deployment restarts it,
+  # which re-registers a FRESH runner using the token from the Secret. A
+  # fresh-per-job runner means no job can leave state behind for the next job,
+  # which matters on a PUBLIC repo. Scale to more replicas only if concurrent
+  # cluster e2e jobs are wanted (each is a distinct ephemeral runner).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mitos
+      app.kubernetes.io/component: ci-runner
+  # Recreate, not RollingUpdate: an ephemeral runner is a singleton worker, not
+  # a served endpoint, so there is no reason to briefly run two registrations.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mitos
+        app.kubernetes.io/component: ci-runner
+    spec:
+      serviceAccountName: mitos-ci-runner
+      # The runner only kubectls and speaks HTTP to pod IPs. It needs NO host
+      # access, NO privilege, NO KVM. Restricted-PSS compliant.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # Single runner; if the node is briefly NotReady do not pile up.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: runner
+          # PIN by digest. Built from deploy/ci-runner/Dockerfile.ci-runner and
+          # pushed by the maintainer; see that file and docs/ci-runner.md. The
+          # :latest tag is a readability placeholder; replace it with an
+          # immutable digest (image@sha256:...) before applying, so a moving tag
+          # cannot swap the runner binary out from under the cluster.
+          image: ghcr.io/paperclipinc/mitos-ci-runner:v1@sha256:3d13de2739d6d6e4d737bff55bea370b1db91d1d055b49b24683ab32aae2aa58
+          imagePullPolicy: IfNotPresent
+          # The official actions-runner entrypoint reads these env vars, runs
+          # config.sh to register, then run.sh. --ephemeral makes it a
+          # single-job runner that re-registers on restart.
+          env:
+            - name: RUNNER_NAME_PREFIX
+              value: mitos-cluster
+            # The repo (NOT org) the runner registers against. Self-hosted on a
+            # PUBLIC repo: fork-PR gating lives in the workflow, see
+            # .github/workflows/cluster-e2e.yaml.
+            - name: REPO_URL
+              value: https://github.com/paperclipinc/mitos
+            - name: RUNNER_SCOPE
+              value: repo
+            # Labels the workflow targets with runs-on: [self-hosted,
+            # mitos-cluster, kvm]. "kvm" advertises that jobs here reach the
+            # KVM-capable husk path (the husk pods do the KVM, not the runner).
+            - name: LABELS
+              value: self-hosted,mitos-cluster,kvm
+            - name: EPHEMERAL
+              value: "true"
+            # Registration token / PAT, supplied by the maintainer-created
+            # Secret. NEVER stored in the repo. The manifest references the
+            # Secret only; see docs/ci-runner.md for how to create it.
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mitos-ci-runner-token
+                  key: token
+            # Write the runner working tree to the emptyDir, not the read-only
+            # rootfs.
+            - name: RUNNER_WORKDIR
+              value: /home/runner/_work
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: work
+              mountPath: /home/runner/_work
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Ephemeral scratch for the checkout and runner work tree; gone with the
+        # pod so no job leaves residue for the next.
+        - name: work
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
