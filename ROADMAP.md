@@ -160,7 +160,13 @@ fork-correctness suite (§1) and failure/GC semantics (§2) are green in CI.**
     Ready dormant pod after a re-pend (both need the VMM running in the husk pod,
     bare metal; the object-level PDB / self-heal / re-pend / unschedulable signal
     are proven above); the BARE-METAL P99 claim-to-first-exec <= 10ms warm-pool
-    benchmark (slice 5; the shared-CI activation latency is not that target); and
+    benchmark (slice 5; the shared-CI activation latency is not that target);
+    live `SandboxFork` of a running husk-default sandbox (today
+    `internal/controller/sandboxfork_controller.go` forks by calling
+    `forkd.ForkRunning` on the source node, which works on the raw-forkd engine
+    path; on the husk default the source VM is owned by the husk POD's stub, not
+    forkd's in-process engine, so forkd has no VM to fork and no Ready children
+    are produced, which the standing cluster-e2e caught); and
     fully pod-native snapshot delivery (CAS pull into the pod) plus removing forkd
     entirely (it stays the builder).
 - **W2: agents.x-k8s.io conformance facade.** `cmd/facade` implements the
@@ -741,21 +747,30 @@ verified. In rough order of leverage:
   on the mock engine; real in-VM exec is proven by the KVM CI of the API. See
   docs/cli.md. OPEN: workspace verbs (`mitos ws ...`) deferred to Workspace
   (#21).
-- ✅ Streaming exec and background processes: forkd serves an incremental
+- 🔨 Streaming exec and background processes: forkd serves an incremental
   stdout/stderr stream over the sandbox API (vsock-bridged to the guest agent),
   backgrounded processes detach from the request, and both SDKs expose a
   streaming-callback exec. Per-sandbox concurrent-stream caps bound the surface
   (resource caps, epic #12). Unit-tested in `internal/vsock` and
-  `internal/daemon`; real in-VM exec proven by the KVM CI of the API. Interactive
-  stdin is delivered through the PTY path below. The normative Connect runtime
-  protocol (streaming/PTY/files/watch/port-forward as one wire contract) is the
-  API v2 target (#24).
-- ✅ **PTY mode**: a token-gated bidirectional WebSocket `/v1/pty` endpoint on
+  `internal/daemon`; real in-VM exec proven by the KVM CI of the API. WORKS on
+  the raw-forkd engine path; on the husk default the standing cluster-e2e caught
+  that the stream closes early because the guest agent baked into the husk
+  TEMPLATE SNAPSHOT predates the vsock streaming frame protocol. Blocking exec
+  (`/v1/exec`) is unaffected and works on the husk default. Husk-default support
+  needs the template guest agent rebuilt at the current commit (tracked, #24).
+  Interactive stdin is delivered through the PTY path below. The normative Connect
+  runtime protocol (streaming/PTY/files/watch/port-forward as one wire contract)
+  is the API v2 target (#24).
+- 🔨 **PTY mode**: a token-gated bidirectional WebSocket `/v1/pty` endpoint on
   forkd and the standalone sandbox-server; the guest agent allocates a PTY shell
   and pumps I/O over vsock. Both SDKs ship an interactive terminal handle
   (`sandbox.pty`, sync and async in Python). Cross-sandbox token rejection is
-  unit-tested; the PTY surface is recorded in `docs/threat-model.md`. Part of the
-  API v2 runtime protocol (#24).
+  unit-tested; the PTY surface is recorded in `docs/threat-model.md`. WORKS on
+  the raw-forkd engine path; on the husk default the standing cluster-e2e caught
+  that the WebSocket closes early for the same reason as streaming exec (the husk
+  TEMPLATE SNAPSHOT's baked guest agent predates the vsock PTY frame protocol).
+  Husk-default support needs the template guest agent rebuilt at the current
+  commit (tracked, #24). Part of the API v2 runtime protocol (#24).
 - ✅ **Code interpreter (`run_code`)**: a stateful kernel with rich multi-MIME
   results and structured errors, served over the sandbox API and exposed in both
   SDKs and the MCP server. It is fail-closed with a clear `KernelUnavailable`
