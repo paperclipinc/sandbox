@@ -35,7 +35,7 @@ Two ways to run it:
 - **Self-hosted**: any Kubernetes cluster with KVM nodes. Your data never leaves your infrastructure. Bare metal (Hetzner + Talos is the reference platform) is a first-class target.
 - **Hosted**: a managed service operated by us, same engine and same API, for teams that want milliseconds without managing nodes.
 
-> Live N-way CoW fork is the raw-forkd engine path today, where forkd's in-process engine owns the running VM. On the husk pod-native default, wiring live fork is in progress and tracked ([#18](https://github.com/paperclipinc/mitos/issues/18)). Warm-claim activate, blocking exec, `run_code` fail-closed, self-heal, autoscale, and durable forkable workspaces are verified on the husk default on a real KVM cluster.
+> Live N-way CoW fork runs on the husk pod-native default: the source husk pod snapshots its running VM and N child husk pods restore it via CoW, each an independent Ready child, verified on a real KVM cluster. The raw-forkd engine path, where forkd's in-process engine owns the running VM, also forks. Warm-claim activate, blocking exec, `run_code` fail-closed, self-heal, autoscale, live fork, and durable forkable workspaces are all verified on the husk default on a real KVM cluster.
 
 ## Quickstart
 
@@ -52,8 +52,8 @@ result = sb.exec("python -c 'import numpy as np; print(np.mean([1,2,3,4,5]))'")
 print(result.stdout)                             # 3.0
 
 # Fork the running sandbox to try two approaches against shared warmed state.
-# Live fork runs on the raw-forkd engine path today; wiring it on the husk
-# pod-native default is a tracked follow-up (#18).
+# Live fork runs on the husk pod-native default and the raw-forkd engine path;
+# each child is an independent Ready sandbox.
 fork_a, fork_b = sb.fork(2)
 fork_a.exec("python -c \"open('/workspace/plan_a.txt','w').write('conservative')\"")
 fork_b.exec("python -c \"open('/workspace/plan_b.txt','w').write('aggressive')\"")
@@ -189,7 +189,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Capability | What you get | Docs |
 |---|---|---|
 | Hardware isolation per session | A dedicated kernel per sandbox (KVM/Firecracker); the husk default runs each VM in its own unprivileged, PSA-restricted pod, which IS the per-VM boundary | [docs/threat-model.md](docs/threat-model.md) |
-| Jailed fallback | Raw-forkd runs forks under the Firecracker jailer (per-VM UID, chroot, cgroup); dropped-capability set tracked as a threat-model residual | [#2](https://github.com/paperclipinc/mitos/issues/2) |
+| Jailed fallback | Raw-forkd runs forks under the Firecracker jailer (per-VM UID, chroot, cgroup); the remaining builder capability set is documented as a threat-model residual | [docs/threat-model.md](docs/threat-model.md) |
 | No silent secret inheritance | Live forks of secret-holding sandboxes are rejected unless explicitly opted in; credentials are injected at claim time over vsock, never baked into snapshots | [docs/threat-model.md](docs/threat-model.md) |
 | Encryption at rest | Per-scope LUKS2 containers with crypto-shredding and KMS envelope wrapping (behind `--enable-encryption`, fail-closed); HSM-backed keys and per-workspace scope are follow-ups | [docs/encryption.md](docs/encryption.md) |
 | Default-deny egress | Host-side nftables egress allowlists by literal IP:port and by name through a controlled per-node DNS resolver; the guest cannot influence enforcement (opt-in per node) | [docs/networking.md](docs/networking.md) |
@@ -209,7 +209,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 | Capability | What you get | Docs |
 |---|---|---|
 | Declarative CRDs | `SandboxTemplate`, `SandboxPool`, `SandboxClaim`, `SandboxFork` with volume topology and fork behavior | [docs/templates.md](docs/templates.md) |
-| Pod-native execution (DEFAULT) | Each per-sandbox VM runs in an unprivileged pod (`/dev/kvm` from a device plugin, not `privileged`), so CPU/memory requests are scheduler truth and PSA governs the pod | [#18](https://github.com/paperclipinc/mitos/issues/18) |
+| Pod-native execution (DEFAULT) | Each per-sandbox VM runs in an unprivileged pod (`/dev/kvm` from a device plugin, not `privileged`), so CPU/memory requests are scheduler truth and PSA governs the pod | [docs/threat-model.md](docs/threat-model.md) |
 | Capacity-aware scheduling | CoW bin-packing onto warm holders, an overcommit budget on CoW-aware accounting, a `MaxSandboxes` host-DoS ceiling with atomic slot reservation, and typed `NoCapacity` backpressure instead of OOMing a node | [docs/scheduling.md](docs/scheduling.md) |
 | Demand-driven autoscaling | `SandboxPool.spec.autoscale` scales the dormant husk-pod count to `clamp(inUse + targetSpare, minWarm, maxWarm)` with an anti-thrash cooldown; a fixed pool is just `minWarm == replicas` | [docs/scheduling.md](docs/scheduling.md) |
 | Failure and GC semantics | Claim TTLs, orphan-VM sweeps, controller-restart reconciliation, forkd crash reaping via an on-disk journal, node-loss handling, and saturation backpressure, implemented and CI-proven | [docs/failure-gc.md](docs/failure-gc.md) |
@@ -218,7 +218,7 @@ Each row is honest about where it runs. The husk pod-native path is the DEFAULT;
 
 | Capability | What you get | Docs |
 |---|---|---|
-| Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox; `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Proven on KVM (byte-identical in-VM tar round trip) and in envtest | [docs/workspaces.md](docs/workspaces.md) |
+| Durable forkable workspaces | `Workspace`/`WorkspaceRevision` CRDs: durable, versioned, forkable agent state independent of any sandbox; `/workspace` hydrates on start and a committed revision dehydrates on terminate over the content-addressed store. Verified end to end on a real KVM cluster: create -> commit -> fork, where the forked sandbox reads the committed state | [docs/workspaces.md](docs/workspaces.md) |
 | Outputs and diff | A claim `spec.outputs` narrows the dehydrate to listed subtrees; a `{diff: true}` output records a content-hash diff against the parent head | [docs/workspaces.md](docs/workspaces.md) |
 | Git rendezvous | A `{git}` output pushes per-attempt branches to a rendezvous remote (git is the merge layer; the engine pushes, a human/CI merges). On the husk path the push is currently best-effort; fully wiring it is tracked | [#21](https://github.com/paperclipinc/mitos/issues/21) |
 
@@ -319,7 +319,7 @@ What is comparable and real today is the qualitative pareto map: the combination
 | Your data stays on your infra | yes (self-hosted) | no | no | partial | no | no | no | yes | yes | yes |
 | Open source | Apache 2.0 | partial | no | partial | no | no | no | Apache 2.0 | Apache 2.0 | Apache 2.0 |
 
-SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability. Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds. Box is a hosted-only disk-fork sandbox SaaS with an agent-native CLI, which validates the agent-native direction we take with `mitos` and MCP (Box publishes no latency benchmark, so we make no comparison claim there). Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we are building a conformance facade to be its fastest backend ([#19](https://github.com/paperclipinc/mitos/issues/19)) rather than fighting it. Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
+SaaS runtimes (E2B, Modal, Daytona, Cloudflare) are fast but your agents' code, data, and credentials run on someone else's infrastructure with no self-host path at equivalent capability. Morph built the right state model (branch/restore) as a proprietary cloud, and our Workspace primitive targets the same semantics open source at fork(2) speeds. Box is a hosted-only disk-fork sandbox SaaS with an agent-native CLI, which validates the agent-native direction we take with `mitos` and MCP (Box publishes no latency benchmark, so we make no comparison claim there). Agent Sandbox (k8s-sigs) is winning the Kubernetes API standard without a snapshot-fork engine, which is why we ship a conformance facade (`cmd/facade`) to be its fastest backend rather than fighting it ([docs/facade-conformance.md](docs/facade-conformance.md)). Kata, KubeVirt, and raw Firecracker give you the isolation primitive and leave the pool, fork, distribution, and agent-API layers as your problem.
 
 If an alternative beats us on an axis you care about and we have no roadmap line that closes it, that is a bug in our strategy: open an issue.
 
@@ -327,9 +327,9 @@ If an alternative beats us on an axis you care about and we have no roadmap line
 
 Early development, pre-1.0 (released `0.2.0`; `v0.3.0` is being cut now). Do not run untrusted code with this project in production yet, and note that there has been no external security review ([docs/threat-model.md](docs/threat-model.md)). The control plane is real end-to-end (claim to running sandbox, proven in CI against mock engines and real Firecracker VMs, and exercised on a bare-metal Talos KVM cluster).
 
-**Husk-default scope, verified on a real KVM cluster:** warm-claim activate, blocking exec (`/v1/exec` with correct stdout and exit code), `run_code` failing closed with a clean `KernelUnavailable` (the husk base image lacks the kernel), self-heal / re-pend, pool warming plus demand autoscaling, and durable forkable workspaces (hydrate/dehydrate of `/workspace` over the content-addressed store) all work end to end on the husk default.
+**Husk-default scope, verified on a real KVM cluster:** warm-claim activate, blocking exec (`/v1/exec` with correct stdout and exit code), `run_code` failing closed with a clean `KernelUnavailable` (the husk base image lacks the kernel), self-heal / re-pend, pool warming plus demand autoscaling, live `SandboxFork` (the source husk pod snapshots its running VM and N child husk pods restore it via CoW, each an independent Ready child), and durable forkable workspaces (create -> commit -> fork where the forked sandbox reads the committed state, hydrate/dehydrate of `/workspace` over the content-addressed store) all work end to end on the husk default.
 
-**Tracked tails not yet fully on the husk default:** live `SandboxFork` (raw-forkd engine path today; husk wiring because the husk pod's stub, not forkd's engine, owns the source VM, [#18](https://github.com/paperclipinc/mitos/issues/18)); streaming exec and the interactive PTY (the guest agent baked into the husk template snapshot predates the vsock streaming/PTY frame protocol and needs a template rebuild, [#24](https://github.com/paperclipinc/mitos/issues/24)); live-VM memory snapshots ([#18-4b](https://github.com/paperclipinc/mitos/issues/18)); S3/encryption live store-selection; the husk `{git}` workspace push (best-effort on husk today, [#21](https://github.com/paperclipinc/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/paperclipinc/mitos/issues/3)).
+**Tracked tails not yet fully on the husk default:** streaming exec and the interactive PTY (the guest agent baked into the husk template snapshot predates the vsock streaming/PTY frame protocol and needs a template rebuild, [#24](https://github.com/paperclipinc/mitos/issues/24)); live-VM memory snapshot hooks for resumable workspace heads (gated behind `--workspace-memory-snapshots`, fail-loud); S3/encryption live store-selection (the live transport defaults to the node content-addressed store); the husk `{git}` workspace push (best-effort on husk today, [#21](https://github.com/paperclipinc/mitos/issues/21)); and multi-node N>1 (designed, single-node-verified, [#3](https://github.com/paperclipinc/mitos/issues/3)).
 
 [ROADMAP.md](ROADMAP.md) is the single source for what is done, in progress, and gated; the operating rule is that this repository never describes a system that does not exist.
 
