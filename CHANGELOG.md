@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/paperclipinc/mitos/compare/v0.3.0...v0.3.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* **security:** fail closed when a forked VM does not reseed its RNG ([#137](https://github.com/paperclipinc/mitos/issues/137)) ([92a04eb](https://github.com/paperclipinc/mitos/commit/92a04eb88ee5e8bebac43c649cba0453fc4f1508))
+* **security:** per-fork rootfs CoW on raw-forkd to stop cross-fork write bleed ([#138](https://github.com/paperclipinc/mitos/issues/138)) ([e72bd34](https://github.com/paperclipinc/mitos/commit/e72bd34cd7a313590de8e2da1094a59f7e44ed64))
+
 ## [0.3.0](https://github.com/paperclipinc/mitos/compare/v0.2.0...v0.3.0) (2026-06-14)
 
 
