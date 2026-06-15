@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/paperclipinc/mitos/internal/apierr"
@@ -31,6 +33,10 @@ type server struct {
 	// to sandboxAPI at construction. Retained so the flag plumbing is observable
 	// without reaching into the daemon package's unexported state.
 	maxStreamsPerSandbox int
+	// forkGeneration is the monotonically increasing fork generation handed to
+	// the guest in each NotifyForked so a guest can tell forks apart. Atomic so
+	// concurrent forks get distinct generations.
+	forkGeneration atomic.Uint64
 }
 
 // newServer builds the standalone server and applies the SandboxAPI policy
@@ -241,22 +247,63 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		ForkTimeMs: float64(time.Since(start).Microseconds()) / 1000.0,
 	}
 
+	// In real mode, register the vsock connection for exec/files and run the
+	// fork-correctness reseed handshake. A real-mode fork restores a snapshot,
+	// so the guest shares the snapshot's CRNG state with every sibling fork;
+	// without a reseed two forks emit duplicate TLS keys / tokens / nonces. We
+	// FAIL CLOSED, the same policy as forkd and the husk path: if the agent is
+	// unreachable, the notify fails, or the guest reports it did not reseed, the
+	// fork is rejected and never registered. The mock mode has no guest, so it
+	// skips the handshake.
+	if !s.mockMode {
+		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
+		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
+			// Fail closed: a fork whose guest agent is unreachable cannot reseed.
+			errResp(w, fmt.Sprintf("fork %q: guest agent not connected: %v", req.ID, err), 500)
+			return
+		}
+		s.sandboxAPI.RegisterStreamPath(req.ID, vsockPath)
+		if err := s.reseedFork(req.ID); err != nil {
+			// Fail closed: drop the half-wired sandbox so an un-reseeded VM that
+			// shares CRNG state with its siblings is never served. The error
+			// carries no entropy or secret values.
+			s.sandboxAPI.UnregisterSandbox(req.ID)
+			errResp(w, fmt.Sprintf("fork %q: %v", req.ID, err), 500)
+			return
+		}
+	}
+
 	s.mu.Lock()
 	s.sandboxes[req.ID] = info
 	s.mu.Unlock()
 
-	// In real mode, register the vsock connection for exec/files
-	if !s.mockMode {
-		vsockPath := fmt.Sprintf("/tmp/sandbox-server/sandboxes/%s/vsock.sock", req.ID)
-		if err := s.sandboxAPI.RegisterSandbox(req.ID, vsockPath); err != nil {
-			// Non-fatal: the sandbox exists but exec/files won't work until the agent is reachable.
-			log.Printf("register agent for sandbox %q: %v", req.ID, err)
-		}
-		s.sandboxAPI.RegisterStreamPath(req.ID, vsockPath)
-	}
-
 	log.Printf("fork %q from %q in %.2fms", req.ID, req.Template, info.ForkTimeMs)
 	resp(w, info)
+}
+
+// reseedFork runs the post-restore fork-correctness handshake against a real
+// fork's guest agent: it generates 32 bytes of fresh crypto/rand entropy and a
+// distinct generation, sends them via NotifyForked so the guest reseeds its
+// kernel CRNG and steps its wall clock, and FAILS CLOSED on the reseed result.
+// A nil response or ReseededRNG:false means the guest still shares its siblings'
+// CRNG state, which is incorrect (not merely degraded), so it returns an error
+// and the caller refuses to serve the fork. This mirrors the daemon's
+// notifyForked and the husk productionNotifier. Entropy bytes are never logged;
+// only the boolean reseed result is inspected.
+func (s *server) reseedFork(sandboxID string) error {
+	entropy := make([]byte, 32)
+	if _, err := rand.Read(entropy); err != nil {
+		return fmt.Errorf("generate fork entropy: %w", err)
+	}
+	gen := s.forkGeneration.Add(1)
+	resp, err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, nil, nil)
+	if err != nil {
+		return fmt.Errorf("notify guest of fork: %w", err)
+	}
+	if resp == nil || !resp.ReseededRNG {
+		return fmt.Errorf("guest did not reseed its RNG after restore; refusing to serve a fork that shares CRNG state")
+	}
+	return nil
 }
 
 func (s *server) handleListSandboxes(w http.ResponseWriter, r *http.Request) {

@@ -329,13 +329,17 @@ func (api *SandboxAPI) Configure(sandboxID string, env, secrets map[string]strin
 // volume mount table (device, mount path, read-only) the guest mounts after the
 // host rebound the drives. Entropy is sensitive seed material and is never
 // logged; the network addresses, device nodes, and paths are safe to log.
-func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
+//
+// It RETURNS the guest's NotifyForkedResponse so the caller can enforce the
+// fork-correctness gate (ReseededRNG): a transport success alone does not mean
+// the guest reseeded its CRNG. The response carries booleans and counts only,
+// never entropy bytes.
+func (api *SandboxAPI) NotifyForked(sandboxID string, generation uint64, entropy []byte, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) (*vsock.NotifyForkedResponse, error) {
 	agent, err := api.getAgent(sandboxID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = agent.NotifyForkedWithConfig(generation, entropy, guestNet, volumes)
-	return err
+	return agent.NotifyForkedWithConfig(generation, entropy, guestNet, volumes)
 }
 
 func (api *SandboxAPI) getAgent(sandboxID string) (*vsock.Client, error) {

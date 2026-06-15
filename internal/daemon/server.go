@@ -303,14 +303,25 @@ func (s *Server) deliverConfig(sandboxID, vsockPath string, env, secrets map[str
 // crypto/rand entropy) to a connected guest. The agent must already be
 // registered. Entropy is never logged. Errors are returned so the caller can
 // reap the sandbox: a guest that did not reseed shares RNG state.
+//
+// It FAILS CLOSED on the reseed: a transport success alone is not enough. If
+// the guest's response is nil or reports ReseededRNG:false, the guest still
+// shares its siblings' CRNG state (duplicate TLS keys / tokens / nonces), which
+// is incorrect (not merely degraded), so this returns an error and the caller
+// reaps the sandbox rather than marking it Ready. This mirrors the husk path's
+// productionNotifier check. Only the boolean is inspected; no entropy is logged.
 func (s *Server) notifyForked(sandboxID string, guestNet *vsock.NotifyForkedNetwork, volumes []vsock.VolumeMountEntry) error {
 	entropy := make([]byte, 32)
 	if _, err := rand.Read(entropy); err != nil {
 		return fmt.Errorf("generate fork entropy: %w", err)
 	}
 	gen := s.forkGeneration.Add(1)
-	if err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet, volumes); err != nil {
+	resp, err := s.sandboxAPI.NotifyForked(sandboxID, gen, entropy, guestNet, volumes)
+	if err != nil {
 		return fmt.Errorf("notify guest of fork: %w", err)
+	}
+	if resp == nil || !resp.ReseededRNG {
+		return fmt.Errorf("guest did not reseed its RNG after restore; refusing to serve a fork that shares CRNG state")
 	}
 	return nil
 }
