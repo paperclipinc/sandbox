@@ -183,6 +183,15 @@ type Engine struct {
 	// (reap). nil falls back to procfsVerifier; reconcile tests inject a fake on
 	// darwin.
 	verifyPID pidVerifier
+
+	// rootfsReflink clones the template rootfs.ext4 to a per-fork copy-on-write
+	// backing so every raw-forkd fork writes its OWN rootfs, never the shared
+	// template inode or a sibling's. It is the SAME reflink-with-full-copy-fallback
+	// owner the husk per-activation rootfs CoW uses (volume.Backend.ReflinkCopy), so
+	// the two paths cannot drift. Set in NewEngine; tests inject a fake. Without it,
+	// two forks of one snapshot hard-linked one writable rootfs inode, a cross-fork
+	// (and cross-tenant) filesystem read/write channel. src and dst carry no secrets.
+	rootfsReflink func(src, dst string) error
 }
 
 // Placeholder network identity used only while building a template snapshot.
@@ -233,6 +242,36 @@ func (e *Engine) volumesEnabled() bool {
 type driveRebind struct {
 	DriveID    string
 	PathOnHost string
+}
+
+// prepareForkRootfs gives a raw-forkd fork its OWN copy-on-write clone of the
+// template rootfs.ext4 instead of hard-linking the shared template rootfs
+// writable into every fork's chroot. It reflink-clones rootfsPath (the template
+// rootfs, the read-only CoW SOURCE) to <dataDir>/sandboxes/<sandboxID>/rootfs.ext4
+// and returns the drive rebind (drive id "rootfs", the root device the template
+// build attaches) the caller applies with PATCH /drives while the restored VM is
+// PAUSED, before resume, so the guest never writes a single block through the
+// shared template rootfs or a sibling fork's. It returns (nil, "", nil) when
+// rootfsPath is empty (a snapshot with no on-disk rootfs, e.g. the mock paths),
+// so those paths are untouched.
+//
+// This is the raw-forkd analog of the husk per-activation rootfs CoW
+// (internal/husk/stub.go): both go through the SAME ReflinkCopy owner and both
+// rebind the "rootfs" drive while paused. The clone is removed with the sandbox
+// dir at Terminate (and on any in-flight fork failure). The source and clone
+// paths carry no secrets.
+func (e *Engine) prepareForkRootfs(snapshotID, sandboxID, rootfsPath string) (*driveRebind, string, error) {
+	if rootfsPath == "" {
+		return nil, "", nil
+	}
+	if e.rootfsReflink == nil {
+		return nil, "", fmt.Errorf("per-fork rootfs CoW for %s: no reflink configured", sandboxID)
+	}
+	clonePath := filepath.Join(e.dataDir, "sandboxes", sandboxID, "rootfs.ext4")
+	if err := e.rootfsReflink(rootfsPath, clonePath); err != nil {
+		return nil, "", fmt.Errorf("clone per-fork rootfs for %s: %w", sandboxID, err)
+	}
+	return &driveRebind{DriveID: "rootfs", PathOnHost: clonePath}, clonePath, nil
 }
 
 // prepareForkVolumes prepares a per-fork backing file for each volume spec per
@@ -713,6 +752,10 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		meminfoReader:        opts.MeminfoReader,
 		journal:              newJournal(dataDir),
 		verifyPID:            procfsVerifier,
+		// Per-fork rootfs CoW: clone the template rootfs to each fork's own backing
+		// through the SAME reflink owner the husk rootfs CoW uses, so a raw-forkd
+		// fork never writes the shared template rootfs inode.
+		rootfsReflink: volume.New(dataDir).ReflinkCopy,
 	}
 	if e.memReserveBytes == 0 {
 		e.memReserveBytes = defaultMemoryReserveBytes
@@ -1040,12 +1083,28 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 	// We don't need to mmap it ourselves; just point Firecracker at the
 	// original snapshot file. Each FC process gets its own CoW mapping.
 
-	// In jailer mode the snapshot files and the backing rootfs are
-	// hard-linked into the per-VM chroot before launch; the API paths
-	// below then resolve inside it (mirror layout, see chrootPath).
+	// Per-fork rootfs copy-on-write: clone the template rootfs to THIS fork's own
+	// backing so the fork writes its own clone, never the shared template inode or
+	// a sibling fork's. The template rootfs is the READ-ONLY CoW source. This
+	// closes the cross-fork (and cross-tenant) rootfs read/write channel the prior
+	// hard-link-the-shared-writable-rootfs behavior left open; it is the raw-forkd
+	// analog of the husk per-activation rootfs CoW. The rebind is applied with
+	// PATCH /drives while the restored VM is PAUSED, before resume, below. Returns
+	// (nil, "") when there is no on-disk rootfs (e.g. mock paths), so those paths
+	// are unchanged.
+	rootfsRebind, rootfsClone, err := e.prepareForkRootfs(snapshotID, sandboxID, rootfsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// In jailer mode the snapshot files and the per-fork rootfs CLONE are
+	// hard-linked into the per-VM chroot before launch; the API paths below then
+	// resolve inside it (mirror layout, see chrootPath). We link the fork's OWN
+	// clone, never the shared template rootfs, so the chroot can never reach the
+	// shared writable inode.
 	chrootFiles := []string{memFile, vmStateFile}
-	if rootfsPath != "" {
-		chrootFiles = append(chrootFiles, rootfsPath)
+	if rootfsClone != "" {
+		chrootFiles = append(chrootFiles, rootfsClone)
 	}
 
 	// Start a new Firecracker process
@@ -1097,35 +1156,68 @@ func (e *Engine) fork(snapshotID, sandboxID, rootfsPath string, opts ForkOpts, r
 		return nil, err
 	}
 
-	// Load snapshot: Firecracker mmaps the mem file with MAP_PRIVATE. When
-	// networking is on, network_overrides rebinds the baked NIC to the fork's
-	// own tap (v1.15 supports this; it is the network analog of the relative
-	// vsock uds_path). nil overrides restores exactly as before.
-	if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, true, overrides); err != nil {
+	// cleanupFork tears down everything this in-flight fork has allocated so far
+	// (the FC process, the per-fork network, and the per-fork volume backings) on
+	// any failure between here and commit. os.RemoveAll(sandboxDir) also removes the
+	// per-fork rootfs clone so it never outlives a failed fork.
+	cleanupFork := func() {
 		_ = fcClient.Kill()
 		if fnet != nil {
 			e.teardownForkNetwork(sandboxID, fnet.identity)
 		}
-		if len(rebinds) > 0 {
+		if len(rebinds) > 0 && e.volBackend != nil {
 			_ = e.volBackend.Cleanup(sandboxID)
 		}
+		_ = os.RemoveAll(sandboxDir)
+	}
+
+	// Load the snapshot PAUSED (resume=false). The rootfs drive rebind below MUST
+	// happen before the guest runs: PATCH /drives on the ROOT device of an
+	// already-RESUMED VM both leaves a write window (any writeback between resume
+	// and the rebind would hit the SHARED template rootfs) and may be rejected by
+	// Firecracker. Loading paused lets us rebind the rootfs (and the volume drives)
+	// while the guest is frozen, then resume explicitly. When networking is on,
+	// network_overrides rebinds the baked NIC to the fork's own tap (v1.15 supports
+	// this; the network analog of the relative vsock uds_path). nil overrides
+	// restores exactly as before. This mirrors the husk activate path's
+	// load-paused, rebind-rootfs, resume order.
+	if err := fcClient.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+		cleanupFork()
 		return nil, fmt.Errorf("load snapshot: %w", err)
 	}
 
-	// Rebind each baked placeholder volume drive to THIS fork's backing now that
-	// the snapshot is loaded and resumed. The guest mounts the volumes only
-	// after it receives the post-restore vsock mount table (Task 4), so the
-	// PATCH lands before the device is in use. Firecracker supports updating a
-	// drive's path_on_host on a restored+resumed VM (v1.15).
+	// Rebind the baked "rootfs" drive to THIS fork's CoW clone while the VM is still
+	// PAUSED (loaded, not yet resumed), so the guest never writes a single block
+	// through the shared template rootfs. Skipped when no clone was prepared (no
+	// on-disk rootfs, e.g. mock paths). Fail closed: a rebind failure leaves the VM
+	// pointed at the shared template rootfs, the exact corruption hazard this
+	// prevents, so do NOT resume; tear the fork down.
+	if rootfsRebind != nil {
+		if err := fcClient.PatchDrive(rootfsRebind.DriveID, rootfsRebind.PathOnHost); err != nil {
+			cleanupFork()
+			return nil, fmt.Errorf("rebind rootfs drive to per-fork clone for %s: %w", sandboxID, err)
+		}
+	}
+
+	// Rebind each baked placeholder volume drive to THIS fork's backing while the
+	// VM is still PAUSED, before the guest mounts them (the guest mounts only after
+	// it receives the post-restore vsock mount table), so each volume drive points
+	// at the fork's OWN backing before any access. Firecracker supports updating a
+	// drive's path_on_host on a restored, paused VM (v1.15).
 	for _, rb := range rebinds {
 		if err := fcClient.PatchDrive(rb.DriveID, rb.PathOnHost); err != nil {
-			_ = fcClient.Kill()
-			if fnet != nil {
-				e.teardownForkNetwork(sandboxID, fnet.identity)
-			}
-			_ = e.volBackend.Cleanup(sandboxID)
+			cleanupFork()
 			return nil, fmt.Errorf("rebind volume drive %s for %s: %w", rb.DriveID, sandboxID, err)
 		}
+	}
+
+	// Resume the VM only AFTER the rootfs and volume drives are rebound, so the
+	// guest comes up already bound to its own per-fork rootfs clone and volume
+	// backings, never the shared template. Fail closed: a rejected resume means the
+	// VM never runs usably, so tear the fork down.
+	if err := fcClient.Resume(); err != nil {
+		cleanupFork()
+		return nil, fmt.Errorf("resume fork %s after drive rebind: %w", sandboxID, err)
 	}
 
 	elapsed := time.Since(start)
