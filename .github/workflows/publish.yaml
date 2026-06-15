@@ -40,6 +40,13 @@ jobs:
       IMAGE: ghcr.io/paperclipinc/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On a tag push this is the tag ref; on manual workflow_dispatch check
+          # out the requested tag so the build matches it. release-please pushes
+          # the release tag with GITHUB_TOKEN, which does NOT auto-trigger
+          # on: push: tags, so a release is published by dispatching this workflow
+          # with the tag input.
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -58,6 +65,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=tag
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
             type=sha
       - name: Build and push by digest
         id: build
