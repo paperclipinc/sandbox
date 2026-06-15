@@ -35,7 +35,10 @@ workloads in production on this project, and do not claim it is safe to:
    child path (section 3, W4 row).
 4. **The secondary hardening** below: the default-SA-token automount on husk
    pods, the fail-open gRPC default, the missing host-side vsock read deadline,
-   the raw-forkd shared-rootfs channel, and the raw-forkd privileged DaemonSet.
+   and the raw-forkd privileged DaemonSet. (The raw-forkd shared-rootfs cross-fork
+   write channel is now FIXED via per-fork rootfs CoW, mirroring the husk fix; see
+   the per-row table. The privileged-no-jailer DaemonSet remains, which is why
+   raw-forkd is still NOT for untrusted multi-tenant.)
 5. **The fork-correctness and failure/GC CI suites green** (a precondition
    already stated in CLAUDE.md and ROADMAP).
 6. **A CVE / patch pipeline for the guest kernel and Firecracker** (today CVE
@@ -45,9 +48,9 @@ workloads in production on this project, and do not claim it is safe to:
 Must-fix-first set (the items that make the current posture actively unsafe, not
 merely incomplete): item 1 (husk egress default-open + metadata reachable),
 item 2 (fork-correctness not fail-closed off the husk path), the raw-forkd
-shared-rootfs cross-fork channel and privileged-no-jailer DaemonSet (item 4,
-which is why raw-forkd is NOT for untrusted multi-tenant), and item 3 (node-CAS
-write/integrity/DoS). The per-row honest status discipline (mitigated / partial /
+privileged-no-jailer DaemonSet (item 4, which is why raw-forkd is NOT for
+untrusted multi-tenant, even now that its shared-rootfs cross-fork write channel
+is fixed by per-fork rootfs CoW), and item 3 (node-CAS write/integrity/DoS). The per-row honest status discipline (mitigated / partial /
 open, with a severity on the review rows) is preserved throughout.
 
 ## Components and trust
@@ -504,7 +507,7 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Separate KVM VMs per sandbox | **mitigated** | No two sandboxes share a kernel. |
-| raw-forkd: forks share ONE writable rootfs inode (cross-fork filesystem channel) | **open (critical) on raw-forkd** | On the raw-forkd fork path the template rootfs is hard-linked into each fork's chroot and the rootfs drive is attached with `readOnly=false` (`internal/firecracker/template.go` `AddDrive("rootfs", templateRootfs, false, true)`; `internal/fork/engine.go` fork path), and it is NEVER rebound to a per-fork backing. So all forks of one template on a node share a SINGLE writable rootfs inode: a write by one fork is visible to its siblings, a cross-fork filesystem read/write channel (and a corruption vector). The HUSK path FIXED this: `Stub.Prepare` reflink-clones a PER-POD rootfs and `Stub.Activate` rebinds the baked drive to that clone with `PatchDrive` while the guest is frozen (section 0 surface 3). The raw-forkd path did NOT get the per-fork rebind. Status: open (critical) for raw-forkd; another reason raw-forkd is not for untrusted multi-tenant. Required fix: per-fork rootfs clone + PatchDrive on the raw-forkd path, mirroring the husk fix. |
+| raw-forkd: forks share ONE writable rootfs inode (cross-fork filesystem channel) | **fixed (per-fork rootfs CoW) on raw-forkd** | Previously, on the raw-forkd fork path the template rootfs was hard-linked into each fork's chroot and the rootfs drive was attached with `readOnly=false` (`internal/firecracker/template.go` `AddDrive("rootfs", templateRootfs, false, true)`) and NEVER rebound, so all forks of one template on a node shared a SINGLE writable rootfs inode: a write by one fork was visible to its siblings (and across tenants, since snapshots are node-flat), a cross-fork filesystem read/write channel and a corruption vector. FIXED: `internal/fork/engine.go` now gives each fork its OWN copy-on-write clone of the template rootfs (`prepareForkRootfs` reflink-clones the template rootfs to `<dataDir>/sandboxes/<id>/rootfs.ext4` through the SAME `volume.Backend.ReflinkCopy` owner the husk path uses), loads the snapshot PAUSED (`resume=false`), rebinds the baked `rootfs` drive to that per-fork clone with `PatchDrive` while the guest is frozen, then `Resume`s, exactly mirroring the husk `Stub.Prepare`/`Stub.Activate` fix (section 0 surface 3). The template rootfs is now the READ-ONLY CoW SOURCE; no two forks, and no fork and the source, ever write the same rootfs path. The per-fork clone is hard-linked into the jailer chroot (never the shared template) and reaped with the sandbox dir at Terminate. Proven by `internal/fork/rootfs_cow_test.go` (distinct backing paths, distinct inodes, and a write in one fork's rootfs not visible in a sibling or the template); real-VM cross-fork isolation is KVM-gated (firecracker-test). Residual: raw-forkd is STILL not for untrusted multi-tenant for the OTHER reasons below (privileged DaemonSet, node-flat snapshots, jailer disabled as shipped). |
 | CoW page sharing side channels | **open** | All forks of a snapshot share read-only pages via `mmap(MAP_PRIVATE)` of the same mem file. Flush+Reload-style attacks across forks of the *same tenant's* snapshot are in scope to document; cross-tenant page sharing must be prevented by never sharing snapshot files across trust boundaries. Not yet enforced anywhere. |
 | KSM | **open** | We must mandate KSM off on hosts (we control the reference platform). Not yet documented in any platform guide or checked by forkd at startup. |
 | CPU vulnerability mitigations | **open** | Reference hosts (bare metal) must run current microcode with mitigations on; forkd should refuse or warn on `/sys/devices/system/cpu/vulnerabilities` red flags. Not implemented. |

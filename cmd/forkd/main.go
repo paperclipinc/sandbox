@@ -274,6 +274,17 @@ func main() {
 		}
 		engine = real
 
+		// Raw-forkd multi-tenant gate (security blocker 5): the raw-forkd engine
+		// path (this non-husk forkd DaemonSet) runs the daemon privileged and, when
+		// the jailer is disabled, runs Firecracker unjailed. Snapshots are node-flat,
+		// so a node that mixes tenants on raw-forkd exposes them to one another at the
+		// host boundary. Per-fork rootfs CoW now stops the cross-fork rootfs write
+		// bleed, but raw-forkd is still NOT a hardened multi-tenant isolation
+		// boundary. Surface this loudly at startup so an operator enabling it is never
+		// misled into placing untrusted multi-tenant workloads on it; the hardened
+		// multi-tenant path is the husk-pod engine. See docs/threat-model.md.
+		fmt.Fprintln(os.Stderr, "forkd: WARNING raw-forkd (the non-husk engine path) is NOT for untrusted multi-tenant workloads: the daemon runs privileged, snapshots are node-flat, and (without --jailer) Firecracker runs unjailed. Use the husk-pod engine for untrusted multi-tenant isolation. See docs/threat-model.md.")
+
 		// Enable CAS peer distribution only when mTLS AND a peer token are set:
 		// the surface serves digest-addressed bytes over TLS, gated by the shared
 		// token. It is served on its OWN listener (--cas-listen), NOT the sandbox
