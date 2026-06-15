@@ -4,8 +4,8 @@
 
 Please do not file public issues for vulnerabilities.
 
-- **Preferred**: GitHub private vulnerability reporting. Go to the Security tab of this repository and click "Report a vulnerability".
-- **Fallback**: email jannes@paperclip.inc.
+- **Preferred**: GitHub private vulnerability reporting. Go to the Security tab of this repository and click "Report a vulnerability". MAINTAINER TODO: enable private vulnerability reporting in the repository Security settings if it is not already on.
+- **Fallback**: email the security contact. MAINTAINER TODO: confirm or replace this address: `security@paperclip.inc` (placeholder; currently routes to `jannes@paperclip.inc`).
 
 We will acknowledge your report within 72 hours and keep you informed of progress toward a fix and disclosure.
 
@@ -46,16 +46,47 @@ This project executes untrusted code in microVMs. The following are explicitly i
 
 ## Verifying releases
 
-Published images are signed with cosign (keyless, GitHub OIDC) and carry an
-SPDX SBOM attestation. The exact `cosign verify` and `cosign verify-attestation`
-commands are in [docs/supply-chain.md](docs/supply-chain.md).
+Published images (`ghcr.io/paperclipinc/mitos-controller`,
+`ghcr.io/paperclipinc/mitos-forkd`, `ghcr.io/paperclipinc/mitos-husk-stub`) are
+signed with cosign in keyless mode using the publish workflow's GitHub OIDC
+identity, and each carries an SPDX SBOM attestation. There is no long-lived
+signing key. Verify the signature (replace `VERSION` with the release tag, for
+example `v0.1.0`):
+
+```bash
+COSIGN_EXPERIMENTAL=1 cosign verify \
+  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/paperclipinc/mitos-controller:VERSION
+```
+
+Verify the SBOM attestation:
+
+```bash
+COSIGN_EXPERIMENTAL=1 cosign verify-attestation \
+  --type spdxjson \
+  --certificate-identity-regexp "https://github.com/paperclipinc/mitos/.github/workflows/publish.yaml@.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/paperclipinc/mitos-controller:VERSION
+```
+
+A successful verify pins the signer to OUR publish workflow on OUR repository
+and exits 0; a signature from any other identity fails. The full procedure,
+including how to extract and read the SBOM, is in
+[docs/supply-chain.md](docs/supply-chain.md). How we track and patch CVEs across
+the guest kernel, Firecracker, and Go dependencies is in
+[docs/security-operations.md](docs/security-operations.md).
 
 ## Code review policy for security-sensitive paths
 
 Changes to the security-sensitive paths (`internal/fork`,
-`internal/firecracker`, `internal/daemon`, `internal/vsock`, `guest/`) require
-a named human reviewer before merge, enforced by `.github/CODEOWNERS`. The full
-policy is in [docs/security-review-policy.md](docs/security-review-policy.md).
+`internal/firecracker`, `internal/daemon`, `internal/vsock`, `guest/`, the
+networking and egress paths `internal/netconf` and `internal/dnsproxy`, the
+content store and husk path `internal/cas` and `internal/husk`, and the
+key-material paths `internal/pki`, `internal/kms`, and `internal/storecrypt`)
+require a named human reviewer before merge, enforced by `.github/CODEOWNERS`.
+The full policy is in
+[docs/security-review-policy.md](docs/security-review-policy.md).
 
 ## Current Status
 

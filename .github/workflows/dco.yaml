@@ -1,0 +1,60 @@
+name: DCO
+
+# Verify every commit in a pull request carries a Developer Certificate of
+# Origin sign-off (a "Signed-off-by:" trailer), per CONTRIBUTING.md and issue
+# #34. This is a lightweight in-repo check so the policy is enforced without
+# any external GitHub App setup. Mitos uses the DCO (https://developercertificate.org/),
+# NOT a CLA: a sign-off is the open-core-friendly contribution bar.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the full PR commit range, not just the merge commit.
+          fetch-depth: 0
+      - name: Check Signed-off-by on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          fail=0
+          # Iterate the commits unique to the PR head, excluding the base.
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+          if [ -z "${commits}" ]; then
+            echo "No commits to check."
+            exit 0
+          fi
+          for sha in ${commits}; do
+            # Skip merge commits: they have more than one parent.
+            parents=$(git rev-list --parents -n 1 "${sha}" | wc -w)
+            if [ "${parents}" -gt 2 ]; then
+              echo "skip merge commit ${sha}"
+              continue
+            fi
+            subject=$(git log -1 --format='%s' "${sha}")
+            if git log -1 --format='%B' "${sha}" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "ok   ${sha} ${subject}"
+            else
+              echo "FAIL ${sha} ${subject}"
+              echo "     missing a Signed-off-by trailer"
+              fail=1
+            fi
+          done
+          if [ "${fail}" -ne 0 ]; then
+            echo
+            echo "One or more commits are missing a DCO sign-off."
+            echo "Sign off your commits with: git commit -s"
+            echo "To fix existing commits: git rebase --signoff ${BASE_SHA}"
+            echo "See CONTRIBUTING.md (Developer Certificate of Origin)."
+            exit 1
+          fi
