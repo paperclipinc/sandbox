@@ -11,7 +11,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
-| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED when the guest does not reseed | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`; KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial; NOT fail-closed off husk (review finding)** (guest reseed + forkd notify done; virtio-rng device attachment NOT wired; KVM proof is guest-only. Fail-closed ONLY on the husk path: `internal/husk` `productionNotifier` checks `resp.ReseededRNG` and leaves the VM unserved on false. On the RAW-FORKD path `internal/daemon/sandbox_api.go` `NotifyForked` DISCARDS the response and never checks `ReseededRNG`, so a guest that signals `ReseededRNG:false` with `OK:true` is served anyway and serves duplicate CRNG output; only a transport `OK:false` fails the fork. The SANDBOX-SERVER real-mode fork does NO reseed handshake at all (`cmd/sandbox-server/main.go` `handleFork`). The go test `internal/daemon/delivery_test.go` only exercises `OK:false`, not `ReseededRNG:false`, so the gap is untested.) |
+| 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED on EVERY engine when the guest does not reseed | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`, `TestForkFailsWhenGuestDoesNotReseed`, `TestForkRunningFailsWhenGuestDoesNotReseed` (daemon), `TestRealModeForkFailsClosedWhenGuestDoesNotReseed` (sandbox-server); KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial** (guest reseed + reseed handshake done; virtio-rng device attachment NOT wired; KVM proof is guest-only. Fail-closed is enforced on ALL engines: the husk path (`internal/husk` `productionNotifier`), the raw-forkd path (`internal/daemon/sandbox_api.go` `NotifyForked` now RETURNS the guest response and `internal/daemon/server.go` `notifyForked` refuses to mark the sandbox Ready when it is nil or reports `ReseededRNG:false`), and sandbox-server real-mode (`cmd/sandbox-server/main.go` `reseedFork`, the same gate). A guest that signals `ReseededRNG:false` with `OK:true` is reaped, not served; a transport `OK:false` and a `ReseededRNG:false` both fail the fork. The `ReseededRNG:false` failure mode is now covered by the go tests listed above. Remaining for `done`: virtio-rng attachment and a KVM end-to-end forkd notify proof.) |
 | 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial** (guest clock step done, 500ms tolerance; KVM proof is guest-only. Review finding: `stepClock` steps only `CLOCK_REALTIME`, NOT `CLOCK_MONOTONIC` (`guest/agent/notifyforked.go`), so timers and deadlines anchored to the monotonic clock across a restore can mis-fire.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
@@ -23,11 +23,12 @@ The husk-pods activate path (issue #18, `internal/husk`, `cmd/husk-stub`) runs
 the SAME RNG-reseed + clock-step `NotifyForked` handshake as the engine fork
 path (rows 1 and 2), plus env/secret delivery via `Configure` (row 3), on every
 `Activate`. It fails closed: a VM whose guest does not report `ReseededRNG` is
-left unserved. NOTE (review finding): this fail-closed reseed check is enforced
-ONLY on the husk path (`internal/husk` `productionNotifier`). It is NOT enforced
-on the raw-forkd path (`internal/daemon` discards the `NotifyForked` response)
-nor on sandbox-server real-mode (no reseed handshake). The "always strict" claim
-holds for husk only; see row 1. The KVM husk activate-correctness phase proves it by activating
+left unserved. The SAME fail-closed reseed check is now enforced on EVERY engine:
+the husk path (`internal/husk` `productionNotifier`), the raw-forkd path
+(`internal/daemon/server.go` `notifyForked` inspects the `NotifyForked` response
+and reaps a fork that reports `ReseededRNG:false`), and sandbox-server real-mode
+(`cmd/sandbox-server/main.go` `reseedFork`). The "always strict" claim holds on
+all three; see row 1. The KVM husk activate-correctness phase proves it by activating
 two VMs from one bench snapshot and asserting distinct `/dev/urandom`, each wall
 clock within 2s of the runner, and a delivered env var plus secret readable in
 each guest with the secret value absent from the host-side logs. See
@@ -128,11 +129,13 @@ host-entropy-over-vsock hook is our equivalent.
 backed by host entropy is NOT implemented; the current path injects entropy
 only at fork time via NotifyForked, not continuously. Tracked as a follow-up.
 
-**Fail-closed scope (review finding).** The reseed is fail-closed ONLY on the
-husk path. On the raw-forkd path forkd discards the `NotifyForked` response and
-never inspects `ReseededRNG`, and sandbox-server real-mode does no reseed at all,
-so an un-reseeded fork is served on those paths (duplicate CRNG output). See
-row 1.
+**Fail-closed scope.** The reseed is fail-closed on EVERY engine. The husk path
+(`internal/husk` `productionNotifier`), the raw-forkd path
+(`internal/daemon/server.go` `notifyForked` inspects the `NotifyForked` response
+returned by `internal/daemon/sandbox_api.go` and reaps a fork whose guest
+reports `ReseededRNG:false`), and sandbox-server real-mode
+(`cmd/sandbox-server/main.go` `reseedFork`) all refuse to serve an un-reseeded
+fork rather than emitting duplicate CRNG output. See row 1.
 
 **Write-fallback over-reports (review finding).** When `RNDADDENTROPY` fails,
 `reseedCRNG` falls back to writing the bytes to `/dev/urandom`

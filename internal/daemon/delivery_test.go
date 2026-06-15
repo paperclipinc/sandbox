@@ -103,13 +103,28 @@ func TestForkMockEngineSkipsDelivery(t *testing.T) {
 
 // startFakeVsockAgent listens on sockPath, speaks the Firecracker vsock UDS
 // preamble, then the JSON agent protocol, recording configure and
-// notify_forked payloads. If notifyErr is true, the agent errors every
-// notify_forked request so callers can exercise the fail-closed path.
+// notify_forked payloads. On notify_forked it replies OK with a
+// NotifyForkedResponse reporting ReseededRNG:true, the success the daemon's
+// fail-closed gate requires.
 func startFakeVsockAgent(t *testing.T, sockPath string) *recordedConfig {
 	return startFakeVsockAgentErr(t, sockPath, false)
 }
 
+// startFakeVsockAgentNoReseed replies to notify_forked with OK:true but
+// ReseededRNG:false, the real un-reseeded-fork failure mode: the transport
+// succeeds, yet the guest signals it did not reseed its CRNG. The daemon must
+// FAIL CLOSED on this and never mark the sandbox Ready.
+func startFakeVsockAgentNoReseed(t *testing.T, sockPath string) *recordedConfig {
+	return startFakeVsockAgentReseed(t, sockPath, false, false)
+}
+
 func startFakeVsockAgentErr(t *testing.T, sockPath string, notifyErr bool) *recordedConfig {
+	// notifyErr replies with a transport-level OK:false; otherwise the guest
+	// reports a successful reseed (ReseededRNG:true).
+	return startFakeVsockAgentReseed(t, sockPath, notifyErr, true)
+}
+
+func startFakeVsockAgentReseed(t *testing.T, sockPath string, notifyErr, reseeded bool) *recordedConfig {
 	t.Helper()
 	rec := &recordedConfig{}
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
@@ -158,6 +173,17 @@ func startFakeVsockAgentErr(t *testing.T, sockPath string, notifyErr bool) *reco
 							}
 							continue
 						}
+						// Transport OK; the guest reports whether it actually
+						// reseeded its CRNG. reseeded=false is the silent
+						// un-reseeded fork the daemon must fail closed on.
+						resp, _ := json.Marshal(vsock.Response{
+							OK:           true,
+							NotifyForked: &vsock.NotifyForkedResponse{ReseededRNG: reseeded},
+						})
+						if _, err := c.Write(append(resp, '\n')); err != nil {
+							return
+						}
+						continue
 					}
 					resp, _ := json.Marshal(vsock.Response{OK: true})
 					if _, err := c.Write(append(resp, '\n')); err != nil {
@@ -346,6 +372,52 @@ func TestForkFailsWhenNotifyForkedErrors(t *testing.T) {
 	}
 	if got := engine.GetCapacity().ActiveSandboxes; got != 0 {
 		t.Fatalf("active = %d, want 0", got)
+	}
+}
+
+// TestForkFailsWhenGuestDoesNotReseed is the regression guard for the real
+// un-reseeded-fork failure mode (security review blocker 2): the transport
+// SUCCEEDS (OK:true) but the guest reports ReseededRNG:false. A fork whose
+// guest did not reseed its CRNG shares RNG state with its siblings (duplicate
+// TLS keys / tokens / nonces), so the daemon must FAIL CLOSED: the fork must
+// error and be reaped, never marked Ready. Distinct from
+// TestForkFailsWhenNotifyForkedErrors, which only covers a transport OK:false.
+func TestForkFailsWhenGuestDoesNotReseed(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	startFakeVsockAgentNoReseed(t, filepath.Join(dir, "sandboxes", "sb-noreseed", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	_, err := srv.Fork(context.Background(), "py", "sb-noreseed", nil, nil, nil, nil, "test-token")
+	if err == nil {
+		t.Fatal("fork must fail when the guest reports ReseededRNG:false")
+	}
+	if len(engine.terminated) != 1 || engine.terminated[0] != "sb-noreseed" {
+		t.Fatalf("sandbox not reaped after un-reseeded fork: %v", engine.terminated)
+	}
+	if got := engine.GetCapacity().ActiveSandboxes; got != 0 {
+		t.Fatalf("active = %d, want 0", got)
+	}
+}
+
+// TestForkRunningFailsWhenGuestDoesNotReseed is the live-fork (ForkRunning)
+// counterpart: a live fork whose guest reports ReseededRNG:false shares its
+// parent's CRNG state and must be reaped, not served.
+func TestForkRunningFailsWhenGuestDoesNotReseed(t *testing.T) {
+	dir := shortVsockDir(t)
+	engine := kvmEngineWithTemplate(t, dir)
+	if _, err := engine.Fork("py", "sb-src", fork.ForkOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	startFakeVsockAgentNoReseed(t, filepath.Join(dir, "sandboxes", "sb-live-noreseed", "vsock.sock"))
+
+	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
+	_, err := srv.ForkRunning(context.Background(), "sb-src", "sb-live-noreseed", false, "t")
+	if err == nil {
+		t.Fatal("live fork must fail when the guest reports ReseededRNG:false")
+	}
+	if len(engine.terminated) != 1 || engine.terminated[0] != "sb-live-noreseed" {
+		t.Fatalf("live fork not reaped after un-reseeded fork: %v", engine.terminated)
 	}
 }
 
