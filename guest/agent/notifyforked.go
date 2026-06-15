@@ -110,6 +110,19 @@ func reseedCRNG(entropy []byte) bool {
 // in the notification, and steps the clock when drift exceeds the threshold.
 // Returns the signed adjustment applied in nanoseconds (0 when within
 // tolerance or on error). The absolute clock value is never logged.
+//
+// CLOCK_MONOTONIC is deliberately NOT touched here, and cannot be: Linux rejects
+// clock_settime(CLOCK_MONOTONIC) with EINVAL, so a literal monotonic step is
+// impossible. It is also not needed for a clean restore: the VM is PAUSED across
+// snapshot/restore, so CLOCK_MONOTONIC resumes continuously from its snapshot
+// value (it does not jump by the wall-time gap), and a monotonic-anchored timer
+// simply continues counting rather than mis-firing. The residual hazard is
+// narrow: userspace code that derived a monotonic deadline from a wall-clock
+// baseline (mixing the two clocks) can be off after the wall step above. The
+// signalUserspace SIGUSR2 below is the reset signal for exactly that case: a
+// runtime that pinned a deadline to old wall time re-derives it on the signal.
+// This residual is documented in docs/fork-correctness.md; there is no correct
+// monotonic step to apply.
 func stepClock(hostWallClockNanos int64) int64 {
 	if hostWallClockNanos == 0 {
 		return 0

@@ -62,6 +62,7 @@ func main() {
 		maxSandboxes         int
 		maxStreamsPerSandbox int
 		casListen            string
+		allowInsecureGRPC    bool
 	)
 	// peerToken is read from the environment, NOT a flag: a flag is visible in
 	// /proc/<pid>/cmdline, and the token is a credential. The controller already
@@ -77,6 +78,7 @@ func main() {
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to the forkd server certificate PEM (mTLS)")
 	flag.StringVar(&tlsKey, "tls-key", "", "Path to the forkd server key PEM (mTLS)")
 	flag.StringVar(&tlsCA, "tls-ca", "", "Path to the control plane CA certificate PEM (mTLS)")
+	flag.BoolVar(&allowInsecureGRPC, "allow-insecure-grpc", false, "Opt in to serving the controller-facing gRPC surface UNAUTHENTICATED when no TLS flags are set (local development only). Without this flag forkd FAILS CLOSED and refuses to start without mTLS, because the gRPC surface delivers secrets and drives forks. The shipped DaemonSet always sets TLS, so this never applies in production")
 	flag.StringVar(&jailerBin, "jailer", "", "Jailer binary path; every VM is launched through it with a per-VM uid and chroot. Empty disables the jailer (development only)")
 	flag.StringVar(&chrootBase, "chroot-base", "/srv/jailer", "Jailer chroot base directory; must share a filesystem with --data-dir")
 	flag.StringVar(&uidRange, "uid-range", "64000-64999", "Inclusive uid/gid range for per-VM jailer users, formatted low-high")
@@ -121,7 +123,7 @@ func main() {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
-	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA)
+	grpcOpts, err := grpcServerOptions(tlsCert, tlsKey, tlsCA, allowInsecureGRPC)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forkd: %v\n", err)
 		os.Exit(1)
@@ -428,9 +430,15 @@ func readTLSFiles(certPath, keyPath, caPath string) (certPEM, keyPEM, caPEM []by
 
 // grpcServerOptions builds transport security for the controller-facing
 // gRPC listener. All three TLS flags set means mTLS with controller
-// identity enforcement; none set means insecure with a loud warning;
-// a partial set is a configuration error.
-func grpcServerOptions(certPath, keyPath, caPath string) ([]grpc.ServerOption, error) {
+// identity enforcement; a partial set is a configuration error.
+//
+// FAIL CLOSED: the gRPC control surface delivers secrets and drives forks, so
+// with no TLS flags it REFUSES to start (returns an error naming the missing
+// flags and the opt-in) UNLESS allowInsecure (--allow-insecure-grpc) is
+// explicitly set, which keeps the legacy insecure-with-loud-warning behavior for
+// local development only. The shipped DaemonSet always sets TLS, so production is
+// unaffected; this only stops a silent-insecure misconfig.
+func grpcServerOptions(certPath, keyPath, caPath string, allowInsecure bool) ([]grpc.ServerOption, error) {
 	set := 0
 	for _, p := range []string{certPath, keyPath, caPath} {
 		if p != "" {
@@ -439,7 +447,10 @@ func grpcServerOptions(certPath, keyPath, caPath string) ([]grpc.ServerOption, e
 	}
 	switch set {
 	case 0:
-		fmt.Fprintln(os.Stderr, "forkd: gRPC is UNAUTHENTICATED; supply --tls-cert/--tls-key/--tls-ca (threat model section 3)")
+		if !allowInsecure {
+			return nil, fmt.Errorf("refusing to serve gRPC without mTLS: the control surface delivers secrets and drives forks, so it fails closed by default; set --tls-cert, --tls-key, and --tls-ca (and run the controller with PKI bootstrap), or pass --allow-insecure-grpc to opt in to an UNAUTHENTICATED server for local development only")
+		}
+		fmt.Fprintln(os.Stderr, "forkd: gRPC is UNAUTHENTICATED (--allow-insecure-grpc set); supply --tls-cert/--tls-key/--tls-ca for any non-development deployment (threat model section 3)")
 		return nil, nil
 	case 3:
 		// fall through to TLS setup below

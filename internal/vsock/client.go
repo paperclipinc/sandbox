@@ -11,16 +11,46 @@ import (
 	"time"
 )
 
+// DefaultRequestTimeout bounds a single one-shot host->guest request (write the
+// line, read the response line). The guest is in-process on the same host over a
+// local vsock/unix socket, so a healthy response is sub-second; this generous
+// ceiling still bounds a malicious or wedged guest agent that connects then
+// stalls (or dribbles a partial line under the MaxMessageBytes cap) so it cannot
+// hang the host caller goroutine, vsock fd, and (for the husk stub) stream slot
+// indefinitely. It is overridable per Client via SetRequestTimeout for any
+// legitimately slow large response. The long-lived STREAMING paths (ExecStream,
+// RunCode, Pty) are NOT bounded by this: they cancel via ctx/conn.Close instead,
+// which still bounds a stall by the caller's context.
+const DefaultRequestTimeout = 60 * time.Second
+
 // Client communicates with the guest agent over vsock (or Unix socket for testing).
 type Client struct {
 	conn    net.Conn
 	scanner *bufio.Scanner
+	// requestTimeout is the per-request read deadline applied in send. Zero
+	// selects DefaultRequestTimeout; a negative value disables the deadline.
+	requestTimeout time.Duration
 }
 
 func newClient(conn net.Conn) *Client {
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
 	return &Client{conn: conn, scanner: scanner}
+}
+
+// SetRequestTimeout overrides the per-request read deadline send applies. A zero
+// duration restores DefaultRequestTimeout; a negative duration disables the
+// deadline (for a caller that genuinely needs an unbounded one-shot read).
+func (c *Client) SetRequestTimeout(d time.Duration) {
+	c.requestTimeout = d
+}
+
+// readTimeout returns the effective per-request read deadline.
+func (c *Client) readTimeout() time.Duration {
+	if c.requestTimeout == 0 {
+		return DefaultRequestTimeout
+	}
+	return c.requestTimeout
 }
 
 // Connect to a guest agent via the Firecracker vsock UDS path.
@@ -40,6 +70,10 @@ func Connect(udsPath string, guestPort int) (*Client, error) {
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
+	// Bound the preamble read so a host that opened the UDS but never gets the
+	// "OK <port>" line back (a wedged Firecracker vsock mux or a stalling guest)
+	// does not block forever.
+	_ = conn.SetReadDeadline(time.Now().Add(DefaultRequestTimeout))
 	if scanner.Scan() {
 		resp := scanner.Text()
 		if len(resp) < 2 || resp[:2] != "OK" {
@@ -50,6 +84,7 @@ func Connect(udsPath string, guestPort int) (*Client, error) {
 		conn.Close()
 		return nil, fmt.Errorf("vsock CONNECT: no response")
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
 	return &Client{conn: conn, scanner: scanner}, nil
 }
@@ -75,6 +110,17 @@ func (c *Client) send(req *Request) (*Response, error) {
 
 	if _, err := c.conn.Write(append(data, '\n')); err != nil {
 		return nil, fmt.Errorf("send: %w", err)
+	}
+
+	// Bound the response read so a stalled or dribbling guest cannot hang this
+	// caller goroutine forever. The deadline covers the whole one-shot read; it
+	// is cleared after so it never leaks onto a later use of the same conn. A
+	// negative timeout disables the bound for a caller that opted out.
+	if d := c.readTimeout(); d > 0 {
+		if err := c.conn.SetReadDeadline(time.Now().Add(d)); err != nil {
+			return nil, fmt.Errorf("set read deadline: %w", err)
+		}
+		defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 	}
 
 	if !c.scanner.Scan() {
@@ -290,6 +336,10 @@ func DialStream(udsPath string, guestPort int) (*StreamConn, error) {
 	}
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
+	// Bound only the CONNECT preamble read; the streaming reads that follow are
+	// long-lived and cancel via ctx/conn.Close, so clear the deadline after the
+	// preamble succeeds.
+	_ = conn.SetReadDeadline(time.Now().Add(DefaultRequestTimeout))
 	if !sc.Scan() {
 		conn.Close()
 		return nil, fmt.Errorf("vsock CONNECT: no response")
@@ -298,6 +348,7 @@ func DialStream(udsPath string, guestPort int) (*StreamConn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("vsock CONNECT rejected: %s", resp)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	return &StreamConn{conn: conn, scanner: sc}, nil
 }
 
@@ -314,10 +365,14 @@ func DialStreamUnix(sockPath string) (*StreamConn, error) {
 	}
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 1024*1024), MaxMessageBytes)
+	// Bound only the preamble read; streaming reads that follow cancel via
+	// ctx/conn.Close, so clear the deadline once the preamble is in.
+	_ = conn.SetReadDeadline(time.Now().Add(DefaultRequestTimeout))
 	if !sc.Scan() {
 		conn.Close()
 		return nil, fmt.Errorf("stream unix: no preamble response")
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	return &StreamConn{conn: conn, scanner: sc}, nil
 }
 

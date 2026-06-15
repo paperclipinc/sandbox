@@ -12,7 +12,7 @@ test missing or incomplete. `done` = implemented + test runs in the
 | # | Hazard | Policy | Test | Status |
 |---|--------|--------|------|--------|
 | 1 | Shared RNG state after restore | Reseed CRNG on every fork via host entropy over vsock (NotifyForked); FAIL CLOSED when the guest does not reseed | go: `TestForkNotifiesAgentWithFreshEntropy`, `TestForkGenerationIncrementsAcrossForks`, `TestForkFailsWhenNotifyForkedErrors`; KVM: two forks of one snapshot assert distinct `/dev/urandom` (`URANDOM` lines differ) | **partial; NOT fail-closed off husk (review finding)** (guest reseed + forkd notify done; virtio-rng device attachment NOT wired; KVM proof is guest-only. Fail-closed ONLY on the husk path: `internal/husk` `productionNotifier` checks `resp.ReseededRNG` and leaves the VM unserved on false. On the RAW-FORKD path `internal/daemon/sandbox_api.go` `NotifyForked` DISCARDS the response and never checks `ReseededRNG`, so a guest that signals `ReseededRNG:false` with `OK:true` is served anyway and serves duplicate CRNG output; only a transport `OK:false` fails the fork. The SANDBOX-SERVER real-mode fork does NO reseed handshake at all (`cmd/sandbox-server/main.go` `handleFork`). The go test `internal/daemon/delivery_test.go` only exercises `OK:false`, not `ReseededRNG:false`, so the gap is untested.) |
-| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial** (guest clock step done, 500ms tolerance; KVM proof is guest-only. Review finding: `stepClock` steps only `CLOCK_REALTIME`, NOT `CLOCK_MONOTONIC` (`guest/agent/notifyforked.go`), so timers and deadlines anchored to the monotonic clock across a restore can mis-fire.) |
+| 2 | Stale wall clock after restore | kvm-clock resync + agent clock step from host wall clock in NotifyForked | go: `TestForkNotifiesAgentWithFreshEntropy` (carries `HostWallClockNanos`); KVM: each fork `WALLCLOCK_NS` within 2s of the runner clock | **partial; CLOCK_MONOTONIC residual documented (no step possible)** (guest wall-clock step done, 500ms tolerance; KVM proof is guest-only. The review finding on CLOCK_MONOTONIC is assessed and DOCUMENTED rather than "fixed": Linux rejects `clock_settime(CLOCK_MONOTONIC)` with EINVAL so a literal step is impossible, and a PAUSED-across-restore VM resumes the monotonic clock continuously so clean-restore monotonic timers do not mis-fire. The narrow residual is mixed wall/monotonic-derived deadlines, handled by the existing SIGUSR2 userspace reset signal. See section 2 for the full assessment; `guest/agent/notifyforked.go` `stepClock` carries the rationale inline.) |
 | 3 | Secrets duplicated into live forks | Per-fork credential reissue; inheritance requires opt-in | `TestLiveForkOfSecretHolderIsRejectedByDefault`, `TestForkDeliversConfigureToAgent`, KVM `test-agent` configure check | **partial** (default-deny gate + vsock delivery implemented; reissue open) |
 | 4 | Duplicate MAC/IP/TCP state in forks | Fresh NIC identity per fork; parent TCP dead in fork | `TestForkNetworkIdentity` | **open** (guests currently have no NIC at all; see note) |
 | 5 | Misleading memory accounting | Report lifetime unique bytes, not just T=0 dirty pages | `TestMemoryAccountingLifetime` | **partial** (smaps_rollup sampling exists at fork time only, `internal/fork/engine.go:readMemoryStats`) |
@@ -180,12 +180,29 @@ then signals userspace as in section 1 (`guest/agent/notifyforked.go`). kvm-cloc
 remaining the active clocksource and Firecracker's restore path updating it is
 relied on but not separately asserted here.
 
-**CLOCK_MONOTONIC not stepped (review finding).** `stepClock` steps only
-`CLOCK_REALTIME`. `CLOCK_MONOTONIC` is left as the snapshot restored it, so any
-timer or deadline anchored to the monotonic clock (most Go and runtime timers,
-many language deadlines) can mis-fire across a restore (fire early, fire late,
-or appear to jump). This is a correctness hazard for in-flight timers in a forked
-or resumed guest, not just a wall-clock concern. Tracked as a follow-up.
+**CLOCK_MONOTONIC: documented residual, no step possible.** `stepClock` steps
+only `CLOCK_REALTIME`, and this is correct, not a missing step. Two facts make a
+"monotonic step" both impossible and (for a clean restore) unnecessary:
+
+1. Linux rejects `clock_settime(CLOCK_MONOTONIC)` with `EINVAL`. There is no
+   syscall to step the monotonic clock; any claim of a monotonic step would be a
+   fake fix. We therefore do not attempt one.
+2. The VM is PAUSED across snapshot/restore. CLOCK_MONOTONIC resumes continuously
+   from its snapshot value: it does NOT jump forward by the wall-time gap between
+   snapshot and restore the way the wall clock does. A timer or deadline anchored
+   purely to the monotonic clock therefore continues counting across the restore
+   rather than mis-firing; it just measures less elapsed time than wall time did.
+
+The residual hazard is narrow and is NOT "all monotonic timers mis-fire": it is
+userspace code that DERIVED a monotonic deadline from a wall-clock baseline (mixed
+the two clocks, for example `deadline_mono = now_mono + (exp_wall - now_wall)`).
+After the wall clock is stepped, such a deadline can be off. The reset path for
+that case is the existing `signalUserspace` SIGUSR2 (section 1): a runtime that
+pinned a deadline to the old wall time re-derives it on the signal. This is a
+DOCUMENTED residual (honesty over a fake fix): there is no correct monotonic step
+to apply, the clean-restore case is already correct, and the mixed-clock case is
+handled by the userspace reset signal rather than by a kernel call that does not
+exist.
 
 Tests. go: `TestForkNotifiesAgentWithFreshEntropy` covers that forkd sends the
 notification carrying the host wall clock.
