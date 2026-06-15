@@ -1,12 +1,28 @@
 * @stubbi
-# Security-sensitive paths: named-human review required (SECURITY.md)
+# Security-sensitive paths: named-human review required (SECURITY.md,
+# CONTRIBUTING.md, docs/security-review-policy.md). A PR touching any path
+# below requests @stubbi as a required reviewer.
 /internal/fork/ @stubbi
 /internal/firecracker/ @stubbi
 /internal/daemon/ @stubbi
-/guest/ @stubbi
-/docs/threat-model.md @stubbi
 /internal/vsock/ @stubbi
+/guest/ @stubbi
+# Networking and egress control: the sandbox network boundary and DNS egress.
+/internal/netconf/ @stubbi
+/internal/dnsproxy/ @stubbi
+# Content store and the husk single-VM process: snapshot data and a privileged path.
+/internal/cas/ @stubbi
+/internal/husk/ @stubbi
+# Token / PKI / key material: the internal CA, envelope encryption, and the
+# at-rest LUKS containers.
+/internal/pki/ @stubbi
+/internal/kms/ @stubbi
+/internal/storecrypt/ @stubbi
+# Security, supply-chain, and CVE docs plus the release provenance and CVE-watch workflows.
+/docs/threat-model.md @stubbi
 /docs/security-review-policy.md @stubbi
+/docs/security-operations.md @stubbi
 /docs/kernel-cve.md @stubbi
 /docs/supply-chain.md @stubbi
 /.github/workflows/publish.yaml @stubbi
+/.github/workflows/cve-watch.yaml @stubbi
