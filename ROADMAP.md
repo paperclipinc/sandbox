@@ -331,7 +331,12 @@ language is limited to what a CI job proves (CNCF-conformant clusters, PSA
 quota/policy/eviction semantics, vendored conformance suite); never "fully
 Kubernetes conformant". Residuals ship as ADRs in `docs/adr/` (kvm device
 exception; the guest boundary; Workspace-not-CSI; forkd control channel
-mirrored into Kubernetes Events with a bounded-delay CI test). Observability
+mirrored into Kubernetes Events with a bounded-delay CI test). The ADR
+framework is `docs/adr/README.md` (ADR 0000 adopts it); the residual ADRs are
+0003 (kvm device-plugin PSA exception), 0004 (node-flat snapshot trust domain),
+0005 (raw-forkd not for untrusted multi-tenant), and 0006 (husk NET_ADMIN egress
+firewall). The reusable claim-language guardrail is `docs/compliance-claims.md`.
+Observability
 acceptance: Hubble-visible per-sandbox flows, OpenCost attribution, a guest
 telemetry bridge + `kubectl sandbox` plugin (`top`/`ps`/`logs`/`exec`), and
 one trace ID from orchestrator request through exec to workspace revision.
