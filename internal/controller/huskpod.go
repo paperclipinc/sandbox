@@ -666,6 +666,15 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1alpha1.SandboxPool, templat
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
 			// until terminated. Restart on crash so the warm slot recovers.
 			RestartPolicy: corev1.RestartPolicyAlways,
+			// Do NOT automount the namespace default ServiceAccount token. The
+			// husk stub speaks vsock + mTLS and never calls the Kubernetes API
+			// (no client-go, no InClusterConfig, no SA token read anywhere in
+			// cmd/husk-stub or internal/husk), so the token is dead weight. Worse,
+			// a guest that escapes into the stub would otherwise inherit a free
+			// system:authenticated token (and whatever the default SA can do in
+			// the pool namespace). Opting out closes that surface. Applies to BOTH
+			// warm pods and fork-child pods, which share this builder.
+			AutomountServiceAccountToken: ptrBool(false),
 			// POD-LEVEL securityContext. PSA restricted checks seccompProfile and
 			// runAsNonRoot at the pod OR the container level; we set them at the pod
 			// level too so the pod-level control is satisfied independently of any

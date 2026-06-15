@@ -941,3 +941,41 @@ func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 		t.Fatalf("fork child must NOT carry the pool warm-slot label, labels=%+v", pod.Labels)
 	}
 }
+
+// TestBuildHuskPodDisablesSATokenAutomount asserts the husk pod opts out of the
+// default ServiceAccount token automount. The stub speaks vsock + mTLS and never
+// calls the Kubernetes API, so mounting the namespace default SA token would only
+// hand a guest that escaped into the stub a free system:authenticated token.
+func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
+	pool := &v1alpha1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa-pool", Namespace: "default", UID: "pool-uid-sa"},
+		Spec:       v1alpha1.SandboxPoolSpec{TemplateRef: v1alpha1.LocalObjectReference{Name: "sa-tmpl"}, Replicas: 1},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa-tmpl", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+	}
+
+	r := &controller.SandboxPoolReconciler{Client: k8sClient}
+	pod := r.BuildHuskPodForTest(pool, template, controller.HuskPodOptions{StubImage: "img"})
+
+	if pod.Spec.AutomountServiceAccountToken == nil {
+		t.Fatal("warm husk pod must set AutomountServiceAccountToken (got nil)")
+	}
+	if *pod.Spec.AutomountServiceAccountToken {
+		t.Errorf("warm husk pod AutomountServiceAccountToken = true, want false")
+	}
+
+	// Fork-child pods share buildHuskPod, so they must inherit the opt-out too.
+	fork := &v1alpha1.SandboxFork{ObjectMeta: metav1.ObjectMeta{Name: "sa-fork", Namespace: "default", UID: "uid-sa-fork"}}
+	child := controller.BuildForkChildPodForTest(fork, "sa-child-0", controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "sa-fork",
+		ForkSourceNode: "kvm-node-1",
+	}, scheme)
+	if child.Spec.AutomountServiceAccountToken == nil || *child.Spec.AutomountServiceAccountToken {
+		t.Errorf("fork-child husk pod AutomountServiceAccountToken = %v, want false", child.Spec.AutomountServiceAccountToken)
+	}
+}

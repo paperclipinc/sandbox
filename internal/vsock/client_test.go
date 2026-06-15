@@ -411,3 +411,59 @@ func TestUntarDirClientRejectsOversize(t *testing.T) {
 		t.Fatal("UntarDir accepted an oversize tar; want rejection")
 	}
 }
+
+// startStallingAgent starts a fake agent that accepts a connection and then
+// never sends a response, so a host caller with no read deadline would block
+// forever. It returns the socket path.
+func startStallingAgent(t *testing.T) string {
+	t.Helper()
+	sockPath := fmt.Sprintf("/tmp/test-stall-agent-%d-%d.sock", os.Getpid(), fakeAgentSeq.Add(1))
+	os.Remove(sockPath)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		listener.Close()
+		os.Remove(sockPath)
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open without ever writing a response.
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+	return sockPath
+}
+
+// TestSendReadDeadlineUnblocksOnStall proves a malicious or wedged guest that
+// connects then never responds causes a one-shot request to return a timeout
+// error rather than hang the host caller goroutine indefinitely.
+func TestSendReadDeadlineUnblocksOnStall(t *testing.T) {
+	sockPath := startStallingAgent(t)
+	client, err := ConnectUnix(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetRequestTimeout(150 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Ping()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error from a stalled agent, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ping hung past the read deadline; host caller is not bounded")
+	}
+}
